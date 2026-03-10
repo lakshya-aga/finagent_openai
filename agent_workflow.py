@@ -108,17 +108,22 @@ def _serialize_output(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _run_code_in_kernel(code: str, timeout: int = 120, kernel_name: str = "python3") -> Dict[str, Any]:
+def _run_code_in_kernel(code: str, timeout: int = 120) -> Dict[str, Any]:
 
     """
     Execute code in a temporary Jupyter kernel and collect outputs.
     """
     logging.info(f"TOOL CALL: {locals()}")
-    km = KernelManager(kernel_name=kernel_name)
+
+    PYTHON_PATH = os.environ.get("FINAGENT_PYTHON", "/Users/lakshya/miniconda3/envs/finagentv2/bin/python")   
+    logging.info(f"_run_code_in_kernel using python_path={PYTHON_PATH}")
+    km = KernelManager()
+    km.kernel_cmd = [PYTHON_PATH, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
     km.start_kernel()
-    kc = km.client()
+
 
     try:
+        kc = km.client()
         kc.start_channels()
         kc.wait_for_ready(timeout=timeout)
 
@@ -271,7 +276,7 @@ def replace_cell(cell_index: int, cell_type: str, content: str):
 
 
 @function_tool
-def run_cell(path: str, cell_index: int, timeout: int, kernel_name: str):
+def run_cell(path: str, cell_index: int, timeout: int):
     """
     Run a cell to see the output
     """
@@ -300,7 +305,7 @@ def run_cell(path: str, cell_index: int, timeout: int, kernel_name: str):
             code_parts.append(f"# --- cell {i} ---\n{cell.source}")
 
     code_to_run = "\n\n".join(code_parts)
-    result = _run_code_in_kernel(code_to_run, timeout=timeout, kernel_name=kernel_name)
+    result = _run_code_in_kernel(code_to_run, timeout=timeout, kernel_name="/Users/lakshya/miniconda3/envs/finagentv2/bin/python")
 
     # Attach outputs only to the target cell from the last execution chunk is hard to isolate
     # without executing cell-by-cell; for reliability, run target cell separately after prelude.
@@ -312,7 +317,7 @@ def run_cell(path: str, cell_index: int, timeout: int, kernel_name: str):
     prelude_code = "\n\n".join(prelude)
     final_code = f"{prelude_code}\n\n# --- target cell {cell_index} ---\n{target_cell.source}" if prelude_code else target_cell.source
 
-    target_result = _run_code_in_kernel(final_code, timeout=timeout, kernel_name=kernel_name)
+    target_result = _run_code_in_kernel(final_code, timeout=timeout, kernel_name="/Users/lakshya/miniconda3/envs/finagentv2/bin/python")
 
     target_cell.outputs = []
     for output in target_result["outputs"]:
@@ -383,63 +388,6 @@ def install_packages(packages: List[str]):
     }
 
 
-@function_tool
-def validate_run(max_cells: int, timeout: int, kernel_name: str, prelude: str):
-    """
-    Run the full notebook
-    """
-    path = _get_latest_path()
-    logging.info(f"TOOL CALL: {locals()}")
-
-    nb = _load_notebook()
-
-    code_cells = []
-    indexed_code_cells = []
-    for i, cell in enumerate(nb.cells):
-        if cell.cell_type == "code":
-            indexed_code_cells.append((i, cell.source))
-            if len(indexed_code_cells) >= max_cells:
-                break
-
-    if not indexed_code_cells:
-        return {
-            "success": True,
-            "path": path,
-            "message": "No code cells to execute",
-            "executed_cells": 0,
-        }
-
-    chunks = []
-    if prelude:
-        chunks.append(f"# --- prelude ---\n{prelude}")
-    for idx, source in indexed_code_cells:
-        chunks.append(f"# --- cell {idx} ---\n{source}")
-
-    code = "\n\n".join(chunks)
-    result = _run_code_in_kernel(code, timeout=timeout, kernel_name=kernel_name)
-
-    first_error_cell = None
-    if not result["success"]:
-        # Approximation: execute incrementally to find first failing code cell.
-        running_chunks = [f"# --- prelude ---\n{prelude}"] if prelude else []
-        for idx, source in indexed_code_cells:
-            running_chunks.append(f"# --- cell {idx} ---\n{source}")
-            partial = _run_code_in_kernel("\n\n".join(running_chunks), timeout=timeout, kernel_name=kernel_name)
-            if not partial["success"]:
-                first_error_cell = idx
-                result = partial
-                break
-
-    return {
-        "success": result["success"],
-        "path": path,
-        "status": result["status"],
-        "executed_cells": len(indexed_code_cells),
-        "first_error_cell_index": first_error_cell,
-        "outputs": result["outputs"],
-        "error": result["error"],
-    }
-
 
 @function_tool
 def find_regex_in_notebook_code(
@@ -486,6 +434,126 @@ def find_regex_in_notebook_code(
         "num_matches": len(matches),
         "matches": matches,
     }
+
+@function_tool
+def read_notebook() -> Dict[str, Any]:
+    """
+    Read the full current notebook, returning all cells with their index, type, source, and outputs.
+    """
+    logging.info(f"TOOL CALL: read_notebook")
+    nb = _load_notebook()
+    cells = []
+    for i, cell in enumerate(nb.cells):
+        entry = {
+            "cell_index": i,
+            "cell_type": cell.cell_type,
+            "source": cell.source,
+        }
+        if cell.cell_type == "code":
+            entry["outputs"] = cell.get("outputs", [])
+        cells.append(entry)
+    return {
+        "success": True,
+        "num_cells": len(nb.cells),
+        "cells": cells,
+    }
+
+@function_tool
+def validate_run(max_cells: int, timeout: int, prelude: str):
+    """
+    Run the full current notebook in a single kernel execution.
+    """
+    PYTHON_PATH = os.environ.get("FINAGENT_PYTHON", "/Users/lakshya/miniconda3/envs/finagentv2/bin/python")
+    path = _get_current_path()
+    logging.info(f"TOOL CALL: validate_run path={path} max_cells={max_cells} timeout={timeout}")
+
+    nb = _load_notebook()
+
+    indexed_code_cells = []
+    for i, cell in enumerate(nb.cells):
+        if cell.cell_type == "code":
+            indexed_code_cells.append((i, cell.source))
+            if len(indexed_code_cells) >= max_cells:
+                break
+
+    if not indexed_code_cells:
+        return {
+            "success": True,
+            "path": str(path),
+            "message": "No code cells to execute",
+            "executed_cells": 0,
+        }
+
+    chunks = []
+    if prelude:
+        chunks.append(f"# --- prelude ---\n{prelude}")
+    for idx, source in indexed_code_cells:
+        chunks.append(f"# --- cell {idx} ---\n{source}")
+
+    result = _run_code_in_kernel(
+        "\n\n".join(chunks),
+        timeout=timeout,
+    )
+
+    # Identify the failing cell from traceback markers
+    first_error_cell = None
+    if not result["success"] and result.get("error"):
+        traceback_text = "\n".join(result["error"].get("traceback", []))
+        for idx, _ in reversed(indexed_code_cells):
+            if f"cell {idx}" in traceback_text:
+                first_error_cell = idx
+                break
+
+    return {
+        "success": result["success"],
+        "path": str(path),
+        "status": result["status"],
+        "executed_cells": len(indexed_code_cells),
+        "first_error_cell_index": first_error_cell,
+        "outputs": result["outputs"],
+        "error": result["error"],
+    }
+
+PROTECTED_PACKAGES = {"findata", "mlfinlab"}
+
+@function_tool
+def install_packages(packages: List[str]) -> Dict[str, Any]:
+    """
+    Install python packages into the current environment.
+    Raises immediately if any package in PROTECTED_PACKAGES is requested,
+    signalling the user must install those manually.
+    """
+    logging.info(f"TOOL CALL: install_packages {packages}")
+
+    if not packages:
+        return {"success": True, "message": "No packages requested", "installed": []}
+
+    protected_requested = [p for p in packages if p.lower() in PROTECTED_PACKAGES]
+    if protected_requested:
+        return {
+            "success": False,
+            "fatal": True,
+            "message": (
+                f"Cannot auto-install protected package(s): {protected_requested}. "
+                "Please install them manually in your environment "
+                "(e.g. `pip install findata mlfinlab`) and re-run the workflow."
+            ),
+            "installed": [],
+        }
+
+    cmd = [sys.executable, "-m", "pip", "install", *packages]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return {
+        "success": proc.returncode == 0,
+        "fatal": False,
+        "command": cmd,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+        "installed": packages if proc.returncode == 0 else [],
+    }
+
+
 
 file_search = FileSearchTool(
   vector_store_ids=[
@@ -535,7 +603,7 @@ mcp2 = HostedMCPTool(tool_config={
     "get_index_stats"
   ],
   "headers": {
-    "_authorization": "Bearer a30b5aa8f95c9fa548d3418051250e5e14e1122d45b0f801"
+    "Authorization": "Bearer a30b5aa8f95c9fa548d3418051250e5e14e1122d45b0f801"
   },
   "require_approval": "never",
   "server_description": "code examples information",
@@ -550,7 +618,7 @@ mcp3 = HostedMCPTool(tool_config={
     "list_all_tools"
   ],
   "headers": {
-    "_authorization": "Bearer a30b5aa8f95c9fa548d3418051250e5e14e1122d45b0f801"
+    "Authorization": "Bearer a30b5aa8f95c9fa548d3418051250e5e14e1122d45b0f801"
   },
   "require_approval": "never",
   "server_description": "mcp that provides code for fetching data - standardise input data format",
@@ -665,67 +733,91 @@ Use tools to act.""",
 
 
 validatorandfixingagent = Agent(
-  name="ValidatorAndFixingAgent",
-  instructions="""Execute the notebook generated by the previous agent, fix any errors encountered during execution using the following permitted actions: install missing packages, edit cell content, use the code interpreter, and perform documentation lookups. If errors arise that cannot be resolved due to unclear documentation or issues with internal/private libraries, pause execution and request human feedback. Always persist in addressing all errors until a stopping condition is reached (i.e., the notebook successfully executes or all resolvable errors have been addressed). Before making any conclusions or modifications, think step-by-step about the cause and nature of each error and consider all possible solutions. Only after thorough reasoning, decide on and apply the most appropriate fix, then resume execution. Repeat this process for each cell and error encountered, until notebooks run successfully or unresolved issues remain that require human intervention.
+    name="ValidatorAndFixingAgent",
+    instructions="""You are a NOTEBOOK VALIDATION AND REPAIR AGENT.
 
-Format your output as a structured step-by-step log in JSON, showing for each error:  
-- step  
-- reasoning (think step-by-step before deciding)  
-- action taken  
-- result/conclusion (after reasoning and action)
+Your job is to run the notebook, diagnose every error, and fix it — or escalate cleanly.
 
-If an error cannot be resolved without human input, include a clear message and summary of the blocking issue as the final step.
+════════════════════════════════════════
+STEP-BY-STEP LOOP  (repeat until notebook passes or you must stop)
+════════════════════════════════════════
 
-# Example
+1. READ the full notebook with `read_notebook` so you know every cell index and source.
+2. RUN the notebook with `validate_run` (use max_cells=9999, timeout=120, kernel_name="python3", prelude="").
+3. If success=True → notebook is done. Report success.
+4. If success=False → inspect `first_error_cell_index` and the `error` dict (ename, evalue, traceback).
 
-**Input:**  
-Notebook: [example notebook cells with a missing import]
+DIAGNOSIS RULES (in priority order)
+─────────────────────────────────────
+A. ModuleNotFoundError / ImportError
+   • Extract the missing module name from `error.evalue`.
+   • If the module is "findata" or "mlfinlab":
+       – STOP immediately.
+       – Return a FATAL message: tell the user to install those packages
+         manually (`pip install findata mlfinlab`) and re-run.
+       – Do NOT attempt any further fixes.
+   • Otherwise: call `install_packages([module_name])`.
+       – If install_packages returns fatal=True, STOP and relay the message.
+       – If install succeeds, go back to step 2.
 
-**Output Format:**  
-JSON array of step-by-step actions:
+B. AttributeError / NameError / TypeError / ValueError / KeyError / other logic errors
+   • Use `find_regex_in_notebook_code` to locate the exact cell(s) containing
+     the offending symbol or expression.
+   • Consult the MCP documentation tools (mcp2 / mcp3) to look up the correct
+     API — search for the class/function name, then `get_tool_doc` for details.
+   • Use `find_regex_in_notebook_code` again to narrow down documentation output
+     if it is large (search for the method or parameter name).
+   • Apply the minimal correct fix with `replace_cell`.
+   • Go back to step 2.
+
+C. Repeated failure on same cell (same error twice in a row)
+   • Try an alternative approach using documentation lookup.
+   • If still failing after a second attempt, STOP and request human feedback
+     with a clear description of the blocking issue.
+
+GENERAL RULES
+─────────────────────────────────────
+- Never invent logic. Only fix what is provably wrong based on error messages
+  and documentation.
+- Never skip cells or comment them out to hide errors.
+- Always re-run the full notebook after every fix to confirm no regressions.
+- Keep fixes minimal — change only the broken line(s).
+- Log every step internally before acting.
+
+OUTPUT FORMAT
+─────────────────────────────────────
+When finished, return a JSON array — one object per fix attempt:
 
 [
   {
-    \"step\": \"Import cell fails with ModuleNotFoundError\",
-    \"reasoning\": \"The error message indicates that the 'pandas' library is not installed. This library is standard and can be installed via pip.\",
-    \"action\": \"Install 'pandas' via pip\",
-    \"result\": \"Successfully installed 'pandas'. Re-executed import cell without error.\"
-  },
-  {
-    \"step\": \"Next cell fails with AttributeError: 'DataFrame' object has no attribute 'foo'\",
-    \"reasoning\": \"The attribute 'foo' does not exist in the DataFrame API. Checked the documentation which confirms this. The code likely has a typo or the wrong attribute is used.\",
-    \"action\": \"Edit cell to use correct DataFrame attribute\",
-    \"result\": \"Corrected attribute, cell now executes successfully.\"
+    "step": "<short description of the error>",
+    "cell_index": <int or null>,
+    "error_type": "<ename>",
+    "reasoning": "<why this error occurred and what the fix is>",
+    "action": "<what tool was called and what change was made>",
+    "result": "<outcome after re-run>"
   }
 ]
 
-(Real outputs should have as many steps as necessary to resolve all encountered errors; use [cell_description] and [error_message] placeholders for more complex or variable cases.)
-
-# Important reminders:  
-- Always think step-by-step; reasoning must precede action and conclusion/result for every step.  
-- Do not conclude before considering all reasoning and options.  
-- Persist until all notebook errors are fixed or human feedback is needed.
-
----
-
-Reminder:  
-Your task is to execute the incoming notebook, methodically fix errors through allowed actions, and log each reasoning-action-result step in detailed JSON format, requesting human help if truly blocked. Do NOT skip the chain-of-thought step before every action or conclusion.""",
-  model="gpt-5-nano",
-  tools=[
-    install_packages,
-    validate_run,
-    replace_cell,
-    find_regex_in_notebook_code
-  ],
-  model_settings=ModelSettings(
-    parallel_tool_calls=True,
-    store=True,
-    reasoning=Reasoning(
-      effort="medium"
-    )
-  )
+End with a final object:
+  { "step": "FINAL", "result": "SUCCESS" | "FATAL: <reason>" | "HUMAN_NEEDED: <reason>" }
+""",
+    model="gpt-5",
+    tools=[
+        read_notebook,           # ← new: lets agent read all cells before acting
+        validate_run,
+        install_packages,        # ← updated: guards findata/mlfinlab
+        replace_cell,
+        find_regex_in_notebook_code,
+        mcp2,
+        mcp3                   
+    ],
+    model_settings=ModelSettings(
+        parallel_tool_calls=True,
+        store=True,
+        reasoning=Reasoning(effort="medium"),
+    ),
 )
-
 
 class WorkflowInput(BaseModel):
   input_as_text: str
@@ -811,7 +903,7 @@ async def run_workflow(workflow_input: WorkflowInput):
         "__trace_source__": "agent-builder",
         "workflow_id": "wf_69a81a9aedf48190bc2aaab7923d4ae10e4febf1cb72186f",
       }),
-    #   max_turns=20
+      max_turns=20
     )
 
     conversation_history.extend([item.to_input_item() for item in validatorandfixingagent_result_temp.new_items])
