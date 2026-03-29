@@ -17,11 +17,7 @@ async def main():
     """
 
     complex_prompt = """
-    Build a research notebook that uses our internal data and ML libraries to study an event-based directional
-    prediction pipeline on SPY. Fetch the data, construct dollar bars, detect events with a CUSUM filter, label 
-    them with the triple barrier method, create a compact but sensible feature set, train a baseline classifier,
-    and evaluate the results using time-based train/test splits. Show intermediate outputs and keep the notebook
-    readable and modular.
+    Implement the key findings from the paper on when do stop losses stop losses and try to reproduce the results.
     """
 
     result = await run_workflow(

@@ -337,7 +337,11 @@
           removeTyping();
           _statusBubble?.remove();
           _statusBubble = null;
-          if (event.notebook_path) showNotebookResult(event.notebook_path, event.mode);
+          if (event.mode === "question") {
+            appendMessage("assistant", event.summary || "Done.");
+          } else if (event.notebook_path) {
+            showNotebookResult(event.notebook_path, event.mode);
+          }
         } else if (event.type === "error") {
           removeTyping();
           _statusBubble?.remove();

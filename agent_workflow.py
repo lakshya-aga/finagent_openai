@@ -3,6 +3,7 @@
 from agents import function_tool, FileSearchTool, HostedMCPTool, Agent, ModelSettings, TResponseInputItem, Runner, RunConfig, trace
 from agents.mcp import MCPServerSse, MCPServerSseParams, MCPServerManager, MCPServerStreamableHttp, MCPServerStreamableHttpParams
 from openai.types.shared.reasoning import Reasoning
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -682,8 +683,10 @@ planner = Agent(
 Your job is to convert research ideas into a COMPACT, EXECUTABLE DAG specification
 using the available internal library for transformations and for fetching data. These can be queried using the MCPs.
 PRIMARY GOAL
-- Produce a SMALL DAG (typically 6-10 nodes; depending on the complexity of the task) that delivers the users request.
+- Produce a SMALL DAG (depending on the complexity of the task) that delivers the users request.
 - If the request is a trading strategy, it should produce asset weight and returns in the end
+- If the request is research centric: it should try different parameters and show how target metrics change with the parameters.
+
 CRITICAL CONSTRAINTS
 - You DO NOT write code.
 - You DO NOT assume file access.
@@ -956,6 +959,54 @@ End with: {"op": "FINAL", "result": "SUCCESS" | "FATAL: <reason>"}
 )
 
 
+question_agent = Agent(
+    name="QuestionAgent",
+    instructions="""You are a helpful quantitative research assistant with deep knowledge of
+financial mathematics, statistics, and Python-based research workflows.
+
+You may be given the content of an existing research notebook as context.
+Answer the user's question clearly and concisely. You can:
+- Explain methodology, code, or results
+- Suggest improvements or flag issues
+- Answer general quant finance questions
+
+Do NOT modify the notebook. Do NOT call any tools. Just answer.
+""",
+    model="gpt-5",
+    model_settings=ModelSettings(store=True),
+)
+
+
+async def _classify_intent(message: str, has_notebook: bool) -> str:
+    """Return 'question', 'edit', or 'new' based on the user message."""
+    client = AsyncOpenAI()
+    resp = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Classify the user message as exactly one of:\n"
+                    "- question: asking for explanation, analysis, clarification, or general info\n"
+                    "- edit: requesting a change, addition, or fix to an existing notebook\n"
+                    "- new: requesting a brand-new research notebook or strategy\n\n"
+                    "Reply with only the single word."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Has existing notebook: {has_notebook}\nMessage: {message}",
+            },
+        ],
+        max_tokens=5,
+        temperature=0,
+    )
+    intent = resp.choices[0].message.content.strip().lower()
+    if intent not in ("question", "edit", "new"):
+        intent = "edit" if has_notebook else "new"
+    return intent
+
+
 class WorkflowInput(BaseModel):
   input_as_text: str
 
@@ -993,8 +1044,44 @@ async def run_workflow(
     workflow = workflow_input.model_dump()
     conversation_history: list[TResponseInputItem] = list(prior_history or [])
 
+    # ── CLASSIFY INTENT ──────────────────────────────────────────────────────
+    intent = await _classify_intent(workflow["input_as_text"], bool(existing_notebook_path))
+    logging.info(f"run_workflow intent={intent}")
+
+    # ── QUESTION MODE ────────────────────────────────────────────────────────
+    if intent == "question":
+      await _emit("Thinking...")
+      nb_context = ""
+      if existing_notebook_path:
+        try:
+          nb = nbformat.read(open(existing_notebook_path), as_version=4)
+          lines = []
+          for i, cell in enumerate(nb.cells):
+            lines.append(f"[Cell {i} | {cell.cell_type}]\n{cell.source}")
+          nb_context = "\n\n---\n\n".join(lines)
+        except Exception:
+          pass
+
+      q_input = workflow["input_as_text"]
+      if nb_context:
+        q_input = f"NOTEBOOK CONTEXT:\n{nb_context}\n\nQUESTION: {q_input}"
+
+      q_result = await Runner.run(
+        question_agent,
+        input=[
+          *conversation_history,
+          {"role": "user", "content": [{"type": "input_text", "text": q_input}]},
+        ],
+        run_config=RunConfig(),
+      )
+      return {
+        "output_text": q_result.final_output_as(str),
+        "notebook_path": existing_notebook_path,
+        "mode": "question",
+      }
+
     # ── EDIT MODE ────────────────────────────────────────────────────────────
-    if existing_notebook_path:
+    if intent == "edit" and existing_notebook_path:
       # Read the existing notebook for planner context
       nb = nbformat.read(open(existing_notebook_path), as_version=4)
       nb_summary_lines = []

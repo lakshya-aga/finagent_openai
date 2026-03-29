@@ -67,7 +67,7 @@ async def chat(req: ChatRequest):
                 "type": "done",
                 "mode": result.get("mode", "new"),
                 "notebook_path": session["notebook_path"],
-                "summary": result.get("output_text", ""),
+                "summary": result.get("output_text", ""),  # used by question mode
             })
         except Exception as e:
             await progress_queue.put({"type": "error", "message": str(e)})
