@@ -1,4 +1,6 @@
 import asyncio
+from dotenv import load_dotenv
+load_dotenv()
 from agent_workflow import run_workflow, WorkflowInput
 
 async def main():

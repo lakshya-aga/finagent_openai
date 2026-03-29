@@ -1,6 +1,7 @@
 
 
 from agents import function_tool, FileSearchTool, HostedMCPTool, Agent, ModelSettings, TResponseInputItem, Runner, RunConfig, trace
+from agents.mcp import MCPServerSse, MCPServerSseParams, MCPServerManager, MCPServerStreamableHttp, MCPServerStreamableHttpParams
 from openai.types.shared.reasoning import Reasoning
 from pydantic import BaseModel
 from pathlib import Path
@@ -115,10 +116,8 @@ def _run_code_in_kernel(code: str, timeout: int = 120) -> Dict[str, Any]:
     """
     logging.info(f"TOOL CALL: {locals()}")
 
-    PYTHON_PATH = os.environ.get("FINAGENT_PYTHON", "/Users/lakshya/miniconda3/envs/finagentv2/bin/python")   
-    logging.info(f"_run_code_in_kernel using python_path={PYTHON_PATH}")
-    km = KernelManager()
-    km.kernel_cmd = [PYTHON_PATH, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
+    logging.info(f"_run_code_in_kernel using kernel_name=finagent-python")
+    km = KernelManager(kernel_name="finagent-python")
     km.start_kernel()
 
 
@@ -207,9 +206,9 @@ def create_notebook():
     # print("NB initialised")
 
     nb.metadata["kernelspec"] = {
-        "display_name": "Python 3",
+        "display_name": "FinAgent Python",
         "language": "python",
-        "name": "python3",
+        "name": "finagent-python",
     }
     nb.metadata["language_info"] = {
         "name": "python",
@@ -273,6 +272,36 @@ def replace_cell(cell_index: int, cell_type: str, content: str):
         "cell_type": cell_type,
         "num_cells": len(nb.cells),
     }
+
+
+@function_tool
+def insert_cell(cell_index: int, cell_type: str, content: str):
+    """
+    Insert a new cell at the given index, shifting existing cells down.
+    """
+    path = _get_current_path()
+    logging.info(f"TOOL CALL: {locals()}")
+    nb = _load_notebook()
+    if cell_index < 0 or cell_index > len(nb.cells):
+        return {"success": False, "error": f"cell_index {cell_index} out of range (0–{len(nb.cells)})"}
+    nb.cells.insert(cell_index, _make_cell(cell_type, content))
+    _save_notebook(nb, path)
+    return {"success": True, "cell_index": cell_index, "num_cells": len(nb.cells)}
+
+
+@function_tool
+def delete_cell(cell_index: int):
+    """
+    Delete the cell at the given index, shifting subsequent cells up.
+    """
+    path = _get_current_path()
+    logging.info(f"TOOL CALL: {locals()}")
+    nb = _load_notebook()
+    if cell_index < 0 or cell_index >= len(nb.cells):
+        return {"success": False, "error": f"cell_index {cell_index} out of range (0–{len(nb.cells)-1})"}
+    del nb.cells[cell_index]
+    _save_notebook(nb, path)
+    return {"success": True, "deleted_index": cell_index, "num_cells": len(nb.cells)}
 
 
 @function_tool
@@ -461,9 +490,9 @@ def read_notebook() -> Dict[str, Any]:
 @function_tool
 def validate_run(max_cells: int, timeout: int, prelude: str):
     """
-    Run the full current notebook in a single kernel execution.
+    Run the full current notebook cell-by-cell in a single persistent kernel,
+    write outputs back to each cell, and save the notebook to disk.
     """
-    PYTHON_PATH = os.environ.get("FINAGENT_PYTHON", "/Users/lakshya/miniconda3/envs/finagentv2/bin/python")
     path = _get_current_path()
     logging.info(f"TOOL CALL: validate_run path={path} max_cells={max_cells} timeout={timeout}")
 
@@ -472,7 +501,7 @@ def validate_run(max_cells: int, timeout: int, prelude: str):
     indexed_code_cells = []
     for i, cell in enumerate(nb.cells):
         if cell.cell_type == "code":
-            indexed_code_cells.append((i, cell.source))
+            indexed_code_cells.append((i, cell))
             if len(indexed_code_cells) >= max_cells:
                 break
 
@@ -484,34 +513,97 @@ def validate_run(max_cells: int, timeout: int, prelude: str):
             "executed_cells": 0,
         }
 
-    chunks = []
-    if prelude:
-        chunks.append(f"# --- prelude ---\n{prelude}")
-    for idx, source in indexed_code_cells:
-        chunks.append(f"# --- cell {idx} ---\n{source}")
-
-    result = _run_code_in_kernel(
-        "\n\n".join(chunks),
-        timeout=timeout,
-    )
-
-    # Identify the failing cell from traceback markers
+    km = KernelManager(kernel_name="finagent-python")
+    km.start_kernel()
     first_error_cell = None
-    if not result["success"] and result.get("error"):
-        traceback_text = "\n".join(result["error"].get("traceback", []))
-        for idx, _ in reversed(indexed_code_cells):
-            if f"cell {idx}" in traceback_text:
-                first_error_cell = idx
+    error_output = None
+    execution_count = 0
+
+    try:
+        kc = km.client()
+        kc.start_channels()
+        kc.wait_for_ready(timeout=timeout)
+
+        # Run prelude (if any) without attributing outputs to a cell
+        if prelude:
+            kc.execute(prelude)
+
+        for cell_idx, cell in indexed_code_cells:
+            if not cell.source.strip():
+                cell.outputs = []
+                continue
+
+            execution_count += 1
+            msg_id = kc.execute(cell.source)
+            cell_outputs = []
+            deadline = time.time() + timeout
+
+            while time.time() < deadline:
+                remaining = max(0.1, deadline - time.time())
+                try:
+                    msg = kc.get_iopub_msg(timeout=remaining)
+                except queue.Empty:
+                    break
+                if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                    continue
+                if msg.get("msg_type") == "status" and msg.get("content", {}).get("execution_state") == "idle":
+                    break
+                out = _serialize_output(msg)
+                if out is not None:
+                    cell_outputs.append(out)
+
+            # Write outputs back to the cell
+            cell.outputs = []
+            cell["execution_count"] = execution_count
+            for out in cell_outputs:
+                output_type = out["output_type"]
+                if output_type == "stream":
+                    cell.outputs.append(nbformat.v4.new_output(
+                        output_type="stream", name=out.get("name", "stdout"), text=out.get("text", "")
+                    ))
+                elif output_type in {"display_data", "execute_result"}:
+                    cell.outputs.append(nbformat.v4.new_output(
+                        output_type=output_type,
+                        data=out.get("data", {}),
+                        metadata=out.get("metadata", {}),
+                        **( {"execution_count": execution_count} if output_type == "execute_result" else {} )
+                    ))
+                elif output_type == "error":
+                    cell.outputs.append(nbformat.v4.new_output(
+                        output_type="error",
+                        ename=out.get("ename", ""),
+                        evalue=out.get("evalue", ""),
+                        traceback=out.get("traceback", []),
+                    ))
+
+            # Stop on first error
+            error_in_cell = next((o for o in cell_outputs if o["output_type"] == "error"), None)
+            if error_in_cell:
+                first_error_cell = cell_idx
+                error_output = error_in_cell
                 break
 
+    finally:
+        try:
+            kc.stop_channels()
+        except Exception:
+            pass
+        try:
+            km.shutdown_kernel(now=True)
+        except Exception:
+            pass
+
+    _save_notebook(nb, path)
+
+    success = error_output is None
     return {
-        "success": result["success"],
+        "success": success,
         "path": str(path),
-        "status": result["status"],
+        "status": "ok" if success else "error",
         "executed_cells": len(indexed_code_cells),
         "first_error_cell_index": first_error_cell,
-        "outputs": result["outputs"],
-        "error": result["error"],
+        "outputs": [],
+        "error": error_output,
     }
 
 PROTECTED_PACKAGES = {"findata", "mlfinlab"}
@@ -560,70 +652,30 @@ file_search = FileSearchTool(
     "vs_69a81b0197a481919e14c2d66197af7d"
   ]
 )
-mcp = HostedMCPTool(tool_config={
-  "type": "mcp",
-  "server_label": "fruit_thrower",
-  "allowed_tools": [
-    "search_code",
-    "get_unit_source",
-    "list_modules",
-    "get_module_summary",
-    "index_repository",
-    "get_index_stats"
-  ],
-  "headers": {
-    "Authorization": "Bearer a30b5aa8f95c9fa548d3418051250e5e14e1122d45b0f801"
-  },
-  "require_approval": "never",
-  "server_url": "https://antiques-viewpicture-cashiers-chargers.trycloudflare.com/mcp/"
-})
-mcp1 = HostedMCPTool(tool_config={
-  "type": "mcp",
-  "server_label": "data_mcp",
-  "allowed_tools": [
-    "search_tools",
-    "get_tool_doc",
-    "list_all_tools"
-  ],
-  "headers": {
-    "Authorization": "Bearer a30b5aa8f95c9fa548d3418051250e5e14e1122d45b0f801"
-  },
-  "require_approval": "never",
-  "server_url": "https://antiques-viewpicture-cashiers-chargers.trycloudflare.com/data-mcp/"
-})
-mcp2 = HostedMCPTool(tool_config={
-  "type": "mcp",
-  "server_label": "fruit_thrower",
-  "allowed_tools": [
-    "search_code",
-    "get_unit_source",
-    "list_modules",
-    "get_module_summary",
-    "index_repository",
-    "get_index_stats"
-  ],
-  "headers": {
-    "Authorization": "Bearer a30b5aa8f95c9fa548d3418051250e5e14e1122d45b0f801"
-  },
-  "require_approval": "never",
-  "server_description": "code examples information",
-  "server_url": "https://antiques-viewpicture-cashiers-chargers.trycloudflare.com/mcp/"
-})
-mcp3 = HostedMCPTool(tool_config={
-  "type": "mcp",
-  "server_label": "data_mcp",
-  "allowed_tools": [
-    "search_tools",
-    "get_tool_doc",
-    "list_all_tools"
-  ],
-  "headers": {
-    "Authorization": "Bearer a30b5aa8f95c9fa548d3418051250e5e14e1122d45b0f801"
-  },
-  "require_approval": "never",
-  "server_description": "mcp that provides code for fetching data - standardise input data format",
-  "server_url": "https://antiques-viewpicture-cashiers-chargers.trycloudflare.com/data-mcp/"
-})
+mcp = MCPServerStreamableHttp(
+  params=MCPServerStreamableHttpParams(url="http://localhost:8090/mcp/"),
+  name="fruit_thrower",
+  tool_filter={"allowed_tool_names": ["search_code", "get_unit_source", "list_modules", "get_module_summary", "index_repository", "get_index_stats", "generate_function"]},
+  require_approval="never",
+)
+mcp1 = MCPServerSse(
+  params=MCPServerSseParams(url="http://localhost:8000/sse"),
+  name="data_mcp",
+  tool_filter=["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"],
+  require_approval="never",
+)
+mcp2 = MCPServerStreamableHttp(
+  params=MCPServerStreamableHttpParams(url="http://localhost:8090/mcp/"),
+  name="fruit_thrower",
+  tool_filter={"allowed_tool_names": ["search_code", "get_unit_source", "list_modules", "get_module_summary", "index_repository", "get_index_stats", "generate_function"]},
+  require_approval="never",
+)
+mcp3 = MCPServerSse(
+  params=MCPServerSseParams(url="http://localhost:8000/sse"),
+  name="data_mcp",
+  tool_filter=["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"],
+  require_approval="never",
+)
 planner = Agent(
   name="Planner",
   instructions="""You are a quant research workflow planner.
@@ -672,9 +724,8 @@ PLANNING HEURISTICS
   model="gpt-5",
   tools=[
     file_search,
-    mcp,
-    mcp1
   ],
+  mcp_servers=[mcp, mcp1],
   model_settings=ModelSettings(
     store=True,
     reasoning=Reasoning(
@@ -718,9 +769,8 @@ Use tools to act.""",
     create_notebook,
     # run_cell,
     file_search,
-    mcp2,
-    mcp3
   ],
+  mcp_servers=[mcp2, mcp3],
   model_settings=ModelSettings(
     parallel_tool_calls=True,
     store=True,
@@ -809,9 +859,8 @@ End with a final object:
         install_packages,        # ← updated: guards findata/mlfinlab
         replace_cell,
         find_regex_in_notebook_code,
-        mcp2,
-        mcp3                   
     ],
+    mcp_servers=[mcp2, mcp3],
     model_settings=ModelSettings(
         parallel_tool_calls=True,
         store=True,
@@ -819,96 +868,250 @@ End with a final object:
     ),
 )
 
+edit_planner = Agent(
+    name="EditPlanner",
+    instructions="""You are a NOTEBOOK EDIT PLANNER.
+
+You receive the content of an existing research notebook and a user request for changes.
+Your job is to produce a MINIMAL diff spec — only touch cells that actually need to change.
+
+OUTPUT FORMAT
+─────────────────────────────────────
+Return ONLY a JSON object (no markdown fences):
+
+{
+  "mode": "edit",
+  "rationale": "<brief explanation of what needs to change and why>",
+  "operations": [
+    {"op": "replace",      "cell_index": <int>, "description": "<what this cell should do after the change>"},
+    {"op": "insert_after", "cell_index": <int>, "description": "<what the new cell should do>"},
+    {"op": "delete",       "cell_index": <int>, "reason":      "<why this cell is removed>"},
+    {"op": "append",                            "description": "<what the new cell should do>"}
+  ]
+}
+
+If the request requires a completely new notebook (fundamentally different topic/approach), return:
+{"mode": "new", "rationale": "<why a fresh start is better>"}
+
+RULES
+─────────────────────────────────────
+- Be minimal. A 2-cell change should have 2 operations, not 10.
+- Reference cell indices exactly as shown in the notebook content.
+- "replace"      — rewrite an existing cell in place.
+- "insert_after" — insert a new cell immediately after cell_index.
+- "delete"       — remove a cell entirely.
+- "append"       — add a new cell at the very end.
+- Preserve variable names and data-flow unless the user explicitly asks to rename things.
+- Do NOT write any code yourself — descriptions only. The edit orchestration agent writes the code.
+""",
+    model="gpt-5",
+    model_settings=ModelSettings(store=True, reasoning=Reasoning(effort="low")),
+)
+
+
+edit_orchestration_agent = Agent(
+    name="EditOrchestrationAgent",
+    instructions="""You are a NOTEBOOK EDIT AGENT.
+
+You receive a diff spec (a JSON operations list) and must apply it to the current notebook.
+
+════════════════════════════════════════
+STEP-BY-STEP
+════════════════════════════════════════
+1. Call read_notebook to see current cell indices and content.
+2. Sort and apply operations in this order to avoid index-shifting bugs:
+   a. DELETE operations  — apply in DESCENDING cell_index order.
+   b. REPLACE operations — apply in DESCENDING cell_index order.
+   c. INSERT_AFTER ops   — apply in DESCENDING cell_index order (use insert_cell(cell_index+1, ...)).
+   d. APPEND operations  — apply last, in listed order.
+3. For every cell you write, use MCP tools to look up correct library APIs.
+4. Ensure the notebook remains internally consistent after all operations
+   (imports still present, variable names coherent, data flows intact).
+
+TOOLS
+─────────────────────────────────────
+- read_notebook       — inspect current cells
+- replace_cell        — rewrite a cell at an existing index
+- insert_cell         — insert a new cell at a given index
+- delete_cell         — delete a cell at a given index
+- add_cell            — append a cell at the end
+- MCP tools (fruit_thrower, data_mcp) — look up internal library APIs
+
+OUTPUT FORMAT
+─────────────────────────────────────
+Return a JSON array of applied operations:
+[
+  {"op": "<op>", "cell_index": <int or null>, "action": "<what was done>", "result": "ok" | "<error>"}
+]
+End with: {"op": "FINAL", "result": "SUCCESS" | "FATAL: <reason>"}
+""",
+    model="gpt-5",
+    tools=[read_notebook, replace_cell, insert_cell, delete_cell, add_cell],
+    mcp_servers=[mcp2, mcp3],
+    model_settings=ModelSettings(
+        parallel_tool_calls=True,
+        store=True,
+        reasoning=Reasoning(effort="low"),
+    ),
+)
+
+
 class WorkflowInput(BaseModel):
   input_as_text: str
 
 
 # Main code entrypoint
-async def run_workflow(workflow_input: WorkflowInput):
+async def run_workflow(
+    workflow_input: WorkflowInput,
+    existing_notebook_path: Optional[str] = None,
+    prior_history: Optional[list] = None,
+    progress_cb=None,
+):
+  async def _emit(msg: str):
+    if progress_cb:
+      await progress_cb({"type": "status", "message": msg})
 
-  logging.info(f"TOOL CALL: {locals()}")
+  logging.info(f"run_workflow mode={'edit' if existing_notebook_path else 'new'}")
+
+  def _fresh_fruit_thrower():
+    return MCPServerStreamableHttp(
+      params=MCPServerStreamableHttpParams(url="http://localhost:8090/mcp/"),
+      name="fruit_thrower",
+      tool_filter={"allowed_tool_names": ["search_code", "get_unit_source", "list_modules", "get_module_summary", "index_repository", "get_index_stats", "generate_function"]},
+      require_approval="never",
+    )
+
+  def _fresh_data_mcp():
+    return MCPServerSse(
+      params=MCPServerSseParams(url="http://localhost:8000/sse"),
+      name="data_mcp",
+      tool_filter={"allowed_tool_names": ["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"]},
+      require_approval="never",
+    )
+
   with trace("Finagent"):
-    state = {
-
-    }
     workflow = workflow_input.model_dump()
-    conversation_history: list[TResponseInputItem] = [
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "input_text",
-            "text": workflow["input_as_text"]
-          }
-        ]
-      }
-    ]
-    planner_result_temp = await Runner.run(
-      planner,
-      input=[
-        *conversation_history,
-        {
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": f"Question: {workflow['input_as_text']}"
-            }
-          ]
-        }
-      ],
-      run_config=RunConfig(trace_metadata={
-        "__trace_source__": "agent-builder",
-        "workflow_id": "wf_69a81a9aedf48190bc2aaab7923d4ae10e4febf1cb72186f"
-      })
-    )
+    conversation_history: list[TResponseInputItem] = list(prior_history or [])
 
+    # ── EDIT MODE ────────────────────────────────────────────────────────────
+    if existing_notebook_path:
+      # Read the existing notebook for planner context
+      nb = nbformat.read(open(existing_notebook_path), as_version=4)
+      nb_summary_lines = []
+      for i, cell in enumerate(nb.cells):
+        snippet = cell.source[:200].replace("\n", " ")
+        nb_summary_lines.append(f"  [{i}] ({cell.cell_type}) {snippet}")
+      nb_summary = "\n".join(nb_summary_lines)
+
+      await _emit("Planning changes...")
+      edit_planner_input = (
+        f"EXISTING NOTEBOOK ({existing_notebook_path}):\n{nb_summary}\n\n"
+        f"USER REQUEST: {workflow['input_as_text']}"
+      )
+      edit_planner_result_temp = await Runner.run(
+        edit_planner,
+        input=[{"role": "user", "content": [{"type": "input_text", "text": edit_planner_input}]}],
+        run_config=RunConfig(),
+      )
+      diff_spec_raw = edit_planner_result_temp.final_output_as(str).strip()
+
+      # Parse — if mode is "new", fall through to new-notebook flow below
+      try:
+        diff_spec = json.loads(diff_spec_raw)
+      except Exception:
+        diff_spec = {"mode": "new", "rationale": "Could not parse diff spec"}
+
+      if diff_spec.get("mode") == "new":
+        existing_notebook_path = None   # fall through to new-notebook flow
+      else:
+        await _emit("Applying edits...")
+        async with MCPServerManager([_fresh_fruit_thrower(), _fresh_data_mcp()]) as _edit_mcp_mgr:
+          _edit_orch = edit_orchestration_agent.clone(mcp_servers=_edit_mcp_mgr.active_servers)
+          edit_orch_result_temp = await Runner.run(
+            _edit_orch,
+            input=[
+              *conversation_history,
+              {"role": "user", "content": [{"type": "input_text",
+                "text": f"Apply this diff spec to the current notebook:\n{diff_spec_raw}"}]},
+            ],
+            run_config=RunConfig(),
+            max_turns=40,
+          )
+        conversation_history.extend([item.to_input_item() for item in edit_orch_result_temp.new_items])
+
+        await _emit("Validating notebook...")
+        async with MCPServerManager([_fresh_fruit_thrower(), _fresh_data_mcp()]) as _val_mcp_mgr:
+          _val = validatorandfixingagent.clone(mcp_servers=_val_mcp_mgr.active_servers)
+          val_result_temp = await Runner.run(
+            _val,
+            input=conversation_history,
+            run_config=RunConfig(),
+            max_turns=20,
+          )
+        return {
+          "output_text": val_result_temp.final_output_as(str),
+          "notebook_path": existing_notebook_path,
+          "mode": "edit",
+        }
+
+    # ── NEW NOTEBOOK MODE ────────────────────────────────────────────────────
+    conversation_history.append({
+      "role": "user",
+      "content": [{"type": "input_text", "text": workflow["input_as_text"]}],
+    })
+
+    await _emit("Planning research...")
+    async with MCPServerManager([_fresh_fruit_thrower(), _fresh_data_mcp()]) as _planner_mcp_mgr:
+      _planner = planner.clone(mcp_servers=_planner_mcp_mgr.active_servers)
+      planner_result_temp = await Runner.run(
+        _planner,
+        input=[
+          *conversation_history,
+          {"role": "user", "content": [{"type": "input_text",
+            "text": f"Question: {workflow['input_as_text']}"}]},
+        ],
+        run_config=RunConfig(trace_metadata={
+          "__trace_source__": "agent-builder",
+          "workflow_id": "wf_69a81a9aedf48190bc2aaab7923d4ae10e4febf1cb72186f"
+        })
+      )
     conversation_history.extend([item.to_input_item() for item in planner_result_temp.new_items])
+    planner_result = {"output_text": planner_result_temp.final_output_as(str)}
 
-    planner_result = {
-      "output_text": planner_result_temp.final_output_as(str)
-    }
-    orchestration_agent_result_temp = await Runner.run(
-      orchestration_agent,
-      input=[
-        *conversation_history,
-        {
-          "role": "user",
-          "content": [
-            {
-              "type": "input_text",
-              "text": f"Question: {workflow['input_as_text'], planner_result}"
-            }
-          ]
-        }
-      ],
-      run_config=RunConfig(trace_metadata={
-        "__trace_source__": "agent-builder",
-        "workflow_id": "wf_69a81a9aedf48190bc2aaab7923d4ae10e4febf1cb72186f",
-      }),
-      max_turns=40
-    )
-
+    await _emit("Building notebook...")
+    async with MCPServerManager([_fresh_fruit_thrower(), _fresh_data_mcp()]) as _orch_mcp_mgr:
+      _orchestration_agent = orchestration_agent.clone(mcp_servers=_orch_mcp_mgr.active_servers)
+      orchestration_agent_result_temp = await Runner.run(
+        _orchestration_agent,
+        input=[
+          *conversation_history,
+          {"role": "user", "content": [{"type": "input_text",
+            "text": f"Question: {workflow['input_as_text'], planner_result}"}]},
+        ],
+        run_config=RunConfig(trace_metadata={
+          "__trace_source__": "agent-builder",
+          "workflow_id": "wf_69a81a9aedf48190bc2aaab7923d4ae10e4febf1cb72186f",
+        }),
+        max_turns=40
+      )
     conversation_history.extend([item.to_input_item() for item in orchestration_agent_result_temp.new_items])
 
-    orchestration_agent_result = {
-      "output_text": orchestration_agent_result_temp.final_output_as(str)
-    }
-    validatorandfixingagent_result_temp = await Runner.run(
-      validatorandfixingagent,
-      input=[
-        *conversation_history
-      ],
-      run_config=RunConfig(trace_metadata={
-        "__trace_source__": "agent-builder",
-        "workflow_id": "wf_69a81a9aedf48190bc2aaab7923d4ae10e4febf1cb72186f",
-      }),
-      max_turns=20
-    )
-
+    await _emit("Validating and fixing...")
+    async with MCPServerManager([_fresh_fruit_thrower(), _fresh_data_mcp()]) as _val_mcp_mgr:
+      _validatorandfixingagent = validatorandfixingagent.clone(mcp_servers=_val_mcp_mgr.active_servers)
+      validatorandfixingagent_result_temp = await Runner.run(
+        _validatorandfixingagent,
+        input=conversation_history,
+        run_config=RunConfig(trace_metadata={
+          "__trace_source__": "agent-builder",
+          "workflow_id": "wf_69a81a9aedf48190bc2aaab7923d4ae10e4febf1cb72186f",
+        }),
+        max_turns=20
+      )
     conversation_history.extend([item.to_input_item() for item in validatorandfixingagent_result_temp.new_items])
 
-    validatorandfixingagent_result = {
-      "output_text": validatorandfixingagent_result_temp.final_output_as(str)
+    return {
+      "output_text": validatorandfixingagent_result_temp.final_output_as(str),
+      "notebook_path": str(_get_current_path()),
+      "mode": "new",
     }
-    return validatorandfixingagent_result
