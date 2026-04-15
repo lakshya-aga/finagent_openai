@@ -1,0 +1,26 @@
+# Runtime deps for finagent_openai + its app.py FastAPI server.
+#
+# The Agents SDK (`openai-agents`) is the `agents` module imported across the code.
+# `fin-kit` and `data-mcp` are installed because the generated notebooks import them
+# inside the Jupyter kernel.
+
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.32,<1.0
+openai>=1.58,<2.0
+openai-agents>=0.2,<1.0
+pydantic>=2.9,<3.0
+python-dotenv>=1.0,<2.0
+nbformat>=5.10,<6.0
+jupyter-client>=8.6,<9.0
+ipykernel>=6.29,<7.0
+
+# Core data science libs used by generated notebooks. Extend as needed.
+pandas>=2.2
+numpy>=1.26
+matplotlib>=3.8
+scipy>=1.12
+yfinance>=0.2.40
+
+# Internal libraries the generated notebooks call.
+git+https://github.com/lakshya-aga/fin-kit.git
+git+https://github.com/lakshya-aga/data-mcp.git

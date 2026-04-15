@@ -1,0 +1,13 @@
+.git
+.gitignore
+.vscode
+__pycache__
+*.pyc
+*.pyo
+.env
+.DS_Store
+finagent.log
+outputs/*.ipynb
+!outputs/.keep
+momentum_sp500.ipynb
+*.pdf

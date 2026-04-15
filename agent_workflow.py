@@ -27,6 +27,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
+# MCP endpoints are overridable via env vars so the process runs cleanly both
+# on a laptop (defaults: localhost) and inside docker-compose (service DNS).
+FRUIT_THROWER_URL = os.environ.get("FRUIT_THROWER_URL", "http://localhost:8090/mcp/")
+DATA_MCP_URL = os.environ.get("DATA_MCP_URL", "http://localhost:8000/sse")
+
 def _get_latest_path():
     i = 1
 
@@ -654,25 +659,25 @@ file_search = FileSearchTool(
   ]
 )
 mcp = MCPServerStreamableHttp(
-  params=MCPServerStreamableHttpParams(url="http://localhost:8090/mcp/"),
+  params=MCPServerStreamableHttpParams(url=FRUIT_THROWER_URL),
   name="fruit_thrower",
   tool_filter={"allowed_tool_names": ["search_code", "get_unit_source", "list_modules", "get_module_summary", "index_repository", "get_index_stats", "generate_function"]},
   require_approval="never",
 )
 mcp1 = MCPServerSse(
-  params=MCPServerSseParams(url="http://localhost:8000/sse"),
+  params=MCPServerSseParams(url=DATA_MCP_URL),
   name="data_mcp",
   tool_filter=["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"],
   require_approval="never",
 )
 mcp2 = MCPServerStreamableHttp(
-  params=MCPServerStreamableHttpParams(url="http://localhost:8090/mcp/"),
+  params=MCPServerStreamableHttpParams(url=FRUIT_THROWER_URL),
   name="fruit_thrower",
   tool_filter={"allowed_tool_names": ["search_code", "get_unit_source", "list_modules", "get_module_summary", "index_repository", "get_index_stats", "generate_function"]},
   require_approval="never",
 )
 mcp3 = MCPServerSse(
-  params=MCPServerSseParams(url="http://localhost:8000/sse"),
+  params=MCPServerSseParams(url=DATA_MCP_URL),
   name="data_mcp",
   tool_filter=["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"],
   require_approval="never",
@@ -1026,7 +1031,7 @@ async def run_workflow(
 
   def _fresh_fruit_thrower():
     return MCPServerStreamableHttp(
-      params=MCPServerStreamableHttpParams(url="http://localhost:8090/mcp/"),
+      params=MCPServerStreamableHttpParams(url=FRUIT_THROWER_URL),
       name="fruit_thrower",
       tool_filter={"allowed_tool_names": ["search_code", "get_unit_source", "list_modules", "get_module_summary", "index_repository", "get_index_stats", "generate_function"]},
       require_approval="never",
@@ -1034,7 +1039,7 @@ async def run_workflow(
 
   def _fresh_data_mcp():
     return MCPServerSse(
-      params=MCPServerSseParams(url="http://localhost:8000/sse"),
+      params=MCPServerSseParams(url=DATA_MCP_URL),
       name="data_mcp",
       tool_filter={"allowed_tool_names": ["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"]},
       require_approval="never",

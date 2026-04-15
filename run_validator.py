@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 from dotenv import load_dotenv
 load_dotenv()
@@ -6,15 +7,19 @@ from agent_workflow import validatorandfixingagent, RunConfig
 from agents import Runner
 from agents.mcp import MCPServerSse, MCPServerSseParams, MCPServerManager, MCPServerStreamableHttp, MCPServerStreamableHttpParams
 
+FRUIT_THROWER_URL = os.environ.get("FRUIT_THROWER_URL", "http://localhost:8090/mcp/")
+DATA_MCP_URL = os.environ.get("DATA_MCP_URL", "http://localhost:8000/sse")
+
+
 async def main(notebook_path: str):
     _fruit = MCPServerStreamableHttp(
-        params=MCPServerStreamableHttpParams(url="http://localhost:8090/mcp/"),
+        params=MCPServerStreamableHttpParams(url=FRUIT_THROWER_URL),
         name="fruit_thrower",
         tool_filter={"allowed_tool_names": ["search_code", "get_unit_source", "list_modules", "get_module_summary", "index_repository", "get_index_stats", "generate_function"]},
         require_approval="never",
     )
     _data = MCPServerSse(
-        params=MCPServerSseParams(url="http://localhost:8000/sse"),
+        params=MCPServerSseParams(url=DATA_MCP_URL),
         name="data_mcp",
         tool_filter={"allowed_tool_names": ["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"]},
         require_approval="never",
