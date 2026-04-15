@@ -6,11 +6,14 @@
 
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.32,<1.0
-openai>=1.58,<2.0
+# openai-agents 0.14.0 requires openai>=2.26,<3 and pydantic>=2.12.2,<3.
+# Keeping our lower bounds at those floors lets pip resolve cleanly; anything
+# tighter here (e.g. the old openai<2.0) trips ResolutionImpossible.
+openai>=2.26,<3
 # Pin exact: MCPServerManager was unstable between minor releases and 0.14.0
 # is the last version we've verified against the agent_workflow.py imports.
 openai-agents==0.14.0
-pydantic>=2.9,<3.0
+pydantic>=2.12.2,<3.0
 python-dotenv>=1.0,<2.0
 nbformat>=5.10,<6.0
 jupyter-client>=8.6,<9.0

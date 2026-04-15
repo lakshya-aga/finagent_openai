@@ -19,7 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Python deps in a cached layer first.
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r requirements.txt \
+    && python -c "from agents.mcp import MCPServerManager"  # fail fast if pin drifts
 
 # Install fin-kit (lakshya-aga/fin-kit — the private mlfinlab fork) separately:
 #   --ignore-requires-python: setup.cfg still declares python_requires <3.9,
