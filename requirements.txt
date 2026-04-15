@@ -14,13 +14,19 @@ nbformat>=5.10,<6.0
 jupyter-client>=8.6,<9.0
 ipykernel>=6.29,<7.0
 
-# Core data science libs used by generated notebooks. Extend as needed.
+# Core data science libs used by generated notebooks + by mlfinlab at import
+# time. Extend as needed if a notebook hits ImportError.
 pandas>=2.2
 numpy>=1.26
 matplotlib>=3.8
 scipy>=1.12
+scikit-learn>=1.4
+statsmodels>=0.14
 yfinance>=0.2.40
 
 # Internal libraries the generated notebooks call.
-git+https://github.com/lakshya-aga/fin-kit.git
+# fin-kit is installed separately in the Dockerfile with
+# --ignore-requires-python --no-deps because its setup.cfg still pins
+# python_requires <3.9 (upstream mlfinlab heritage) and its install_requires
+# pulls in tensorflow / networkx<2.6 / dash / etc. which bust the resolver.
 git+https://github.com/lakshya-aga/data-mcp.git

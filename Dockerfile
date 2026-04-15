@@ -21,6 +21,19 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
+# Install fin-kit (lakshya-aga/fin-kit — the private mlfinlab fork) separately:
+#   --ignore-requires-python: setup.cfg still declares python_requires <3.9,
+#     which is a stale upstream pin; the relevant code paths work on 3.12.
+#   --no-deps: install_requires pulls tensorflow>=2, networkx<2.6, dash,
+#     decorator<5, POT, analytics-python, getmac — none of which the research
+#     notebooks this agent generates actually use. Add specific runtime deps
+#     to requirements.txt if a notebook hits ImportError (pandas, numpy,
+#     scikit-learn, scipy, matplotlib, statsmodels are already installed).
+# Nothing in this step touches the public PyPI `mlfinlab` — the package
+# installed here IS mlfinlab, sourced entirely from your GitHub.
+RUN pip install --no-cache-dir --ignore-requires-python --no-deps \
+        git+https://github.com/lakshya-aga/fin-kit.git
+
 # Register the default ipykernel spec so jupyter_client.KernelManager can launch it.
 RUN python -m ipykernel install --sys-prefix --name python3 --display-name "Python 3"
 
