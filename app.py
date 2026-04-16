@@ -107,6 +107,79 @@ async def clear_session(session_id: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Notebook browsing endpoints. The Synapse web app proxies these (auth-gated)
+# so users can list and preview every notebook the agent has produced. The
+# outputs directory is the docker volume mount point — `/app/outputs` in the
+# container — so listings survive container restarts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_OUTPUTS_DIR = (Path(__file__).parent / "outputs").resolve()
+
+
+def _safe_notebook_path(name: str) -> Path:
+    """Resolve `name` inside the outputs directory or raise 404/403.
+
+    Strips any path separators, resolves, then asserts the result still lives
+    under the outputs root — defense against `../etc/passwd`-style traversal.
+    """
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid notebook name")
+    if not name.endswith(".ipynb"):
+        raise HTTPException(status_code=400, detail="not a notebook")
+    candidate = (_OUTPUTS_DIR / name).resolve()
+    try:
+        candidate.relative_to(_OUTPUTS_DIR)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="path escapes outputs")
+    if not candidate.exists():
+        raise HTTPException(status_code=404, detail="notebook not found")
+    return candidate
+
+
+@app.get("/api/notebooks")
+async def list_notebooks():
+    """Return every .ipynb in the outputs dir, newest first."""
+    if not _OUTPUTS_DIR.exists():
+        return {"notebooks": []}
+    items = []
+    for p in _OUTPUTS_DIR.glob("*.ipynb"):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        items.append({
+            "name": p.name,
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+        })
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"notebooks": items}
+
+
+@app.get("/api/notebooks/{name}")
+async def get_notebook(name: str):
+    """Return the raw .ipynb JSON so the UI can render it cell-by-cell."""
+    path = _safe_notebook_path(name)
+    return FileResponse(
+        path,
+        media_type="application/json",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/api/notebooks/{name}/download")
+async def download_notebook_by_name(name: str):
+    """Same file but with Content-Disposition forcing a download."""
+    path = _safe_notebook_path(name)
+    return FileResponse(
+        path,
+        filename=path.name,
+        media_type="application/x-ipynb+json",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Synapse web-compat endpoint.
 #
 # The Synapse Next.js app POSTs to /chat with {messages, user} and reads the
