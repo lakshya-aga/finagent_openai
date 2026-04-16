@@ -35,8 +35,12 @@ RUN pip install --no-cache-dir --upgrade pip \
 RUN pip install --no-cache-dir --ignore-requires-python --no-deps \
         git+https://github.com/lakshya-aga/fin-kit.git
 
-# Register the default ipykernel spec so jupyter_client.KernelManager can launch it.
-RUN python -m ipykernel install --sys-prefix --name python3 --display-name "Python 3"
+# Register the ipykernel spec the agent actually asks for. agent_workflow.py
+# hardcodes `kernel_name="finagent-python"` in KernelManager calls and writes
+# that same name into every generated notebook's kernelspec metadata, so the
+# spec that lives on disk must match exactly or validate_run fails with
+# "KernelError: finagent-python not found" before a single cell executes.
+RUN python -m ipykernel install --sys-prefix --name finagent-python --display-name "finagent-python"
 
 # Copy application code.
 COPY . .
