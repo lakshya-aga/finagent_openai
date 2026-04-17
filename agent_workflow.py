@@ -21,16 +21,28 @@ from nbformat.v4 import new_notebook, new_code_cell, new_markdown_cell
 from jupyter_client import KernelManager
 import logging
 
+logger = logging.getLogger(__name__)
 logging.basicConfig(
     filename="finagent.log",
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
-# MCP endpoints are overridable via env vars so the process runs cleanly both
-# on a laptop (defaults: localhost) and inside docker-compose (service DNS).
+# ---------------------------------------------------------------------------
+# Configuration — all tunables live here, not scattered across the file.
+# ---------------------------------------------------------------------------
 FRUIT_THROWER_URL = os.environ.get("FRUIT_THROWER_URL", "http://localhost:8090/mcp/")
 DATA_MCP_URL = os.environ.get("DATA_MCP_URL", "http://localhost:8000/sse")
+KERNEL_NAME = os.environ.get("FINAGENT_KERNEL_NAME", "finagent-python")
+KERNEL_PYTHON_PATH = os.environ.get("FINAGENT_KERNEL_PYTHON", sys.executable)
+KERNEL_TIMEOUT_SECONDS = int(os.environ.get("FINAGENT_KERNEL_TIMEOUT", "120"))
+SHELL_REPLY_TIMEOUT_SECONDS = 5
+MODEL_NAME = os.environ.get("FINAGENT_MODEL", "gpt-4.1")
+MODEL_NAME_MINI = os.environ.get("FINAGENT_MODEL_MINI", "gpt-4o-mini")
+
+# MCP tool filter lists — defined once, reused by every agent.
+_FRUIT_THROWER_TOOLS = ["search_code", "get_unit_source", "list_modules", "get_module_summary", "index_repository", "get_index_stats", "generate_function"]
+_DATA_MCP_TOOLS = ["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"]
 
 def _get_latest_path():
     i = 1
@@ -48,7 +60,7 @@ def _get_current_path():
 
 
 def _ensure_parent_dir(path) -> None:
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("_ensure_parent_dir path=%s", path)
 
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
@@ -57,7 +69,7 @@ def _ensure_parent_dir(path) -> None:
 
 def _load_notebook():
     path = _get_current_path()
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("_load_notebook path=%s", path)
 
     if not os.path.exists(path):
         raise FileNotFoundError(f"Notebook not found: {path}")
@@ -66,7 +78,7 @@ def _load_notebook():
 
 
 def _save_notebook(nb, path) -> None:
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("_save_notebook path=%s", path)
 
     _ensure_parent_dir(path)
     with open(path, "w", encoding="utf-8") as f:
@@ -74,7 +86,7 @@ def _save_notebook(nb, path) -> None:
 
 
 def _make_cell(cell_type: str, content: str):
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("_make_cell cell_type=%s", cell_type)
 
     if cell_type == "code":
         return new_code_cell(content)
@@ -84,8 +96,6 @@ def _make_cell(cell_type: str, content: str):
 
 
 def _serialize_output(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    logging.info(f"TOOL CALL: {locals()}")
-
     msg_type = msg.get("msg_type")
     content = msg.get("content", {})
 
@@ -115,15 +125,14 @@ def _serialize_output(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _run_code_in_kernel(code: str, timeout: int = 120) -> Dict[str, Any]:
+def _run_code_in_kernel(code: str, timeout: int = KERNEL_TIMEOUT_SECONDS, **kwargs) -> Dict[str, Any]:
 
     """
     Execute code in a temporary Jupyter kernel and collect outputs.
     """
-    logging.info(f"TOOL CALL: {locals()}")
-
-    logging.info(f"_run_code_in_kernel using kernel_name=finagent-python")
-    km = KernelManager(kernel_name="finagent-python")
+    kernel_name = kwargs.get("kernel_name") or KERNEL_NAME
+    logger.info("_run_code_in_kernel kernel_name=%s timeout=%d", kernel_name, timeout)
+    km = KernelManager(kernel_name=kernel_name)
     km.start_kernel()
 
 
@@ -199,13 +208,10 @@ def create_notebook():
     """
     Creates an empty notebook
     """
-    # print("create Notebook called")
     path =  _get_latest_path()
-    # print(path)
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("create_notebook path=%s", path)
 
     _ensure_parent_dir(path)
-    # print("Created parent directory")
 
 
     nb = new_notebook(cells=[])
@@ -214,7 +220,7 @@ def create_notebook():
     nb.metadata["kernelspec"] = {
         "display_name": "FinAgent Python",
         "language": "python",
-        "name": "finagent-python",
+        "name": KERNEL_NAME,
     }
     nb.metadata["language_info"] = {
         "name": "python",
@@ -222,7 +228,6 @@ def create_notebook():
     }
 
     _save_notebook(nb, path)
-    # print("Successfully Notebook saved")
     return {
         "success": True,
         "path": path,
@@ -237,7 +242,7 @@ def add_cell(cell_type: str, content: str):
     Add a cell in the created notebook
     """
     path = _get_current_path()
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("add_cell cell_type=%s", cell_type)
 
     nb = _load_notebook()
     cell = _make_cell(cell_type, content)
@@ -260,7 +265,7 @@ def replace_cell(cell_index: int, cell_type: str, content: str):
     Replace a cell in the created notebook
     """
     path = _get_current_path()
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("replace_cell cell_index=%d cell_type=%s", cell_index, cell_type)
 
     nb = _load_notebook()
 
@@ -286,7 +291,7 @@ def insert_cell(cell_index: int, cell_type: str, content: str):
     Insert a new cell at the given index, shifting existing cells down.
     """
     path = _get_current_path()
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("insert_cell cell_index=%d cell_type=%s", cell_index, cell_type)
     nb = _load_notebook()
     if cell_index < 0 or cell_index > len(nb.cells):
         return {"success": False, "error": f"cell_index {cell_index} out of range (0–{len(nb.cells)})"}
@@ -301,7 +306,7 @@ def delete_cell(cell_index: int):
     Delete the cell at the given index, shifting subsequent cells up.
     """
     path = _get_current_path()
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("delete_cell cell_index=%d", cell_index)
     nb = _load_notebook()
     if cell_index < 0 or cell_index >= len(nb.cells):
         return {"success": False, "error": f"cell_index {cell_index} out of range (0–{len(nb.cells)-1})"}
@@ -316,7 +321,7 @@ def run_cell(path: str, cell_index: int, timeout: int):
     Run a cell to see the output
     """
     path = _get_current_path()
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("run_cell cell_index=%d timeout=%d", cell_index, timeout)
 
     nb = _load_notebook()
 
@@ -340,7 +345,7 @@ def run_cell(path: str, cell_index: int, timeout: int):
             code_parts.append(f"# --- cell {i} ---\n{cell.source}")
 
     code_to_run = "\n\n".join(code_parts)
-    result = _run_code_in_kernel(code_to_run, timeout=timeout, kernel_name="/Users/lakshya/miniconda3/envs/finagentv2/bin/python")
+    result = _run_code_in_kernel(code_to_run, timeout=timeout, kernel_name=KERNEL_PYTHON_PATH)
 
     # Attach outputs only to the target cell from the last execution chunk is hard to isolate
     # without executing cell-by-cell; for reliability, run target cell separately after prelude.
@@ -352,7 +357,7 @@ def run_cell(path: str, cell_index: int, timeout: int):
     prelude_code = "\n\n".join(prelude)
     final_code = f"{prelude_code}\n\n# --- target cell {cell_index} ---\n{target_cell.source}" if prelude_code else target_cell.source
 
-    target_result = _run_code_in_kernel(final_code, timeout=timeout, kernel_name="/Users/lakshya/miniconda3/envs/finagentv2/bin/python")
+    target_result = _run_code_in_kernel(final_code, timeout=timeout, kernel_name=KERNEL_PYTHON_PATH)
 
     target_cell.outputs = []
     for output in target_result["outputs"]:
@@ -401,7 +406,7 @@ def install_packages(packages: List[str]):
     """
     Install python packages in the current environment
     """
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("install_packages packages=%s", packages)
 
     if not packages:
         return {
@@ -432,16 +437,15 @@ def find_regex_in_notebook_code(
     """
     Provide the regula expression to search the current notebook
     """
-    logging.info(f"TOOL CALL: {locals()}")
+    logger.info("find_regex_in_notebook_code pattern=%s", regex_pattern)
     flags = 0 if case_sensitive else re.IGNORECASE
 
     try:
-        nb = nbformat.reads(open(_get_latest_path()).read(), as_version=4)
+        with open(_get_latest_path(), encoding="utf-8") as f:
+            nb = nbformat.reads(f.read(), as_version=4)
     except Exception as e:
         raise ValueError(f"Could not parse notebook content: {e}")
 
-    allowed = {"code", "markdown"}
-    
     matches = []
     pattern = re.compile(regex_pattern, flags)
 
@@ -475,7 +479,7 @@ def read_notebook() -> Dict[str, Any]:
     """
     Read the full current notebook, returning all cells with their index, type, source, and outputs.
     """
-    logging.info(f"TOOL CALL: read_notebook")
+    logger.info("read_notebook")
     nb = _load_notebook()
     cells = []
     for i, cell in enumerate(nb.cells):
@@ -500,7 +504,7 @@ def validate_run(max_cells: int, timeout: int, prelude: str):
     write outputs back to each cell, and save the notebook to disk.
     """
     path = _get_current_path()
-    logging.info(f"TOOL CALL: validate_run path={path} max_cells={max_cells} timeout={timeout}")
+    logger.info("validate_run path=%s max_cells=%d timeout=%d", path, max_cells, timeout)
 
     nb = _load_notebook()
 
@@ -519,7 +523,7 @@ def validate_run(max_cells: int, timeout: int, prelude: str):
             "executed_cells": 0,
         }
 
-    km = KernelManager(kernel_name="finagent-python")
+    km = KernelManager(kernel_name=KERNEL_NAME)
     km.start_kernel()
     first_error_cell = None
     error_output = None
@@ -621,7 +625,7 @@ def install_packages(packages: List[str]) -> Dict[str, Any]:
     Raises immediately if any package in PROTECTED_PACKAGES is requested,
     signalling the user must install those manually.
     """
-    logging.info(f"TOOL CALL: install_packages {packages}")
+    logger.info("install_packages packages=%s", packages)
 
     if not packages:
         return {"success": True, "message": "No packages requested", "installed": []}
@@ -658,30 +662,31 @@ file_search = FileSearchTool(
     "vs_69a81b0197a481919e14c2d66197af7d"
   ]
 )
-mcp = MCPServerStreamableHttp(
-  params=MCPServerStreamableHttpParams(url=FRUIT_THROWER_URL),
-  name="fruit_thrower",
-  tool_filter={"allowed_tool_names": ["search_code", "get_unit_source", "list_modules", "get_module_summary", "index_repository", "get_index_stats", "generate_function"]},
-  require_approval="never",
-)
-mcp1 = MCPServerSse(
-  params=MCPServerSseParams(url=DATA_MCP_URL),
-  name="data_mcp",
-  tool_filter=["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"],
-  require_approval="never",
-)
-mcp2 = MCPServerStreamableHttp(
-  params=MCPServerStreamableHttpParams(url=FRUIT_THROWER_URL),
-  name="fruit_thrower",
-  tool_filter={"allowed_tool_names": ["search_code", "get_unit_source", "list_modules", "get_module_summary", "index_repository", "get_index_stats", "generate_function"]},
-  require_approval="never",
-)
-mcp3 = MCPServerSse(
-  params=MCPServerSseParams(url=DATA_MCP_URL),
-  name="data_mcp",
-  tool_filter=["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"],
-  require_approval="never",
-)
+
+def _make_fruit_thrower_mcp():
+    """Create a fresh MCPServerStreamableHttp for fruit-thrower."""
+    return MCPServerStreamableHttp(
+        params=MCPServerStreamableHttpParams(url=FRUIT_THROWER_URL),
+        name="fruit_thrower",
+        tool_filter={"allowed_tool_names": _FRUIT_THROWER_TOOLS},
+        require_approval="never",
+    )
+
+
+def _make_data_mcp():
+    """Create a fresh MCPServerSse for data-mcp."""
+    return MCPServerSse(
+        params=MCPServerSseParams(url=DATA_MCP_URL),
+        name="data_mcp",
+        tool_filter=_DATA_MCP_TOOLS,
+        require_approval="never",
+    )
+
+
+fruit_thrower_planner = _make_fruit_thrower_mcp()
+data_mcp_planner = _make_data_mcp()
+fruit_thrower_orchestrator = _make_fruit_thrower_mcp()
+data_mcp_orchestrator = _make_data_mcp()
 planner = Agent(
   name="Planner",
   instructions="""You are a quant research workflow planner.
@@ -729,11 +734,11 @@ PLANNING HEURISTICS
 - Reuse existing tools aggressively.
 - Avoid \"custom_code\" unless impossible.
 - Prefer daily frequency unless specified otherwise.""",
-  model="gpt-5",
+  model=MODEL_NAME,
   tools=[
     file_search,
   ],
-  mcp_servers=[mcp, mcp1],
+  mcp_servers=[fruit_thrower_planner, data_mcp_planner],
   model_settings=ModelSettings(
     store=True,
     reasoning=Reasoning(
@@ -771,14 +776,14 @@ When reasoning is required, keep it compact.
 Do not describe tool actions in text.
 Use tools to act.""",
 
-  model="gpt-5",
+  model=MODEL_NAME,
   tools=[
     add_cell,
     create_notebook,
     # run_cell,
     file_search,
   ],
-  mcp_servers=[mcp2, mcp3],
+  mcp_servers=[fruit_thrower_orchestrator, data_mcp_orchestrator],
   model_settings=ModelSettings(
     parallel_tool_calls=True,
     store=True,
@@ -821,7 +826,7 @@ A. ModuleNotFoundError / ImportError
 B. AttributeError / NameError / TypeError / ValueError / KeyError / other logic errors
    • Use `find_regex_in_notebook_code` to locate the exact cell(s) containing
      the offending symbol or expression.
-   • Consult the MCP documentation tools (mcp2 / mcp3) to look up the correct
+   • Consult the MCP documentation tools (fruit_thrower_orchestrator / data_mcp_orchestrator) to look up the correct
      API — search for the class/function name, then `get_tool_doc` for details.
    • Use `find_regex_in_notebook_code` again to narrow down documentation output
      if it is large (search for the method or parameter name).
@@ -860,7 +865,7 @@ When finished, return a JSON array — one object per fix attempt:
 End with a final object:
   { "step": "FINAL", "result": "SUCCESS" | "FATAL: <reason>" | "HUMAN_NEEDED: <reason>" }
 """,
-    model="gpt-5",
+    model=MODEL_NAME,
     tools=[
         read_notebook,           # ← new: lets agent read all cells before acting
         validate_run,
@@ -868,7 +873,7 @@ End with a final object:
         replace_cell,
         find_regex_in_notebook_code,
     ],
-    mcp_servers=[mcp2, mcp3],
+    mcp_servers=[fruit_thrower_orchestrator, data_mcp_orchestrator],
     model_settings=ModelSettings(
         parallel_tool_calls=True,
         store=True,
@@ -912,7 +917,7 @@ RULES
 - Preserve variable names and data-flow unless the user explicitly asks to rename things.
 - Do NOT write any code yourself — descriptions only. The edit orchestration agent writes the code.
 """,
-    model="gpt-5",
+    model=MODEL_NAME,
     model_settings=ModelSettings(store=True, reasoning=Reasoning(effort="low")),
 )
 
@@ -953,9 +958,9 @@ Return a JSON array of applied operations:
 ]
 End with: {"op": "FINAL", "result": "SUCCESS" | "FATAL: <reason>"}
 """,
-    model="gpt-5",
+    model=MODEL_NAME,
     tools=[read_notebook, replace_cell, insert_cell, delete_cell, add_cell],
-    mcp_servers=[mcp2, mcp3],
+    mcp_servers=[fruit_thrower_orchestrator, data_mcp_orchestrator],
     model_settings=ModelSettings(
         parallel_tool_calls=True,
         store=True,
@@ -977,7 +982,7 @@ Answer the user's question clearly and concisely. You can:
 
 Do NOT modify the notebook. Do NOT call any tools. Just answer.
 """,
-    model="gpt-5",
+    model=MODEL_NAME,
     model_settings=ModelSettings(store=True),
 )
 
@@ -1027,23 +1032,13 @@ async def run_workflow(
     if progress_cb:
       await progress_cb({"type": "status", "message": msg})
 
-  logging.info(f"run_workflow mode={'edit' if existing_notebook_path else 'new'}")
+  logger.info("run_workflow mode=%s", 'edit' if existing_notebook_path else 'new')
 
   def _fresh_fruit_thrower():
-    return MCPServerStreamableHttp(
-      params=MCPServerStreamableHttpParams(url=FRUIT_THROWER_URL),
-      name="fruit_thrower",
-      tool_filter={"allowed_tool_names": ["search_code", "get_unit_source", "list_modules", "get_module_summary", "index_repository", "get_index_stats", "generate_function"]},
-      require_approval="never",
-    )
+    return _make_fruit_thrower_mcp()
 
   def _fresh_data_mcp():
-    return MCPServerSse(
-      params=MCPServerSseParams(url=DATA_MCP_URL),
-      name="data_mcp",
-      tool_filter={"allowed_tool_names": ["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"]},
-      require_approval="never",
-    )
+    return _make_data_mcp()
 
   with trace("Finagent"):
     workflow = workflow_input.model_dump()
@@ -1051,7 +1046,7 @@ async def run_workflow(
 
     # ── CLASSIFY INTENT ──────────────────────────────────────────────────────
     intent = await _classify_intent(workflow["input_as_text"], bool(existing_notebook_path))
-    logging.info(f"run_workflow intent={intent}")
+    logger.info("run_workflow intent=%s", intent)
 
     # ── QUESTION MODE ────────────────────────────────────────────────────────
     if intent == "question":

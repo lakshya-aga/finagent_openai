@@ -4,47 +4,76 @@ load_dotenv()
 import asyncio
 import json
 import logging
+import time
 import uuid
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent_workflow import run_workflow, WorkflowInput
 
-app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+logger = logging.getLogger(__name__)
 
-# session_id -> {"notebook_path": str | None, "history": list}
-_sessions: dict = {}
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MAX_MESSAGE_LENGTH = 50_000          # max chars in a single chat message
+SESSION_TTL_SECONDS = 3600           # 1 hour of inactivity before eviction
+STREAM_TIMEOUT_SECONDS = 600         # SSE stream read timeout
+
+_APP_DIR = Path(__file__).resolve().parent
+
+app = FastAPI(title="FinAgent", version="0.1.0")
+app.mount("/static", StaticFiles(directory=str(_APP_DIR / "static")), name="static")
+
+# session_id -> {"notebook_path": str | None, "history": list, "last_active": float}
+_sessions: Dict[str, dict] = {}
+
+
+def _evict_stale_sessions() -> None:
+    """Remove sessions that have been inactive longer than SESSION_TTL_SECONDS."""
+    now = time.time()
+    stale = [sid for sid, s in _sessions.items() if now - s.get("last_active", 0) > SESSION_TTL_SECONDS]
+    for sid in stale:
+        del _sessions[sid]
 
 
 class ChatRequest(BaseModel):
     session_id: str
-    message: str
+    message: str = Field(..., max_length=MAX_MESSAGE_LENGTH)
 
 
 @app.get("/")
 async def index():
-    return FileResponse("static/index.html")
+    return FileResponse(str(_APP_DIR / "static" / "index.html"))
+
+
+@app.get("/health")
+async def health_check():
+    """JSON health check endpoint."""
+    return JSONResponse({"status": "ok", "active_sessions": len(_sessions)})
 
 
 @app.post("/api/session")
 async def new_session():
+    _evict_stale_sessions()
     sid = str(uuid.uuid4())
-    _sessions[sid] = {"notebook_path": None, "history": []}
+    _sessions[sid] = {"notebook_path": None, "history": [], "last_active": time.time()}
     return {"session_id": sid}
 
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
+    _evict_stale_sessions()
     sid = req.session_id
     if sid not in _sessions:
-        _sessions[sid] = {"notebook_path": None, "history": []}
+        _sessions[sid] = {"notebook_path": None, "history": [], "last_active": time.time()}
     session = _sessions[sid]
+    session["last_active"] = time.time()
 
     progress_queue: asyncio.Queue = asyncio.Queue()
 
@@ -84,6 +113,10 @@ async def chat(req: ChatRequest):
                     break
             except asyncio.TimeoutError:
                 yield f"data: {json.dumps({'type': 'error', 'message': 'Timed out'})}\n\n"
+                break
+            except Exception as exc:
+                logger.exception("Unexpected error in SSE stream")
+                yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
                 break
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
