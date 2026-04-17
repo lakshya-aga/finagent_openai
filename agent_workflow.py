@@ -12,6 +12,7 @@ import json
 import time
 import queue
 import re
+import asyncio
 import subprocess
 
 import sys
@@ -191,12 +192,18 @@ def _run_code_in_kernel(code: str, timeout: int = KERNEL_TIMEOUT_SECONDS, **kwar
     finally:
         try:
             kc.stop_channels()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to stop kernel channels: %s", exc)
         try:
             km.shutdown_kernel(now=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to shutdown kernel: %s", exc)
+
+
+async def _run_code_in_kernel_async(code: str, timeout: int = KERNEL_TIMEOUT_SECONDS, **kwargs) -> Dict[str, Any]:
+    """Non-blocking wrapper around _run_code_in_kernel."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: _run_code_in_kernel(code, timeout=timeout, **kwargs))
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +222,6 @@ def create_notebook():
 
 
     nb = new_notebook(cells=[])
-    # print("NB initialised")
 
     nb.metadata["kernelspec"] = {
         "display_name": "FinAgent Python",
@@ -337,18 +343,7 @@ def run_cell(path: str, cell_index: int, timeout: int):
             "message": "Target cell is not a code cell",
         }
 
-    # Execute all code cells up to and including cell_index so state is available.
-    code_parts = []
-    for i in range(cell_index + 1):
-        cell = nb.cells[i]
-        if cell.cell_type == "code":
-            code_parts.append(f"# --- cell {i} ---\n{cell.source}")
-
-    code_to_run = "\n\n".join(code_parts)
-    result = _run_code_in_kernel(code_to_run, timeout=timeout, kernel_name=KERNEL_PYTHON_PATH)
-
-    # Attach outputs only to the target cell from the last execution chunk is hard to isolate
-    # without executing cell-by-cell; for reliability, run target cell separately after prelude.
+    # Run prelude cells for state, then execute target cell separately for clean output.
     prelude = []
     for i in range(cell_index):
         cell = nb.cells[i]
@@ -402,34 +397,6 @@ def run_cell(path: str, cell_index: int, timeout: int):
 
 
 @function_tool
-def install_packages(packages: List[str]):
-    """
-    Install python packages in the current environment
-    """
-    logger.info("install_packages packages=%s", packages)
-
-    if not packages:
-        return {
-            "success": True,
-            "message": "No packages requested",
-            "installed": [],
-        }
-
-    cmd = [sys.executable, "-m", "pip", "install", *packages]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-
-    return {
-        "success": proc.returncode == 0,
-        "command": cmd,
-        "returncode": proc.returncode,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
-        "installed": packages if proc.returncode == 0 else [],
-    }
-
-
-
-@function_tool
 def find_regex_in_notebook_code(
     regex_pattern: str,
     case_sensitive: bool,
@@ -441,8 +408,8 @@ def find_regex_in_notebook_code(
     flags = 0 if case_sensitive else re.IGNORECASE
 
     try:
-        with open(_get_latest_path(), encoding="utf-8") as f:
-            nb = nbformat.reads(f.read(), as_version=4)
+        with open(_get_current_path(), encoding="utf-8") as f:
+            nb = nbformat.read(f, as_version=4)
     except Exception as e:
         raise ValueError(f"Could not parse notebook content: {e}")
 
@@ -596,12 +563,12 @@ def validate_run(max_cells: int, timeout: int, prelude: str):
     finally:
         try:
             kc.stop_channels()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to stop kernel channels: %s", exc)
         try:
             km.shutdown_kernel(now=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to shutdown kernel: %s", exc)
 
     _save_notebook(nb, path)
 
@@ -617,6 +584,7 @@ def validate_run(max_cells: int, timeout: int, prelude: str):
     }
 
 PROTECTED_PACKAGES = {"findata", "mlfinlab"}
+_PACKAGE_NAME_RE = re.compile(r'^[a-zA-Z0-9._-]+$')
 
 @function_tool
 def install_packages(packages: List[str]) -> Dict[str, Any]:
@@ -640,6 +608,15 @@ def install_packages(packages: List[str]) -> Dict[str, Any]:
                 "Please install them manually in your environment "
                 "(e.g. `pip install findata mlfinlab`) and re-run the workflow."
             ),
+            "installed": [],
+        }
+
+    invalid = [p for p in packages if not _PACKAGE_NAME_RE.match(p)]
+    if invalid:
+        return {
+            "success": False,
+            "fatal": True,
+            "message": f"Invalid package name(s): {invalid}. Only [a-zA-Z0-9._-] allowed.",
             "installed": [],
         }
 
@@ -1054,7 +1031,8 @@ async def run_workflow(
       nb_context = ""
       if existing_notebook_path:
         try:
-          nb = nbformat.read(open(existing_notebook_path), as_version=4)
+          with open(existing_notebook_path, encoding="utf-8") as f:
+            nb = nbformat.read(f, as_version=4)
           lines = []
           for i, cell in enumerate(nb.cells):
             lines.append(f"[Cell {i} | {cell.cell_type}]\n{cell.source}")
@@ -1083,7 +1061,8 @@ async def run_workflow(
     # ── EDIT MODE ────────────────────────────────────────────────────────────
     if intent == "edit" and existing_notebook_path:
       # Read the existing notebook for planner context
-      nb = nbformat.read(open(existing_notebook_path), as_version=4)
+      with open(existing_notebook_path, encoding="utf-8") as f:
+        nb = nbformat.read(f, as_version=4)
       nb_summary_lines = []
       for i, cell in enumerate(nb.cells):
         snippet = cell.source[:200].replace("\n", " ")

@@ -2,14 +2,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import asyncio
+import hmac
 import json
 import logging
+import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -27,11 +30,63 @@ STREAM_TIMEOUT_SECONDS = 600         # SSE stream read timeout
 
 _APP_DIR = Path(__file__).resolve().parent
 
-app = FastAPI(title="FinAgent", version="0.1.0")
-app.mount("/static", StaticFiles(directory=str(_APP_DIR / "static")), name="static")
-
 # session_id -> {"notebook_path": str | None, "history": list, "last_active": float}
 _sessions: Dict[str, dict] = {}
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown via lifespan
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    yield
+    _sessions.clear()
+
+app = FastAPI(title="FinAgent", version="0.1.0", lifespan=_lifespan)
+app.mount("/static", StaticFiles(directory=str(_APP_DIR / "static")), name="static")
+
+# ---------------------------------------------------------------------------
+# Optional API key authentication
+# ---------------------------------------------------------------------------
+_API_KEY = os.environ.get("FINAGENT_API_KEY")
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    if _API_KEY:
+        path = request.url.path
+        if path.startswith("/api/") or path == "/chat":
+            auth = request.headers.get("Authorization", "")
+            if not auth.startswith("Bearer ") or not hmac.compare_digest(auth[7:], _API_KEY):
+                return JSONResponse(status_code=401, content={"detail": "invalid or missing API key"})
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# Simple in-memory rate limiter (30 req/min per IP)
+# ---------------------------------------------------------------------------
+_RATE_LIMIT = 30
+_rate_limit_store: Dict[str, list] = {}
+
+
+def _check_rate_limit(client_ip: str) -> bool:
+    now = time.time()
+    window_start = now - 60
+    timestamps = _rate_limit_store.setdefault(client_ip, [])
+    timestamps[:] = [t for t in timestamps if t > window_start]
+    if len(timestamps) >= _RATE_LIMIT:
+        return False
+    timestamps.append(now)
+    return True
+
+
+@app.middleware("http")
+async def _rate_limit_middleware(request: Request, call_next):
+    path = request.url.path
+    if path in ("/api/chat", "/chat"):
+        client_ip = request.client.host if request.client else "unknown"
+        if not _check_rate_limit(client_ip):
+            return JSONResponse(status_code=429, content={"detail": "rate limit exceeded"})
+    return await call_next(request)
 
 
 def _evict_stale_sessions() -> None:
@@ -102,16 +157,17 @@ async def chat(req: ChatRequest):
         except Exception as e:
             await progress_queue.put({"type": "error", "message": str(e)})
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
 
     async def _stream():
         while True:
             try:
-                update = await asyncio.wait_for(progress_queue.get(), timeout=600)
+                update = await asyncio.wait_for(progress_queue.get(), timeout=STREAM_TIMEOUT_SECONDS)
                 yield f"data: {json.dumps(update)}\n\n"
                 if update["type"] in ("done", "error"):
                     break
             except asyncio.TimeoutError:
+                task.cancel()
                 yield f"data: {json.dumps({'type': 'error', 'message': 'Timed out'})}\n\n"
                 break
             except Exception as exc:
@@ -224,7 +280,7 @@ async def download_notebook_by_name(name: str):
 
 class _WebMessage(BaseModel):
     role: Literal["user", "assistant", "system"]
-    content: str
+    content: str = Field(..., max_length=MAX_MESSAGE_LENGTH)
 
 
 class _WebUser(BaseModel):
@@ -286,19 +342,20 @@ async def chat_web(req: _WebChatRequest):
                 "notebook_path": session["notebook_path"],
             })
         except Exception:
-            logging.exception("/chat run_workflow failed")
+            logger.exception("/chat run_workflow failed")
             await progress_queue.put({
                 "type": "error",
                 "message": "The research agent hit an unexpected error. Check server logs.",
             })
 
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
 
     async def _stream():
         while True:
             try:
-                update = await asyncio.wait_for(progress_queue.get(), timeout=600)
+                update = await asyncio.wait_for(progress_queue.get(), timeout=STREAM_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
+                task.cancel()
                 yield "\n\n**Error:** request timed out after 10 minutes.\n"
                 break
 
