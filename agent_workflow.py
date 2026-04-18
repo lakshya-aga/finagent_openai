@@ -2,6 +2,7 @@
 
 from agents import function_tool, FileSearchTool, HostedMCPTool, Agent, ModelSettings, TResponseInputItem, Runner, RunConfig, trace
 from agents.mcp import MCPServerSse, MCPServerSseParams, MCPServerManager, MCPServerStreamableHttp, MCPServerStreamableHttpParams
+from agents.items import ToolCallItem, ToolCallOutputItem, ReasoningItem, MessageOutputItem
 from openai.types.shared.reasoning import Reasoning
 from openai import AsyncOpenAI
 from pydantic import BaseModel
@@ -1016,6 +1017,45 @@ class WorkflowInput(BaseModel):
   input_as_text: str
 
 
+def _extract_trace_markdown(result) -> str:
+    """Build a compact markdown summary of tool calls + reasoning from a RunResult."""
+    lines = []
+    for item in result.new_items:
+        if isinstance(item, ToolCallItem):
+            raw = item.raw_item
+            name = getattr(raw, "name", None) or (raw.get("name") if isinstance(raw, dict) else None) or "tool"
+            args = getattr(raw, "arguments", None) or (raw.get("arguments", "") if isinstance(raw, dict) else "")
+            if isinstance(args, str) and len(args) > 120:
+                args = args[:120] + "…"
+            lines.append(f"> **{name}** `{args}`")
+        elif isinstance(item, ToolCallOutputItem):
+            raw = item.raw_item
+            output = ""
+            if isinstance(raw, dict):
+                output = str(raw.get("output", ""))
+            elif hasattr(raw, "output"):
+                output = str(raw.output)
+            if len(output) > 200:
+                output = output[:200] + "…"
+            if lines:
+                lines[-1] += f" → {output}"
+            else:
+                lines.append(f"> → {output}")
+        elif isinstance(item, ReasoningItem):
+            raw = item.raw_item
+            summaries = []
+            if hasattr(raw, "summary") and raw.summary:
+                for s in raw.summary:
+                    if hasattr(s, "text") and s.text:
+                        summaries.append(s.text)
+            if summaries:
+                text = " ".join(summaries)
+                if len(text) > 300:
+                    text = text[:300] + "…"
+                lines.append(f"> 💭 _{text}_")
+    return "\n".join(lines) if lines else ""
+
+
 # Main code entrypoint
 async def run_workflow(
     workflow_input: WorkflowInput,
@@ -1026,6 +1066,12 @@ async def run_workflow(
   async def _emit(msg: str):
     if progress_cb:
       await progress_cb({"type": "status", "message": msg})
+
+  async def _emit_trace(result):
+    if progress_cb:
+      md = _extract_trace_markdown(result)
+      if md:
+        await progress_cb({"type": "trace", "markdown": md})
 
   logging.info(f"run_workflow mode={'edit' if existing_notebook_path else 'new'}")
 
@@ -1079,6 +1125,7 @@ async def run_workflow(
         ],
         run_config=RunConfig(),
       )
+      await _emit_trace(q_result)
       return {
         "output_text": q_result.final_output_as(str),
         "notebook_path": existing_notebook_path,
@@ -1105,6 +1152,7 @@ async def run_workflow(
         input=[{"role": "user", "content": [{"type": "input_text", "text": edit_planner_input}]}],
         run_config=RunConfig(),
       )
+      await _emit_trace(edit_planner_result_temp)
       diff_spec_raw = edit_planner_result_temp.final_output_as(str).strip()
 
       # Parse — if mode is "new", fall through to new-notebook flow below
@@ -1129,6 +1177,7 @@ async def run_workflow(
             run_config=RunConfig(),
             max_turns=40,
           )
+        await _emit_trace(edit_orch_result_temp)
         conversation_history.extend([item.to_input_item() for item in edit_orch_result_temp.new_items])
 
         await _emit("Validating notebook...")
@@ -1140,6 +1189,7 @@ async def run_workflow(
             run_config=RunConfig(),
             max_turns=20,
           )
+        await _emit_trace(val_result_temp)
         return {
           "output_text": val_result_temp.final_output_as(str),
           "notebook_path": existing_notebook_path,
@@ -1167,6 +1217,7 @@ async def run_workflow(
           "workflow_id": "wf_69a81a9aedf48190bc2aaab7923d4ae10e4febf1cb72186f"
         })
       )
+    await _emit_trace(planner_result_temp)
     conversation_history.extend([item.to_input_item() for item in planner_result_temp.new_items])
     planner_result = {"output_text": planner_result_temp.final_output_as(str)}
 
@@ -1186,6 +1237,7 @@ async def run_workflow(
         }),
         max_turns=40
       )
+    await _emit_trace(orchestration_agent_result_temp)
     conversation_history.extend([item.to_input_item() for item in orchestration_agent_result_temp.new_items])
 
     await _emit("Validating and fixing...")
@@ -1200,6 +1252,7 @@ async def run_workflow(
         }),
         max_turns=20
       )
+    await _emit_trace(validatorandfixingagent_result_temp)
     conversation_history.extend([item.to_input_item() for item in validatorandfixingagent_result_temp.new_items])
 
     return {

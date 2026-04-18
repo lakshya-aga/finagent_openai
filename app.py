@@ -272,6 +272,10 @@ async def chat_web(req: _WebChatRequest):
             kind = update.get("type")
             if kind == "status":
                 yield f"_{update.get('message', '')}_\n\n"
+            elif kind == "trace":
+                md = update.get("markdown", "")
+                if md:
+                    yield md + "\n\n"
             elif kind == "done":
                 text = update.get("text", "") or ""
                 if text:
