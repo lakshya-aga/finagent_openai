@@ -4,13 +4,15 @@ load_dotenv()
 import asyncio
 import json
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from agent_workflow import run_workflow, WorkflowInput
@@ -177,6 +179,53 @@ async def download_notebook_by_name(name: str):
         filename=path.name,
         media_type="application/x-ipynb+json",
     )
+
+
+_VECTOR_STORE_ID = os.environ.get(
+    "OPENAI_VECTOR_STORE_ID", "vs_69a81b0197a481919e14c2d66197af7d"
+)
+_UPLOAD_MAX_BYTES = 25 * 1024 * 1024  # 25 MB
+
+@app.post("/uploads/pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    if file.content_type and file.content_type not in {"application/pdf", "application/x-pdf"}:
+        raise HTTPException(status_code=415, detail="only PDF files are accepted")
+
+    data = await file.read()
+    if len(data) == 0:
+        raise HTTPException(status_code=400, detail="empty file")
+    if len(data) > _UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"PDF too large (max {_UPLOAD_MAX_BYTES // (1024*1024)} MB)")
+
+    filename = file.filename or "upload.pdf"
+    client = AsyncOpenAI()
+
+    try:
+        uploaded = await client.files.create(
+            file=(filename, data, "application/pdf"),
+            purpose="assistants",
+        )
+    except Exception as e:
+        logging.exception("OpenAI Files.create failed for %s", filename)
+        raise HTTPException(status_code=502, detail=f"files.create failed: {e}")
+
+    try:
+        vsf = await client.vector_stores.files.create(
+            vector_store_id=_VECTOR_STORE_ID,
+            file_id=uploaded.id,
+        )
+    except Exception as e:
+        logging.exception("OpenAI vector_stores.files.create failed for %s", filename)
+        raise HTTPException(status_code=502, detail=f"vector_stores.files.create failed: {e}")
+
+    return {
+        "filename": filename,
+        "file_id": uploaded.id,
+        "vector_store_id": _VECTOR_STORE_ID,
+        "vector_store_file_id": vsf.id,
+        "status": getattr(vsf, "status", "queued"),
+        "bytes": len(data),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
