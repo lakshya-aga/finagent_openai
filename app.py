@@ -325,6 +325,17 @@ async def chat_web(req: _WebChatRequest):
                 md = update.get("markdown", "")
                 if md:
                     yield md + "\n\n"
+            elif kind == "event":
+                # Structured live events (phase/tool_call/notebook_outline/...).
+                # Encoded as an HTML comment so ReactMarkdown drops it from
+                # rendered output but the synapse client can sniff it from the
+                # raw stream and surface it in the StepProgress / Outline UI.
+                payload = update.get("data", {})
+                try:
+                    encoded = json.dumps(payload, ensure_ascii=False)
+                except Exception:
+                    continue
+                yield f"<!--FINAGENT_EVT {encoded}-->\n"
             elif kind == "done":
                 text = update.get("text", "") or ""
                 if text:
