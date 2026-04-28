@@ -108,12 +108,12 @@ async def clear_session(session_id: str):
     return {"ok": True}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
 # Notebook browsing endpoints. The Synapse web app proxies these (auth-gated)
 # so users can list and preview every notebook the agent has produced. The
 # outputs directory is the docker volume mount point — `/app/outputs` in the
 # container — so listings survive container restarts.
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
 
 
 _OUTPUTS_DIR = (Path(__file__).parent / "outputs").resolve()
@@ -228,14 +228,14 @@ async def upload_pdf(file: UploadFile = File(...)):
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
 # Synapse web-compat endpoint.
 #
 # The Synapse Next.js app POSTs to /chat with {messages, user} and reads the
 # body as plain text chunks (see FINAGENT_API.md in the synapse repo). This
 # endpoint translates that contract onto run_workflow(): sessions are keyed by
 # user.id so multi-turn notebook edits persist across browser tabs.
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────
 
 
 class _WebMessage(BaseModel):
@@ -297,7 +297,6 @@ async def chat_web(req: _WebChatRequest):
             session["notebook_path"] = result.get("notebook_path") or session["notebook_path"]
             await progress_queue.put({
                 "type": "done",
-                "text": result.get("output_text", ""),
                 "mode": result.get("mode", "new"),
                 "notebook_path": session["notebook_path"],
             })
@@ -307,42 +306,34 @@ async def chat_web(req: _WebChatRequest):
                 "type": "error",
                 "message": "The research agent hit an unexpected error. Check server logs.",
             })
+            await progress_queue.put({
+                "type": "done",
+                "mode": "error",
+                "notebook_path": session.get("notebook_path"),
+            })
 
     asyncio.create_task(_run())
 
     async def _stream():
+        # NDJSON: one JSON event per line. The synapse UI consumes this with a
+        # typed reducer (see synapse/src/components/agent-timeline.tsx). Each
+        # event has a `type` field; unknown types are tolerated so additions
+        # don't break older clients.
         while True:
             try:
                 update = await asyncio.wait_for(progress_queue.get(), timeout=600)
             except asyncio.TimeoutError:
-                yield "\n\n**Error:** request timed out after 10 minutes.\n"
+                yield json.dumps({"type": "error", "message": "request timed out after 10 minutes"}) + "\n"
+                yield json.dumps({"type": "done", "mode": "error", "notebook_path": None}) + "\n"
                 break
 
-            kind = update.get("type")
-            if kind == "status":
-                yield f"_{update.get('message', '')}_\n\n"
-            elif kind == "trace":
-                md = update.get("markdown", "")
-                if md:
-                    yield md + "\n\n"
-            elif kind == "done":
-                text = update.get("text", "") or ""
-                if text:
-                    yield text
-                nb_path = update.get("notebook_path")
-                if nb_path:
-                    yield f"\n\n---\n*Notebook updated: `{Path(nb_path).name}`*\n"
+            yield json.dumps(update, ensure_ascii=False) + "\n"
+            if update.get("type") == "done":
                 break
-            elif kind == "error":
-                yield f"\n\n**Error:** {update.get('message', 'unknown error')}\n"
-                break
-            else:
-                # Unknown event type — surface a compact debug line rather than drop it.
-                yield f"\n\n_{json.dumps(update)}_\n\n"
 
     return StreamingResponse(
         _stream(),
-        media_type="text/plain; charset=utf-8",
+        media_type="application/x-ndjson",
         headers={
             "Cache-Control": "no-cache, no-transform",
             "X-Accel-Buffering": "no",
