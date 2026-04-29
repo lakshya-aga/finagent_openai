@@ -239,6 +239,40 @@ async def delete_run(run_id: str):
     return {"ok": True}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin metrics dashboard.
+#
+# Tier-1 quality signals computed from the experiment store. Auth-gated at
+# the synapse proxy layer (only the configured admin user reaches here).
+# We deliberately don't enforce auth in finagent itself — keeps the backend
+# composable; synapse decides who sees the dashboard.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/admin/metrics")
+async def admin_metrics(days: int = 7, keys: Optional[str] = None):
+    """Compute Tier-1 metrics over a rolling window.
+
+    Query params:
+      days  — window length in days (default 7)
+      keys  — comma-separated metric keys to include (default: all)
+    """
+    from finagent.metrics import compute_metrics
+
+    if days <= 0 or days > 90:
+        raise HTTPException(status_code=400, detail="days must be 1..90")
+    selected = [k.strip() for k in keys.split(",") if k.strip()] if keys else None
+    return await asyncio.to_thread(compute_metrics, days=days, keys=selected)
+
+
+@app.get("/api/admin/metrics/keys")
+async def admin_metric_keys():
+    """Return the registry of available metric keys for the toggle UI."""
+    from finagent.metrics import list_metric_keys
+
+    return {"keys": list_metric_keys()}
+
+
 @app.get("/api/recipes/templates")
 async def list_recipe_templates():
     """Return every registered template with its rich metadata.
