@@ -39,8 +39,15 @@ def run_recipe(
     *,
     recipe_yaml: str,
     progress_cb=None,
+    search_id: Optional[str] = None,
+    search_iteration: Optional[int] = None,
 ) -> dict:
-    """Compile + execute a recipe; return run metadata."""
+    """Compile + execute a recipe; return run metadata.
+
+    When called from the search executor, ``search_id`` and
+    ``search_iteration`` thread through to the run record so the project
+    page can group + order runs by their parent search.
+    """
     store = get_store()
     recipe = recipe_from_yaml(recipe_yaml)
 
@@ -50,6 +57,8 @@ def run_recipe(
         template=recipe.template,
         recipe_yaml=recipe_yaml,
         recipe_hash=recipe.fingerprint(),
+        search_id=search_id,
+        search_iteration=search_iteration,
     )
     logging.info("recipe run created id=%s project=%s name=%s",
                  run.id, recipe.project, recipe.name)
