@@ -19,6 +19,8 @@ python-dotenv>=1.0,<2.0
 nbformat>=5.10,<6.0
 jupyter-client>=8.6,<9.0
 ipykernel>=6.29,<7.0
+# YAML loader for declarative research recipes (finagent.recipes).
+PyYAML>=6.0
 
 # Core data science libs used by generated notebooks + by mlfinlab at import
 # time. Extend as needed if a notebook hits ImportError.

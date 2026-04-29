@@ -181,6 +181,72 @@ async def download_notebook_by_name(name: str):
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Recipes / Projects / Runs.
+#
+# A Recipe is a YAML config that pins data, target, features, model, and
+# evaluation. Submitting one creates a Run record (SQLite-backed) and queues
+# compilation + execution. The workflow harvests metrics from the run-summary
+# marker the templated notebook prints, and stashes them on the Run so the
+# Project page can render a sortable table.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _RecipeSubmission(BaseModel):
+    yaml: str
+
+
+@app.post("/api/recipes")
+async def submit_recipe(req: _RecipeSubmission):
+    """Compile and execute a recipe, return its run id + final status."""
+    from finagent.recipe_workflow import run_recipe
+
+    # Run on a worker thread — kernel boot + cell execution is sync and slow.
+    result = await asyncio.to_thread(run_recipe, recipe_yaml=req.yaml)
+    return result
+
+
+@app.get("/api/projects")
+async def list_projects():
+    from finagent.experiments import get_store
+
+    return {"projects": get_store().list_projects()}
+
+
+@app.get("/api/projects/{name}/runs")
+async def list_project_runs(name: str):
+    from finagent.experiments import get_store
+
+    runs = [r.as_public_dict() for r in get_store().list_runs(project=name)]
+    return {"project": name, "runs": runs}
+
+
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str):
+    from finagent.experiments import get_store
+
+    run = get_store().get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+    return run.as_public_dict()
+
+
+@app.delete("/api/runs/{run_id}")
+async def delete_run(run_id: str):
+    from finagent.experiments import get_store
+
+    get_store().delete_run(run_id)
+    return {"ok": True}
+
+
+@app.get("/api/recipes/templates")
+async def list_recipe_templates():
+    """Return the templates the compiler can render deterministically."""
+    from finagent.recipes import available_templates
+
+    return {"templates": available_templates()}
+
+
 @app.post("/api/notebooks/{name}/run")
 async def run_notebook_all_cells(name: str):
     """Re-execute every code cell in a notebook and persist outputs back.
