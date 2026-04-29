@@ -59,6 +59,37 @@ This narration is the ONLY way the user can trace generated code back to the pla
 not optional and not a stylistic choice. Skipping it is a defect.
 
 ────────────────────────────────────────
+IMPORTS — MANDATORY GROUNDING (DO NOT SKIP)
+Before writing ANY non-stdlib `import` statement, you MUST verify the
+module exists. There are exactly two acceptable paths:
+
+  A. Confirmed via fruit-thrower MCP. Call `search_code` (or `list_modules`
+     / `get_module_summary`) with the symbol or module you want. If at
+     least one result is returned, the symbol exists in fin-kit and you
+     may import it.
+
+  B. Stdlib / pinned third-party. The Python stdlib and these packages
+     are guaranteed available: `pandas, numpy, scipy, sklearn,
+     statsmodels, hmmlearn, xgboost, matplotlib, yfinance, findata`.
+     Importing any of these is fine without a search.
+
+Anything else — including plausibly-named research namespaces like
+`research.pairs`, `portfolio.signals`, `features.utils`, etc. — must NOT
+be imported. If the helper you need does not exist, you have two options:
+  (a) inline the implementation in this notebook cell using stdlib + the
+      pinned packages above; or
+  (b) call `generate_function` (fruit-thrower MCP) to author it into
+      fin-kit, then import the new function once it's indexed.
+
+Never write `from <module> import …` for a module you have not confirmed
+exists. The validator runs an AST-level lint before the kernel boots —
+hallucinated imports surface as errors before any cell runs.
+
+CONSOLIDATE IMPORTS into the very first code cell of the notebook.
+That makes missing-dependency failures show up before any analysis cell
+runs and gives the user a single place to inspect.
+
+────────────────────────────────────────
 GENERAL RULES
 - Keep reasoning compact in the markdown header. Do not narrate tool actions in prose.
 - Use tools to act. Use markdown cells only to label what each code cell does.

@@ -76,6 +76,82 @@ def find_regex_in_notebook_code(regex_pattern: str, case_sensitive: bool):
     }
 
 
+def lint_notebook_imports(path: str) -> dict:
+    """Static AST-walk over a notebook's code cells; flag every imported
+    module that isn't (a) part of the stdlib or (b) importable in the
+    current kernel.
+
+    Why this exists: a Jupyter kernel boot for ``validate_run`` takes ~10s,
+    and most module-not-found failures are decidable at parse time. The
+    validator agent treats the result like a real cell error — same shape,
+    cheaper to detect.
+
+    Returns
+    -------
+    dict
+        ``{"ok": bool, "missing": [{"module": str, "cell_index": int,
+        "line": int}, ...]}``.
+        ``ok=False`` means at least one import targets a non-importable
+        module.
+    """
+    import ast
+    import importlib.util
+    import sys as _sys
+
+    p = Path(path)
+    if not p.exists():
+        return {"ok": False, "missing": [], "error": f"notebook not found: {p}"}
+
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            nb = nbformat.read(f, as_version=4)
+    except Exception as exc:
+        return {"ok": False, "missing": [], "error": f"could not read notebook: {exc}"}
+
+    # Stdlib check works on Python 3.10+ via sys.stdlib_module_names; we run
+    # on 3.11+, so this is reliable.
+    stdlib = set(getattr(_sys, "stdlib_module_names", ()))
+
+    missing: list[dict] = []
+    seen: set[str] = set()  # dedup across cells
+
+    for cell_idx, cell in enumerate(nb.cells):
+        if cell.cell_type != "code":
+            continue
+        source = cell.source or ""
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue  # let the kernel surface real syntax errors
+
+        for node in ast.walk(tree):
+            names: list[tuple[str, int]] = []
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    names.append((alias.name, getattr(node, "lineno", 0)))
+            elif isinstance(node, ast.ImportFrom):
+                # `from x.y import z` → check root package x
+                if node.level == 0 and node.module:
+                    names.append((node.module, getattr(node, "lineno", 0)))
+            for name, line in names:
+                root = name.split(".")[0]
+                if not root or root in stdlib or root in seen:
+                    continue
+                try:
+                    spec = importlib.util.find_spec(root)
+                except (ImportError, ValueError):
+                    spec = None
+                if spec is None:
+                    seen.add(root)
+                    missing.append({
+                        "module": name,
+                        "cell_index": cell_idx,
+                        "line": line,
+                    })
+
+    return {"ok": not missing, "missing": missing}
+
+
 def run_all_cells_to_disk(path: str, timeout: int = 120) -> dict:
     """Execute every code cell in a single persistent kernel, write outputs back.
 
@@ -209,6 +285,32 @@ def validate_run(max_cells: int, timeout: int, prelude: str):
             "path": str(path),
             "message": "No code cells to execute",
             "executed_cells": 0,
+        }
+
+    # Pre-kernel import lint: a clean fail here saves ~10s of kernel boot
+    # when the orchestrator has invented a module name. The validator agent
+    # treats the returned shape like a real cell error.
+    lint = lint_notebook_imports(str(path))
+    if not lint.get("ok") and lint.get("missing"):
+        first = lint["missing"][0]
+        return {
+            "success": False,
+            "path": str(path),
+            "status": "error",
+            "executed_cells": 0,
+            "first_error_cell_index": first.get("cell_index"),
+            "outputs": [],
+            "error": {
+                "ename": "ModuleNotFoundError",
+                "evalue": (
+                    f"No module named {first['module']!r} (detected at parse "
+                    f"time, before kernel boot). Other missing modules: "
+                    f"{[m['module'] for m in lint['missing'][1:]] or 'none'}."
+                ),
+                "traceback": [],
+                "missing_modules": lint["missing"],
+                "from_lint": True,
+            },
         }
 
     km = KernelManager(kernel_name="finagent-python")

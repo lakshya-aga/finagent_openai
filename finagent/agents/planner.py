@@ -23,6 +23,24 @@ CRITICAL CONSTRAINTS
   (a) choose a simpler equivalent using existing tools, or
   (b) use popular libraries to implement it
 - Prefer matrix-wide operations. Avoid per-asset loops.
+
+GROUNDING — DO NOT INVENT MODULES
+Every node's `tool` field MUST reference a function that the planner has
+confirmed exists. Confirmation means one of:
+  • A `search_code` / `list_modules` (fruit-thrower MCP) result for the
+    function name returns a non-empty hit, OR
+  • A `search_tools` / `get_tool_doc` (data_mcp MCP) result confirms the
+    findata wrapper exists, OR
+  • The function is `inline` (the orchestrator implements it inside the
+    notebook), OR
+  • The function is `generate_function` (the orchestrator authors it via
+    the fruit-thrower MCP before importing it).
+
+NEVER invent module paths like `research.pairs`, `portfolio.signals`,
+`features.utils`, etc. The orchestrator will fail to import them and the
+validator will reject the notebook. If the transformation you need isn't
+indexed, set `tool: inline` and describe it in the description; the
+orchestrator will write the helper inside the notebook itself.
 DAG DESIGN RULES (IMPORTANT)
 1) Use MACRO NODES, not micro steps.
    - Each node should represent a coherent stage (e.g., "clean+align data", "compute features", "build signal").

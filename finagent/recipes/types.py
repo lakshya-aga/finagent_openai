@@ -33,7 +33,7 @@ class DataSource(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    kind: Literal["yfinance", "fred", "fin_kit", "csv", "fama_french", "cboe", "coingecko"]
+    kind: Literal["yfinance", "fred", "fin_kit", "csv", "fama_french", "cboe", "coingecko", "binance"]
     # All other fields are kind-specific; the loader knows what to look for.
     # Examples:
     #   yfinance:  tickers (list[str]), start (date), end (date), interval

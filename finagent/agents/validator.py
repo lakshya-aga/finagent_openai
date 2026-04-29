@@ -32,13 +32,34 @@ DIAGNOSIS RULES (in priority order)
 ─────────────────────────────────────
 A. ModuleNotFoundError / ImportError
    • Extract the missing module name from `error.evalue`.
+   • If `error.from_lint` is True, the failure was detected at parse time
+     by `validate_run`'s pre-kernel lint. The cell never ran. The
+     `error.missing_modules` list has every offender with cell_index +
+     line. Treat each one with the rules below.
    • If the module is "findata" or "mlfinlab":
        – STOP immediately.
        – Return a FATAL message: tell the user to install those packages
          manually (`pip install findata mlfinlab`) and re-run.
        – Do NOT attempt any further fixes.
    • Otherwise: call `install_packages([module_name])`.
-       – If install_packages returns fatal=True, STOP and relay the message.
+       – If install_packages returns `fatal=True` with
+         `reason="module_not_on_pypi"`, the orchestrator hallucinated the
+         module name. **Do NOT escalate immediately.** Instead:
+            1. Use `find_regex_in_notebook_code` with the bad import
+               (e.g. regex `from\s+research\.\S+\s+import|import\s+research`)
+               to locate every offending cell.
+            2. Use the fruit-thrower MCP `search_code` for the symbols
+               that import was trying to bring in. If a real fin-kit
+               equivalent exists, replace the import with that.
+            3. If no equivalent exists, rewrite the cell with `replace_cell`
+               to inline the missing logic using stdlib + pandas + numpy
+               + sklearn + statsmodels. Preserve the cell's
+               `dag_node_id` and add a short rationale noting the rewrite.
+            4. Re-run `validate_run`. If it still fails, escalate with
+               HUMAN_NEEDED and a clear note that the orchestrator
+               referenced non-existent modules.
+       – If install_packages returns `fatal=True` for any other reason
+         (e.g. PROTECTED_PACKAGES), STOP and relay the message.
        – If install succeeds, go back to step 2.
 
 B. AttributeError / NameError / TypeError / ValueError / KeyError / other logic errors

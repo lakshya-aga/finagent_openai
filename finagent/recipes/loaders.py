@@ -74,6 +74,20 @@ def _coingecko(coin_id: str, vs_currency: str = "usd", days: int | str = 90,
     return get_coingecko_ohlcv(coin_id, vs_currency=vs_currency, days=days)
 
 
+def _binance(symbol: str, interval: str = "1d",
+             start_date: str | None = None, end_date: str | None = None,
+             limit: int = 1000, **kwargs) -> pd.DataFrame:
+    from findata.binance import get_binance_ohlcv
+
+    return get_binance_ohlcv(
+        symbol,
+        interval=interval,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+    )
+
+
 def _fin_kit(function: str, kwargs: dict[str, Any] | None = None,
              **_more) -> pd.DataFrame:
     """Generic adapter — looks up `function` as a dotted path under fin_kit."""
@@ -92,5 +106,6 @@ _DISPATCH = {
     "fama_french": _fama_french,
     "cboe": _cboe,
     "coingecko": _coingecko,
+    "binance": _binance,
     "fin_kit": _fin_kit,
 }
