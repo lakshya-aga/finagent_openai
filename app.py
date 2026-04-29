@@ -241,10 +241,70 @@ async def delete_run(run_id: str):
 
 @app.get("/api/recipes/templates")
 async def list_recipe_templates():
-    """Return the templates the compiler can render deterministically."""
-    from finagent.recipes import available_templates
+    """Return every registered template with its rich metadata.
 
-    return {"templates": available_templates()}
+    Each template module declares a METADATA dict (archetype, tagline,
+    presets, etc.). The Recipe Builder uses this to render the gallery
+    cards and pre-load preset YAML when the user picks a starting point.
+    """
+    from finagent.recipes.templates import REGISTRY
+
+    out = []
+    for name, module in REGISTRY.items():
+        meta = getattr(module, "METADATA", None)
+        if meta is None:
+            out.append({"name": name})
+        else:
+            out.append({"name": name, **meta})
+    return {"templates": out}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Searches.
+#
+# A Search is a budgeted sweep over recipe parameters driven by a hypothesis
+# policy (random / grid for now; LLM-creative comes later). Every iteration
+# is a real recipe submission backed by the existing run pipeline, so the
+# resulting notebooks and lineage graphs work the same way.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.post("/api/searches")
+async def submit_search(payload: dict):
+    """Submit a search; returns the search id + final summary once done.
+
+    Body shape mirrors finagent.searches.types.SearchSubmission.
+    Synchronous from the caller's perspective — runs in a worker thread
+    so the asyncio loop stays free for streaming chat etc.
+    """
+    from finagent.searches import SearchSubmission, execute_search
+
+    try:
+        sub = SearchSubmission.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid search: {exc}")
+
+    return await asyncio.to_thread(execute_search, sub)
+
+
+@app.get("/api/searches/{search_id}")
+async def get_search(search_id: str):
+    from finagent.experiments import get_store
+
+    store = get_store()
+    search = store.get_search(search_id)
+    if not search:
+        raise HTTPException(status_code=404, detail="search not found")
+    runs = [r.as_public_dict() for r in store.runs_in_search(search_id)]
+    return {**search.as_public_dict(), "runs": runs}
+
+
+@app.get("/api/projects/{name}/searches")
+async def list_project_searches(name: str):
+    from finagent.experiments import get_store
+
+    searches = [s.as_public_dict() for s in get_store().list_searches(project=name)]
+    return {"project": name, "searches": searches}
 
 
 @app.post("/api/notebooks/{name}/run")

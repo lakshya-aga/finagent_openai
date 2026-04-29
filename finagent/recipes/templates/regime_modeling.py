@@ -31,6 +31,122 @@ class CellSpec:
 TEMPLATE_NAME = "regime_modeling"
 
 
+# Metadata surfaced to the frontend Recipe Builder. Each template declares
+# its archetype (so the gallery can group cards), a short pitch, the field
+# combinations it supports, and one or more named presets that act as
+# starting points. Presets are full recipe YAML strings — when the user
+# picks one, the editor pre-loads it.
+METADATA = {
+    "name": TEMPLATE_NAME,
+    "title": "Market regime detection",
+    "archetype": "regime",
+    "tagline": "Classify the market into discrete regimes (risk-on / risk-off / volatile) and trade against the state.",
+    "description": (
+        "Build either an unsupervised regime model (HMM, GMM) or a supervised "
+        "regime classifier (XGBoost, RandomForest) on the same feature pipeline. "
+        "Walk-forward evaluation; emits standard asset_returns + asset_weights "
+        "frames so the project page can compare runs side-by-side."
+    ),
+    "supports": {
+        "targets": ["unsupervised_regime", "supervised_classification"],
+        "models": [
+            "hmmlearn.hmm.GaussianHMM",
+            "sklearn.mixture.GaussianMixture",
+            "xgboost.XGBClassifier",
+            "sklearn.ensemble.RandomForestClassifier",
+        ],
+        "metrics": [
+            "log_likelihood", "regime_persistence", "transition_entropy",
+            "accuracy", "f1",
+        ],
+    },
+    "presets": [
+        {
+            "key": "hmm_3state",
+            "label": "HMM · 3-state (unsupervised)",
+            "summary": "Gaussian HMM on SPY/TLT/GLD with macro features.",
+            "yaml": (
+                "name: regime_hmm_v1\n"
+                "project: regime_research\n"
+                "template: regime_modeling\n"
+                "description: HMM regime model on SPY/TLT/GLD with macro features.\n\n"
+                "data:\n"
+                "  prices:\n"
+                "    kind: yfinance\n"
+                "    tickers: [SPY, TLT, GLD]\n"
+                "    start: 2018-01-01\n"
+                "  macro:\n"
+                "    kind: fred\n"
+                "    series_ids: [VIXCLS, T10Y2Y, DGS10]\n"
+                "    start: 2018-01-01\n\n"
+                "target:\n"
+                "  kind: unsupervised_regime\n"
+                "  method: hmm\n"
+                "  n_states: 3\n\n"
+                "features:\n"
+                "  - name: returns_lookback\n"
+                "    params: { window: 1 }\n"
+                "  - name: rolling_vol\n"
+                "    params: { window: 20 }\n\n"
+                "model:\n"
+                "  class_path: hmmlearn.hmm.GaussianHMM\n"
+                "  params:\n"
+                "    n_components: 3\n"
+                "    covariance_type: full\n"
+                "    n_iter: 100\n\n"
+                "evaluation:\n"
+                "  splits: walk_forward\n"
+                "  train_window: 504\n"
+                "  test_window: 21\n"
+                "  metrics: [log_likelihood, regime_persistence, transition_entropy]\n\n"
+                "seed: 42\n"
+            ),
+        },
+        {
+            "key": "xgb_classifier",
+            "label": "XGBoost · forward-return-sign (supervised)",
+            "summary": "XGBoost classifier predicting 5-day forward return sign on SPY.",
+            "yaml": (
+                "name: regime_xgb_v1\n"
+                "project: regime_research\n"
+                "template: regime_modeling\n"
+                "description: XGBoost classifier predicting 5d forward return sign.\n\n"
+                "data:\n"
+                "  prices:\n"
+                "    kind: yfinance\n"
+                "    tickers: [SPY]\n"
+                "    start: 2018-01-01\n\n"
+                "target:\n"
+                "  kind: supervised_classification\n"
+                "  label_strategy: future_return_sign\n"
+                "  horizon_days: 5\n\n"
+                "features:\n"
+                "  - name: returns_lookback\n"
+                "    params: { window: 1 }\n"
+                "  - name: rolling_vol\n"
+                "    params: { window: 20 }\n"
+                "  - name: zscore\n"
+                "    params: { window: 60 }\n\n"
+                "model:\n"
+                "  class_path: xgboost.XGBClassifier\n"
+                "  params:\n"
+                "    n_estimators: 200\n"
+                "    max_depth: 4\n"
+                "    learning_rate: 0.05\n"
+                "    use_label_encoder: false\n"
+                "    eval_metric: logloss\n\n"
+                "evaluation:\n"
+                "  splits: walk_forward\n"
+                "  train_window: 504\n"
+                "  test_window: 21\n"
+                "  metrics: [accuracy, f1]\n\n"
+                "seed: 42\n"
+            ),
+        },
+    ],
+}
+
+
 def supports(recipe: Recipe) -> bool:
     """Return True if this template can compile the recipe."""
     if recipe.template != TEMPLATE_NAME:
