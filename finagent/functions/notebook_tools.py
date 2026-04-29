@@ -6,6 +6,7 @@ import logging
 import queue
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict
 
 import nbformat
@@ -72,6 +73,118 @@ def find_regex_in_notebook_code(regex_pattern: str, case_sensitive: bool):
         "case_sensitive": case_sensitive,
         "num_matches": len(matches),
         "matches": matches,
+    }
+
+
+def run_all_cells_to_disk(path: str, timeout: int = 120) -> dict:
+    """Execute every code cell in a single persistent kernel, write outputs back.
+
+    Unlike :func:`validate_run`, this does NOT stop at the first error — every
+    cell gets a turn so the user-visible "Run all" button populates as much
+    of the notebook as possible. Errors are still attached to the offending
+    cells (same nbformat error output shape), so the viewer can highlight
+    them, but downstream cells run too — which is correct for "what does my
+    notebook look like, output-wise?" even when one cell crashes.
+
+    Returns a summary dict with the per-cell execution status.
+    """
+    notebook_path = Path(path)
+    if not notebook_path.exists():
+        return {"success": False, "error": f"notebook not found: {notebook_path}"}
+
+    with open(notebook_path, "r", encoding="utf-8") as f:
+        nb = nbformat.read(f, as_version=4)
+
+    code_cells = [(i, c) for i, c in enumerate(nb.cells) if c.cell_type == "code"]
+    if not code_cells:
+        return {"success": True, "executed_cells": 0, "errors": []}
+
+    km = KernelManager(kernel_name="finagent-python")
+    km.start_kernel()
+    errors: list[dict] = []
+    execution_count = 0
+
+    try:
+        kc = km.client()
+        kc.start_channels()
+        kc.wait_for_ready(timeout=timeout)
+
+        for cell_idx, cell in code_cells:
+            if not cell.source.strip():
+                cell.outputs = []
+                continue
+
+            execution_count += 1
+            msg_id = kc.execute(cell.source)
+            cell_outputs = []
+            deadline = time.time() + timeout
+
+            while time.time() < deadline:
+                remaining = max(0.1, deadline - time.time())
+                try:
+                    msg = kc.get_iopub_msg(timeout=remaining)
+                except queue.Empty:
+                    break
+                if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                    continue
+                if msg.get("msg_type") == "status" and msg.get("content", {}).get("execution_state") == "idle":
+                    break
+                out = _serialize_output(msg)
+                if out is not None:
+                    cell_outputs.append(out)
+
+            cell.outputs = []
+            cell["execution_count"] = execution_count
+            for out in cell_outputs:
+                ot = out["output_type"]
+                if ot == "stream":
+                    cell.outputs.append(nbformat.v4.new_output(
+                        output_type="stream", name=out.get("name", "stdout"),
+                        text=out.get("text", ""),
+                    ))
+                elif ot in {"display_data", "execute_result"}:
+                    cell.outputs.append(nbformat.v4.new_output(
+                        output_type=ot, data=out.get("data", {}),
+                        metadata=out.get("metadata", {}),
+                        **({"execution_count": execution_count} if ot == "execute_result" else {}),
+                    ))
+                elif ot == "error":
+                    cell.outputs.append(nbformat.v4.new_output(
+                        output_type="error",
+                        ename=out.get("ename", ""),
+                        evalue=out.get("evalue", ""),
+                        traceback=out.get("traceback", []),
+                    ))
+
+            err = next((o for o in cell_outputs if o["output_type"] == "error"), None)
+            if err:
+                errors.append({
+                    "cell_index": cell_idx,
+                    "ename": err.get("ename", ""),
+                    "evalue": err.get("evalue", ""),
+                })
+                # KEY DIFFERENCE vs validate_run: do NOT break. Keep running so
+                # later cells still get outputs even if one fails.
+
+    finally:
+        try:
+            kc.stop_channels()
+        except Exception:
+            pass
+        try:
+            km.shutdown_kernel(now=True)
+        except Exception:
+            pass
+
+    with open(notebook_path, "w", encoding="utf-8") as f:
+        nbformat.write(nb, f)
+
+    return {
+        "success": True,
+        "path": str(notebook_path),
+        "executed_cells": execution_count,
+        "error_count": len(errors),
+        "errors": errors,
     }
 
 

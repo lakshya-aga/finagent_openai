@@ -181,6 +181,25 @@ async def download_notebook_by_name(name: str):
     )
 
 
+@app.post("/api/notebooks/{name}/run")
+async def run_notebook_all_cells(name: str):
+    """Re-execute every code cell in a notebook and persist outputs back.
+
+    Unlike the validator agent's `validate_run` (which stops at the first
+    error so it can fix it), this endpoint keeps going past errors so users
+    get as much output as possible from the "Run all" button.
+    """
+    from finagent.functions.notebook_tools import run_all_cells_to_disk
+
+    path = _safe_notebook_path(name)
+    # Run in a worker thread — kernel boot + execution is sync and can take
+    # tens of seconds; don't block the asyncio loop.
+    result = await asyncio.to_thread(run_all_cells_to_disk, str(path), 180)
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error") or "run failed")
+    return result
+
+
 @app.get("/api/notebooks/{name}/lineage")
 async def get_notebook_lineage(name: str, method: str = "ast", refresh: bool = False):
     """Return a data-lineage graph for a notebook.
