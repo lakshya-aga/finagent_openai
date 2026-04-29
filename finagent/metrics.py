@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .experiments import ExperimentStore, get_store
 
@@ -194,6 +194,51 @@ def _search_count(store, start, end) -> Optional[float]:
     return float(len(rows))
 
 
+# ── failure-mode metrics (parsed from existing run.error text) ─────────
+
+
+def _error_match_rate(needles: list[str]) -> Callable[[Any, float, float], Optional[float]]:
+    """Build a metric fn: fraction of finished runs whose error contains
+    *any* of the given substrings (case-insensitive)."""
+
+    def fn(store, start_ts, end_ts):
+        rows = _runs_in_window(store, start_ts, end_ts)
+        if not rows:
+            return None
+        hits = 0
+        for r in rows:
+            err = (r.error or "").lower()
+            if any(n.lower() in err for n in needles):
+                hits += 1
+        return hits / len(rows)
+
+    return fn
+
+
+def _recipe_compile_fail_rate(store, start, end) -> Optional[float]:
+    """Compile-fails as a fraction of *templated* runs only — divides by
+    the meaningful denominator instead of all runs."""
+    rows = [r for r in _runs_in_window(store, start, end) if r.template]
+    if not rows:
+        return None
+    hits = 0
+    for r in rows:
+        err = (r.error or "").lower()
+        if "unknown template" in err or "does not support" in err or "no template" in err:
+            hits += 1
+    return hits / len(rows)
+
+
+def _template_draft_count(store, start, end) -> Optional[float]:
+    """Pending drafts on disk. Not bound to a time window — the count is
+    a snapshot. Returned as a float so the metric registry stays uniform."""
+    try:
+        from .templates_authoring import count_drafts
+    except Exception:
+        return None
+    return float(count_drafts())
+
+
 # ── registry ────────────────────────────────────────────────────────────
 
 
@@ -269,6 +314,77 @@ METRICS: dict[str, MetricSpec] = {
         direction="up_is_good",
         fmt="count",
         fn=_search_count,
+    ),
+    # ── failure-mode signals (parsed from run.error) ───────────────────
+    "lint_blocked_rate": MetricSpec(
+        key="lint_blocked_rate",
+        label="Lint-blocked rate",
+        description=(
+            "% of finished runs where the pre-kernel import lint caught a "
+            "missing module before the kernel booted. Lower is better — "
+            "high values mean the orchestrator is hallucinating imports."
+        ),
+        direction="down_is_good",
+        fmt="percent",
+        fn=_error_match_rate(["before kernel boot", "from_lint"]),
+    ),
+    "human_needed_rate": MetricSpec(
+        key="human_needed_rate",
+        label="HUMAN_NEEDED escalation rate",
+        description=(
+            "% of finished runs where the validator gave up and asked for "
+            "human intervention. Driven by repeated fixes failing or "
+            "hallucinated modules outside the auto-recovery path."
+        ),
+        direction="down_is_good",
+        fmt="percent",
+        fn=_error_match_rate(["human_needed", "human needed"]),
+    ),
+    "module_not_found_rate": MetricSpec(
+        key="module_not_found_rate",
+        label="ModuleNotFoundError rate",
+        description=(
+            "% of finished runs that hit ModuleNotFoundError at any point "
+            "(lint pre-kernel + runtime). Combines invented imports + "
+            "missing pinned deps."
+        ),
+        direction="down_is_good",
+        fmt="percent",
+        fn=_error_match_rate(["modulenotfounderror"]),
+    ),
+    "pip_fatal_rate": MetricSpec(
+        key="pip_fatal_rate",
+        label="install_packages fatal rate",
+        description=(
+            "% of finished runs where install_packages returned fatal=True "
+            "(pip's stderr said 'No matching distribution'). Direct signal "
+            "of orchestrator-invented module names that escaped the lint."
+        ),
+        direction="down_is_good",
+        fmt="percent",
+        fn=_error_match_rate(["module_not_on_pypi"]),
+    ),
+    "recipe_compile_fail_rate": MetricSpec(
+        key="recipe_compile_fail_rate",
+        label="Recipe compile failure rate",
+        description=(
+            "% of templated runs whose compile() rejected the recipe "
+            "shape (unknown template / unsupported target+model combo)."
+        ),
+        direction="down_is_good",
+        fmt="percent",
+        fn=_recipe_compile_fail_rate,
+    ),
+    "template_draft_count": MetricSpec(
+        key="template_draft_count",
+        label="Pending template drafts",
+        description=(
+            "Drafts waiting in templates/_drafts/ for human review. Not "
+            "windowed — current snapshot."
+        ),
+        direction="up_is_good",
+        fmt="count",
+        fn=_template_draft_count,
     ),
 }
 

@@ -273,6 +273,54 @@ async def admin_metric_keys():
     return {"keys": list_metric_keys()}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Template authoring (AI-drafted templates).
+#
+# A user describes a strategy in free text → POST /api/templates/draft runs
+# the template-author agent, validates the contract via static AST + import
+# check, writes the source to finagent/recipes/templates/_drafts/<slug>.py.
+# Accepting a draft moves it out of _drafts/ so the registry's auto-
+# discovery picks it up on next process start.
+# Runtime verification (running compile() against a smoke recipe) is
+# explicitly out of scope today.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _TemplateDraftRequest(BaseModel):
+    description: str
+
+
+@app.post("/api/templates/draft")
+async def draft_template_endpoint(req: _TemplateDraftRequest):
+    from finagent.templates_authoring import draft_template
+
+    return await draft_template(req.description)
+
+
+@app.get("/api/templates/drafts")
+async def list_template_drafts():
+    from finagent.templates_authoring import list_drafts
+
+    return {"drafts": list_drafts()}
+
+
+@app.post("/api/templates/drafts/{slug}/accept")
+async def accept_template_draft(slug: str):
+    from finagent.templates_authoring import accept_draft
+
+    result = accept_draft(slug)
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=400, detail=result.get("errors") or result)
+    return result
+
+
+@app.post("/api/templates/drafts/{slug}/reject")
+async def reject_template_draft(slug: str):
+    from finagent.templates_authoring import reject_draft
+
+    return reject_draft(slug)
+
+
 @app.get("/api/recipes/templates")
 async def list_recipe_templates():
     """Return every registered template with its rich metadata.
