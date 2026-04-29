@@ -46,6 +46,61 @@ def _new_trace_metadata() -> dict:
     }
 
 
+def _build_notebook_context(path: Optional[str]) -> str:
+    """Render a compact, truncated view of a notebook for inline prompt injection.
+
+    Per cell:
+      - source capped at ~600 chars (head + tail if longer)
+      - first text/plain or text/html output capped at ~400 chars
+    Cells without source/output are still listed so the agent knows the index
+    layout. Returns an empty string if `path` is missing or unreadable.
+    """
+    if not path:
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            nb = nbformat.read(f, as_version=4)
+    except Exception:
+        return ""
+
+    lines: list[str] = []
+    for i, cell in enumerate(nb.cells):
+        ctype = cell.cell_type
+        src = cell.source or ""
+        if len(src) > 600:
+            src = src[:400] + "\n…\n" + src[-180:]
+        meta = cell.metadata.get("finagent") if hasattr(cell, "metadata") else None
+        node = (meta or {}).get("node_id", "")
+        head = f"[Cell {i} | {ctype}{f' | {node}' if node else ''}]"
+        lines.append(f"{head}\n{src}")
+        if ctype == "code":
+            for out in (cell.get("outputs") or []):
+                otype = out.get("output_type")
+                if otype == "stream":
+                    txt = (out.get("text") or "")
+                    if isinstance(txt, list):
+                        txt = "".join(txt)
+                    if txt.strip():
+                        snippet = txt if len(txt) <= 400 else txt[:380] + "…"
+                        lines.append(f"  [stream] {snippet.strip()}")
+                        break
+                elif otype in ("execute_result", "display_data"):
+                    data = out.get("data") or {}
+                    plain = data.get("text/plain", "")
+                    if isinstance(plain, list):
+                        plain = "".join(plain)
+                    if plain.strip():
+                        snippet = plain if len(plain) <= 400 else plain[:380] + "…"
+                        lines.append(f"  [output] {snippet.strip()}")
+                        break
+                elif otype == "error":
+                    lines.append(
+                        f"  [error] {out.get('ename','')}: {out.get('evalue','')}"
+                    )
+                    break
+    return "\n\n".join(lines)
+
+
 class WorkflowInput(BaseModel):
     input_as_text: str
 
@@ -142,15 +197,20 @@ async def run_workflow(
         # ── QUESTION MODE ────────────────────────────────────────────────────
         if intent == "question":
             await _emit("Thinking...")
-            # The question agent now has the read_notebook tool, so we don't
-            # dump the full notebook source into the prompt anymore. Just tell
-            # it where to look — it pulls cells (and outputs!) on demand.
-            if existing_notebook_path:
+            # Inject a compact notebook context inline so the agent has
+            # immediate ground truth and almost never needs to call
+            # read_notebook. Without this, agents tended to call the tool,
+            # receive a large dump (cells + outputs), and stall before
+            # producing a final answer. read_notebook stays available for
+            # cases the agent really needs the full source/output of one
+            # specific cell.
+            nb_context = _build_notebook_context(existing_notebook_path)
+            if nb_context:
                 q_input = (
-                    f"There is an existing notebook at {existing_notebook_path}. "
-                    f"If the question requires inspecting cells, code, or outputs, "
-                    f"call `read_notebook` to fetch them.\n\n"
-                    f"Question: {workflow['input_as_text']}"
+                    f"NOTEBOOK CONTEXT (truncated — call `read_notebook` only "
+                    f"if you need the *full* source or all outputs of a specific cell):\n"
+                    f"{nb_context}\n\n"
+                    f"QUESTION: {workflow['input_as_text']}"
                 )
             else:
                 q_input = workflow["input_as_text"]
@@ -165,6 +225,9 @@ async def run_workflow(
                 ],
                 run_config=RunConfig(),
                 hooks=_hooks("question"),
+                # One optional read_notebook + final answer is plenty.
+                # Without this cap an empty model turn could hang here.
+                max_turns=6,
             )
             await emit_phase(progress_cb, "question", "end")
             await _emit_trace(q_result)
