@@ -181,6 +181,42 @@ async def download_notebook_by_name(name: str):
     )
 
 
+@app.get("/api/notebooks/{name}/lineage")
+async def get_notebook_lineage(name: str, method: str = "ast", refresh: bool = False):
+    """Return a data-lineage graph for a notebook.
+
+    method=ast      → static analysis (fast, always available)
+    method=runtime  → runtime-traced lineage (requires the notebook to
+                      execute cleanly in a fresh subprocess; slower)
+
+    By default we read the cached graph from `nb.metadata['finagent_lineage'][method]`
+    if it was computed during the workflow. Pass `refresh=true` to recompute.
+    """
+    import nbformat as _nbformat
+    from finagent.lineage import extract_lineage_ast, extract_lineage_runtime
+
+    if method not in ("ast", "runtime"):
+        raise HTTPException(status_code=400, detail="method must be 'ast' or 'runtime'")
+
+    path = _safe_notebook_path(name)
+    if not refresh:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                nb = _nbformat.read(f, as_version=4)
+            cached = (nb.metadata.get("finagent_lineage") or {}).get(method)
+            if cached:
+                return cached
+        except Exception:
+            logging.exception("could not read cached lineage for %s", name)
+
+    extractor = extract_lineage_ast if method == "ast" else extract_lineage_runtime
+    try:
+        return extractor(str(path))
+    except Exception as exc:
+        logging.exception("lineage extraction failed for %s method=%s", name, method)
+        raise HTTPException(status_code=500, detail=f"lineage failed: {exc}")
+
+
 _VECTOR_STORE_ID = os.environ.get(
     "OPENAI_VECTOR_STORE_ID", "vs_69a81b0197a481919e14c2d66197af7d"
 )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -25,6 +26,7 @@ from .agents import (
 from .functions import extract_trace_markdown
 from .functions.notebook_io import _get_current_path
 from .hooks import StreamingHooks, build_notebook_outline, emit_phase
+from .lineage import extract_lineage_ast, extract_lineage_runtime
 from .mcp_connections import make_data_mcp, make_fruit_thrower
 
 
@@ -44,6 +46,24 @@ def _new_trace_metadata() -> dict:
         "__trace_source__": _TRACE_SOURCE,
         "workflow_id": f"wf_{uuid.uuid4().hex}",
     }
+
+
+def _stash_lineage_metadata(path: str, method: str, lineage: dict) -> None:
+    """Persist a lineage graph onto nb.metadata['finagent_lineage'][method].
+
+    Lets the viewer fetch lineage straight from the .ipynb file rather than
+    re-running the extractor on every page load. Best-effort: failures are
+    logged but don't break the workflow.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            nb = nbformat.read(f, as_version=4)
+        bucket = nb.metadata.setdefault("finagent_lineage", {})
+        bucket[method] = lineage
+        with open(path, "w", encoding="utf-8") as f:
+            nbformat.write(nb, f)
+    except Exception:
+        logging.exception("could not stash %s lineage on %s", method, path)
 
 
 def _build_notebook_context(path: Optional[str]) -> str:
@@ -157,6 +177,49 @@ async def run_workflow(
                 await progress_cb({"type": "event", "data": build_notebook_outline(path)})
             except Exception:
                 logging.exception("emit_outline failed for %s", path)
+
+    async def _emit_lineage(path: Optional[str]) -> None:
+        """Compute AST lineage immediately and runtime lineage in the
+        background; stash both in nb.metadata so the viewer can fetch them
+        on demand. Runtime tracing is best-effort — it can fail if the
+        notebook needs missing deps or hangs, so we don't await it.
+        """
+        if not path:
+            return
+        try:
+            ast_lin = extract_lineage_ast(path)
+            _stash_lineage_metadata(path, "ast", ast_lin)
+            if progress_cb:
+                await progress_cb({"type": "event", "data": {
+                    "type": "notebook_lineage",
+                    "method": "ast",
+                    "path": str(path),
+                    "node_count": len(ast_lin.get("nodes", [])),
+                    "edge_count": len(ast_lin.get("edges", [])),
+                }})
+        except Exception:
+            logging.exception("AST lineage failed for %s", path)
+
+        # Runtime tracer runs in a subprocess and may take a while; fire-and-
+        # forget so the UI gets the AST view immediately and the runtime view
+        # whenever it lands.
+        async def _runtime_trace():
+            try:
+                rt_lin = await asyncio.to_thread(extract_lineage_runtime, path)
+                _stash_lineage_metadata(path, "runtime", rt_lin)
+                if progress_cb:
+                    await progress_cb({"type": "event", "data": {
+                        "type": "notebook_lineage",
+                        "method": "runtime",
+                        "path": str(path),
+                        "node_count": len(rt_lin.get("nodes", [])),
+                        "edge_count": len(rt_lin.get("edges", [])),
+                        "error": rt_lin.get("error"),
+                    }})
+            except Exception:
+                logging.exception("runtime lineage failed for %s", path)
+
+        asyncio.create_task(_runtime_trace())
 
     def _hooks(phase: str) -> StreamingHooks:
         return StreamingHooks(progress_cb, phase)
@@ -323,8 +386,9 @@ async def run_workflow(
                     )
                 await emit_phase(progress_cb, "edit_validate", "end")
                 await _emit_trace(val_result_temp)
-                # Validator may have replaced cells (and rationales). Refresh outline.
+                # Validator may have replaced cells (and rationales). Refresh outline + lineage.
                 await _emit_outline(existing_notebook_path)
+                await _emit_lineage(existing_notebook_path)
                 return {
                     "output_text": val_result_temp.final_output_as(str),
                     "notebook_path": existing_notebook_path,
@@ -423,6 +487,9 @@ async def run_workflow(
         final_path = str(_get_current_path())
         # Validator may have rewritten cells; emit a final outline reflecting that.
         await _emit_outline(final_path)
+        # Lineage graph: AST runs synchronously, runtime tracer fires in
+        # the background and lands a few seconds later via its own event.
+        await _emit_lineage(final_path)
 
         return {
             "output_text": validatorandfixingagent_result_temp.final_output_as(str),
