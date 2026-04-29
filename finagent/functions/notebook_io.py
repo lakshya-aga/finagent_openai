@@ -27,10 +27,42 @@ def _get_latest_path() -> Path:
         i += 1
 
 
+def _notebook_index(name: str) -> int:
+    """Extract the trailing N from `notebook_N.ipynb`. Returns -1 if not parseable."""
+    if not name.endswith(".ipynb"):
+        return -1
+    stem = name[: -len(".ipynb")]
+    if "_" not in stem:
+        return -1
+    tail = stem.rsplit("_", 1)[1]
+    try:
+        return int(tail)
+    except ValueError:
+        return -1
+
+
 def _get_current_path() -> Path:
-    """Return the most-recently-named notebook in outputs/."""
-    files = sorted(os.listdir(_OUTPUTS_DIR))
-    return _OUTPUTS_DIR / files[-1]
+    """Return the highest-numbered notebook_N.ipynb in outputs/.
+
+    Lexicographic sorting is wrong here: ``notebook_10.ipynb`` < ``notebook_2.ipynb``
+    on string comparison would route every cell-tool call to the older file
+    once the workflow generates its 10th notebook. Sort by the integer stem
+    instead so the "current" notebook tracks the freshest run.
+    """
+    candidates = [
+        f for f in os.listdir(_OUTPUTS_DIR)
+        if f.endswith(".ipynb") and _notebook_index(f) >= 0
+    ]
+    if not candidates:
+        # Fall back to "any .ipynb" by mtime if nothing matches the
+        # notebook_N convention — protects against custom-named uploads.
+        any_ipynb = [f for f in os.listdir(_OUTPUTS_DIR) if f.endswith(".ipynb")]
+        if not any_ipynb:
+            raise FileNotFoundError(f"No notebooks found in {_OUTPUTS_DIR}")
+        any_ipynb.sort(key=lambda f: (_OUTPUTS_DIR / f).stat().st_mtime)
+        return _OUTPUTS_DIR / any_ipynb[-1]
+    candidates.sort(key=_notebook_index)
+    return _OUTPUTS_DIR / candidates[-1]
 
 
 def _ensure_parent_dir(path) -> None:

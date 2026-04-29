@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Optional
 
 import nbformat
@@ -34,10 +35,15 @@ logging.basicConfig(
 )
 
 
-_TRACE_METADATA = {
-    "__trace_source__": "agent-builder",
-    "workflow_id": "wf_69a81a9aedf48190bc2aaab7923d4ae10e4febf1cb72186f",
-}
+_TRACE_SOURCE = "agent-builder"
+
+
+def _new_trace_metadata() -> dict:
+    """Build a fresh trace-metadata dict with a per-run workflow id."""
+    return {
+        "__trace_source__": _TRACE_SOURCE,
+        "workflow_id": f"wf_{uuid.uuid4().hex}",
+    }
 
 
 class WorkflowInput(BaseModel):
@@ -100,7 +106,30 @@ async def run_workflow(
     def _hooks(phase: str) -> StreamingHooks:
         return StreamingHooks(progress_cb, phase)
 
-    logging.info(f"run_workflow mode={'edit' if existing_notebook_path else 'new'}")
+    async def _emit_agent_input(phase: str, agent_name: str, prompt: str) -> None:
+        """Surface the prompt sent to each agent so users see the full CoT chain.
+
+        Truncates the prompt to ~2000 chars on the wire — a long DAG / notebook
+        dump would otherwise flood the chat. The full prompt remains in the
+        OpenAI Agents trace.
+        """
+        if not progress_cb:
+            return
+        text = prompt if len(prompt) <= 2000 else prompt[:2000] + "…"
+        await progress_cb({"type": "event", "data": {
+            "type": "agent_input",
+            "phase": phase,
+            "agent": agent_name,
+            "prompt": text,
+        }})
+
+    # One workflow_id per request — trace_metadata gets a fresh value each run
+    # so OpenAI traces filter cleanly per-conversation.
+    trace_metadata = _new_trace_metadata()
+    logging.info(
+        f"run_workflow mode={'edit' if existing_notebook_path else 'new'} "
+        f"workflow_id={trace_metadata['workflow_id']}"
+    )
 
     with trace("Finagent"):
         workflow = workflow_input.model_dump()
@@ -113,22 +142,21 @@ async def run_workflow(
         # ── QUESTION MODE ────────────────────────────────────────────────────
         if intent == "question":
             await _emit("Thinking...")
-            nb_context = ""
+            # The question agent now has the read_notebook tool, so we don't
+            # dump the full notebook source into the prompt anymore. Just tell
+            # it where to look — it pulls cells (and outputs!) on demand.
             if existing_notebook_path:
-                try:
-                    nb = nbformat.read(open(existing_notebook_path), as_version=4)
-                    lines = []
-                    for i, cell in enumerate(nb.cells):
-                        lines.append(f"[Cell {i} | {cell.cell_type}]\n{cell.source}")
-                    nb_context = "\n\n---\n\n".join(lines)
-                except Exception:
-                    pass
-
-            q_input = workflow["input_as_text"]
-            if nb_context:
-                q_input = f"NOTEBOOK CONTEXT:\n{nb_context}\n\nQUESTION: {q_input}"
+                q_input = (
+                    f"There is an existing notebook at {existing_notebook_path}. "
+                    f"If the question requires inspecting cells, code, or outputs, "
+                    f"call `read_notebook` to fetch them.\n\n"
+                    f"Question: {workflow['input_as_text']}"
+                )
+            else:
+                q_input = workflow["input_as_text"]
 
             await emit_phase(progress_cb, "question", "start")
+            await _emit_agent_input("question", question_agent.name, q_input)
             q_result = await Runner.run(
                 question_agent,
                 input=[
@@ -148,7 +176,8 @@ async def run_workflow(
 
         # ── EDIT MODE ────────────────────────────────────────────────────────
         if intent == "edit" and existing_notebook_path:
-            nb = nbformat.read(open(existing_notebook_path), as_version=4)
+            with open(existing_notebook_path, "r", encoding="utf-8") as _nb_f:
+                nb = nbformat.read(_nb_f, as_version=4)
             nb_summary_lines = []
             for i, cell in enumerate(nb.cells):
                 snippet = cell.source[:200].replace("\n", " ")
@@ -161,6 +190,7 @@ async def run_workflow(
                 f"USER REQUEST: {workflow['input_as_text']}"
             )
             await emit_phase(progress_cb, "edit_plan", "start")
+            await _emit_agent_input("edit_plan", edit_planner.name, edit_planner_input)
             edit_planner_result_temp = await Runner.run(
                 edit_planner,
                 input=[{"role": "user", "content": [{"type": "input_text", "text": edit_planner_input}]}],
@@ -181,6 +211,10 @@ async def run_workflow(
             else:
                 await _emit("Applying edits...")
                 await emit_phase(progress_cb, "edit_apply", "start")
+                edit_apply_prompt = (
+                    f"Apply this diff spec to the current notebook:\n{diff_spec_raw}"
+                )
+                await _emit_agent_input("edit_apply", edit_orchestration_agent.name, edit_apply_prompt)
                 async with MCPServerManager([make_fruit_thrower(), make_data_mcp()]) as _edit_mcp_mgr:
                     _edit_orch = edit_orchestration_agent.clone(mcp_servers=_edit_mcp_mgr.active_servers)
                     edit_orch_result_temp = await Runner.run(
@@ -192,7 +226,7 @@ async def run_workflow(
                                 "content": [
                                     {
                                         "type": "input_text",
-                                        "text": f"Apply this diff spec to the current notebook:\n{diff_spec_raw}",
+                                        "text": edit_apply_prompt,
                                     }
                                 ],
                             },
@@ -210,6 +244,11 @@ async def run_workflow(
 
                 await _emit("Validating notebook...")
                 await emit_phase(progress_cb, "edit_validate", "start")
+                await _emit_agent_input(
+                    "edit_validate",
+                    validatorandfixingagent.name,
+                    f"Validate the edited notebook at {existing_notebook_path}.",
+                )
                 async with MCPServerManager([make_fruit_thrower(), make_data_mcp()]) as _val_mcp_mgr:
                     _val = validatorandfixingagent.clone(mcp_servers=_val_mcp_mgr.active_servers)
                     val_result_temp = await Runner.run(
@@ -237,6 +276,8 @@ async def run_workflow(
 
         await _emit("Planning research...")
         await emit_phase(progress_cb, "plan", "start")
+        plan_prompt = f"Research request: {workflow['input_as_text']}"
+        await _emit_agent_input("plan", planner.name, plan_prompt)
         async with MCPServerManager([make_fruit_thrower(), make_data_mcp()]) as _planner_mcp_mgr:
             _planner = planner.clone(mcp_servers=_planner_mcp_mgr.active_servers)
             planner_result_temp = await Runner.run(
@@ -245,10 +286,10 @@ async def run_workflow(
                     *conversation_history,
                     {
                         "role": "user",
-                        "content": [{"type": "input_text", "text": f"Question: {workflow['input_as_text']}"}],
+                        "content": [{"type": "input_text", "text": plan_prompt}],
                     },
                 ],
-                run_config=RunConfig(trace_metadata=_TRACE_METADATA),
+                run_config=RunConfig(trace_metadata=trace_metadata),
                 hooks=_hooks("plan"),
             )
         await emit_phase(progress_cb, "plan", "end")
@@ -258,6 +299,15 @@ async def run_workflow(
 
         await _emit("Building notebook...")
         await emit_phase(progress_cb, "build", "start")
+        # Previously this was an accidental tuple-repr — `f"Question: {a, b}"`
+        # serialises a Python tuple, so the orchestrator received the planner
+        # output stringified as a dict literal. Pass the user request and the
+        # DAG explicitly so the model sees clean, labelled inputs.
+        build_prompt = (
+            f"User request: {workflow['input_as_text']}\n\n"
+            f"DAG plan from planner:\n{planner_result['output_text']}"
+        )
+        await _emit_agent_input("build", orchestration_agent.name, build_prompt)
         async with MCPServerManager([make_fruit_thrower(), make_data_mcp()]) as _orch_mcp_mgr:
             _orchestration_agent = orchestration_agent.clone(mcp_servers=_orch_mcp_mgr.active_servers)
             orchestration_agent_result_temp = await Runner.run(
@@ -267,14 +317,11 @@ async def run_workflow(
                     {
                         "role": "user",
                         "content": [
-                            {
-                                "type": "input_text",
-                                "text": f"Question: {workflow['input_as_text'], planner_result}",
-                            }
+                            {"type": "input_text", "text": build_prompt}
                         ],
                     },
                 ],
-                run_config=RunConfig(trace_metadata=_TRACE_METADATA),
+                run_config=RunConfig(trace_metadata=trace_metadata),
                 hooks=_hooks("build"),
                 max_turns=40,
             )
@@ -290,12 +337,18 @@ async def run_workflow(
 
         await _emit("Validating and fixing...")
         await emit_phase(progress_cb, "validate", "start")
+        await _emit_agent_input(
+            "validate",
+            validatorandfixingagent.name,
+            f"Validate the freshly built notebook at {nb_path_after_build}. "
+            "Run it cell-by-cell, fix any errors, escalate if blocked.",
+        )
         async with MCPServerManager([make_fruit_thrower(), make_data_mcp()]) as _val_mcp_mgr:
             _validatorandfixingagent = validatorandfixingagent.clone(mcp_servers=_val_mcp_mgr.active_servers)
             validatorandfixingagent_result_temp = await Runner.run(
                 _validatorandfixingagent,
                 input=conversation_history,
-                run_config=RunConfig(trace_metadata=_TRACE_METADATA),
+                run_config=RunConfig(trace_metadata=trace_metadata),
                 hooks=_hooks("validate"),
                 max_turns=20,
             )

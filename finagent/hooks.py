@@ -20,7 +20,7 @@ lightweight even when a tool returns a large payload.
 
 from __future__ import annotations
 
-import json
+import json  # noqa: F401  used by on_llm_end's args serialiser
 import logging
 from typing import Any, Awaitable, Callable, Optional
 
@@ -101,25 +101,46 @@ class StreamingHooks(RunHooks):
 
     # ── llm boundaries ───────────────────────────────────────────────────
     async def on_llm_end(self, context, agent, response) -> None:
-        # Try to surface short reasoning summaries as they happen, when the
-        # model emits them. This is best-effort — the SDK doesn't promise a
-        # stable shape across versions.
+        # Walk the LLM response and surface (a) reasoning summaries and
+        # (b) the *arguments* of every function call the model just decided
+        # on. The SDK emits `on_tool_start` shortly afterwards but doesn't
+        # pass us the args, so this is the only hook with access to them.
+        # Both event types are best-effort — the SDK doesn't promise a
+        # stable item shape across versions.
+        agent_name = getattr(agent, "name", "agent")
         try:
             for item in getattr(response, "output", []) or []:
-                if getattr(item, "type", "") != "reasoning":
-                    continue
-                summary = getattr(item, "summary", None) or []
-                bits = []
-                for s in summary:
-                    text = getattr(s, "text", None)
-                    if text:
-                        bits.append(text)
-                if bits:
+                kind = getattr(item, "type", "")
+                if kind == "reasoning":
+                    summary = getattr(item, "summary", None) or []
+                    bits = []
+                    for s in summary:
+                        text = getattr(s, "text", None)
+                        if text:
+                            bits.append(text)
+                    if bits:
+                        await self._emit({
+                            "type": "reasoning",
+                            "phase": self._phase,
+                            "agent": agent_name,
+                            "text": _truncate(" ".join(bits), 400),
+                        })
+                elif kind in ("function_call", "tool_call"):
+                    name = getattr(item, "name", "") or "tool"
+                    args = getattr(item, "arguments", "") or ""
+                    call_id = getattr(item, "call_id", "") or getattr(item, "id", "")
+                    if isinstance(args, (dict, list)):
+                        try:
+                            args = json.dumps(args, ensure_ascii=False)
+                        except Exception:
+                            args = str(args)
                     await self._emit({
-                        "type": "reasoning",
+                        "type": "tool_call_planned",
                         "phase": self._phase,
-                        "agent": getattr(agent, "name", "agent"),
-                        "text": _truncate(" ".join(bits), 400),
+                        "agent": agent_name,
+                        "tool": name,
+                        "args": _truncate(str(args), 400),
+                        "call_id": call_id,
                     })
         except Exception:
             pass
