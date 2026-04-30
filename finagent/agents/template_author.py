@@ -167,6 +167,83 @@ And declares CellSpec locally:
       rationale: str = ""
 
 ══════════════════════════════════════════
+EMBEDDING DATA INTO GENERATED CELL SOURCE — READ THIS CAREFULLY
+══════════════════════════════════════════
+
+When your compile() builds cell source strings, you are emitting Python
+that the user's notebook kernel will EXECUTE. Treat every value you
+embed as Python literal syntax. The most common failures come from
+mishandling these embeddings — these have already shipped bugs and
+broken user runs:
+
+DO NOT:
+
+  ❌ json.dumps(value) inside a Python expression context.
+      json.dumps emits JSON literals: ``null``, ``true``, ``false``.
+      Pasted into Python source they're undefined names. Example:
+
+          model = XGBClassifier(**{json.dumps(params)})
+          # → model = XGBClassifier(**{"use_label_encoder": false})
+          # → NameError: name 'false' is not defined
+
+  ❌ json.dumps(dict) at module-level for a CONSTANT.
+      Same issue. Recipes carry None / horizon_days: null / etc.
+      RECIPE = {json.dumps(blob)} → NameError on null.
+
+  ❌ textwrap.dedent(f"...") with multi-line interpolations.
+      If you interpolate something that itself contains newlines (a
+      json.dumps(indent=2), a textwrap.indent(...), or anything spanning
+      lines), dedent's common-indent calculation will go wrong and your
+      cell source will be mis-indented — IndentationError on cell
+      execution.
+
+DO:
+
+  ✓ For dict / list kwargs in Python source — use ``repr(value)``.
+      repr emits Python literal syntax (None, True, False) so the
+      embedded dict evaluates cleanly:
+
+          model_kwargs = repr(recipe.model.params)   # {'use_label_encoder': False}
+          line = f"model = XGBClassifier(**{model_kwargs})"
+
+  ✓ For a frozen RECIPE constant — wrap json.dumps in json.loads at
+    runtime. Keeps the JSON literals safely inside a string:
+
+          recipe_json = json.dumps(recipe.model_dump(mode="json"))
+          line = f"RECIPE = json.loads({recipe_json!r})"
+
+  ✓ For multi-line cell sources — build line-by-line:
+
+          lines = [
+              "import pandas as pd",
+              "",
+              f"X = features.build({repr(params)})",
+              "for tr, te in walk_forward(len(X)):",
+              "    model.fit(X.iloc[tr])",
+          ]
+          source = "\\n".join(lines)
+
+      Never mix textwrap.dedent with f-strings interpolating multi-line
+      strings. If you must use dedent, only interpolate scalar values.
+
+══════════════════════════════════════════
+METRIC ALIGNMENT (SUPERVISED PATHS)
+══════════════════════════════════════════
+
+If the template emits sklearn metrics (accuracy, f1, mse, …) and the
+target was dropna'd to handle a forecast horizon, the labels (y) and
+the walk-forward predictions (oos_predictions) will have different
+index coverage. ALWAYS align on the intersection before scoring:
+
+    _idx = y.index.intersection(oos_predictions.index)
+    y_t  = y.loc[_idx].astype(int)   # cast for classification metrics
+    y_p  = oos_predictions.loc[_idx].astype(int)
+    metrics_out['f1'] = float(f1_score(y_t, y_p, average='macro')) if len(_idx) else float('nan')
+
+If you skip this, sklearn raises "Input y_pred contains NaN" because
+reindex re-introduces NaN at the tail.
+
+══════════════════════════════════════════
 PRESETS
 ══════════════════════════════════════════
 
