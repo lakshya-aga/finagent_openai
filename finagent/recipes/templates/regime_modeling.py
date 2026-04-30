@@ -264,16 +264,21 @@ def _md_step(n: int, title: str, node: str, rationale: str) -> CellSpec:
 def _code_imports(recipe: Recipe) -> CellSpec:
     """Imports + frozen RECIPE constant.
 
-    Built as a plain ``"\\n".join(lines)`` instead of a ``textwrap.dedent``
-    f-string. The previous implementation interpolated ``json.dumps(indent=2)``
-    into a dedented f-string — but the multi-line JSON's continuation lines
-    don't share the f-string's indentation, so ``dedent`` mis-computed the
-    common-indent and the imports came out at column 8 (IndentationError on
-    line 1 of the cell). Building line-by-line avoids that whole class of bug.
+    Two bugs to avoid here:
+
+    1. textwrap.dedent + json.dumps(indent=2) interpolated into an f-string
+       breaks indentation because the multi-line JSON's continuation lines
+       have no f-string indent. Solved by building the cell line-by-line.
+
+    2. json.dumps emits JSON literals (``null``, ``true``, ``false``) that
+       are NameErrors when pasted as Python source. Solved by wrapping the
+       JSON string in ``json.loads(...)`` at runtime so RECIPE is a real
+       dict regardless of which keys carry None/True/False.
     """
     module, cls = recipe.model.class_path.rsplit(".", 1)
-    # Compact JSON keeps RECIPE on a single line — easier on parsers, no
-    # indentation interaction with the surrounding cell source.
+    # Compact JSON keeps RECIPE on a single line — and we wrap with
+    # json.loads(<repr>) so the cell evaluates cleanly even when the recipe
+    # contains None / True / False values.
     recipe_json = json.dumps(recipe.model_dump(mode="json"), default=str)
     lines = [
         "from __future__ import annotations",
@@ -287,7 +292,7 @@ def _code_imports(recipe: Recipe) -> CellSpec:
         f"from {module} import {cls}",
         "",
         "# Recipe metadata, pinned in a constant so the cell is reproducible.",
-        f"RECIPE = {recipe_json}",
+        f"RECIPE = json.loads({recipe_json!r})",
         f"SEED = {recipe.seed}",
         "np.random.seed(SEED)",
     ]
@@ -319,7 +324,10 @@ def _code_features(recipe: Recipe) -> CellSpec:
         "_feature_frames = []",
     ]
     for feat in recipe.features:
-        params_blob = json.dumps(feat.params, default=str)
+        # repr() renders Python-literal syntax (None / True / False) so the
+        # kwargs work as a Python expression. json.dumps would emit
+        # null/true/false → NameError when the cell evaluates.
+        params_blob = repr(feat.params)
         lines.append(f"_feature_frames.append(_feat.build({feat.name!r}, **{params_blob}, **locals()))")
     lines.extend([
         "",
@@ -396,7 +404,10 @@ def _code_walk_forward(recipe: Recipe) -> CellSpec:
     """
     e = recipe.evaluation
     train, test = e.train_window, e.test_window
-    model_kwargs = json.dumps(recipe.model.params, default=str)
+    # repr() renders None/True/False instead of null/true/false. The
+    # XGBoost preset has `use_label_encoder: false` which would NameError
+    # if json-serialised into Python source.
+    model_kwargs = repr(recipe.model.params)
     cls_name = recipe.model.class_path.rsplit(".", 1)[1]
     is_unsupervised = recipe.target.kind == "unsupervised_regime"
 
@@ -459,10 +470,22 @@ def _code_walk_forward(recipe: Recipe) -> CellSpec:
 
 
 _METRIC_CODE = {
-    "accuracy": "metrics_out['accuracy'] = float((y.reindex(oos_predictions.index) == oos_predictions).mean())",
+    # Supervised classification metrics — y and oos_predictions can have
+    # different index coverage (y was dropna'd by horizon_days; predictions
+    # only land on test slices). Align on the intersection and cast preds
+    # to int to satisfy sklearn classifiers.
+    "accuracy": (
+        "_idx = y.index.intersection(oos_predictions.index)\n"
+        "_yt = y.loc[_idx].astype(int)\n"
+        "_yp = oos_predictions.loc[_idx].astype(int)\n"
+        "metrics_out['accuracy'] = float((_yt == _yp).mean()) if len(_idx) else float('nan')"
+    ),
     "f1": (
         "from sklearn.metrics import f1_score\n"
-        "metrics_out['f1'] = float(f1_score(y.reindex(oos_predictions.index), oos_predictions, average='macro'))"
+        "_idx = y.index.intersection(oos_predictions.index)\n"
+        "_yt = y.loc[_idx].astype(int)\n"
+        "_yp = oos_predictions.loc[_idx].astype(int)\n"
+        "metrics_out['f1'] = float(f1_score(_yt, _yp, average='macro')) if len(_idx) else float('nan')"
     ),
     "log_likelihood": (
         "metrics_out['log_likelihood'] = float(getattr(model, 'score', lambda *_: float('nan'))(X.iloc[-1:].values))"
