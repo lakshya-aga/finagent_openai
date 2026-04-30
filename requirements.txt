@@ -31,6 +31,15 @@ scipy>=1.12
 scikit-learn>=1.4
 statsmodels>=0.14
 yfinance>=0.2.40
+# Model classes used by the regime_modeling template presets. Without these
+# pinned, recipes targeting hmmlearn / xgboost ImportError before the
+# walk-forward loop runs.
+hmmlearn>=0.3
+xgboost>=2.0
+# FRED data adapter — required when a recipe declares `kind: fred`. Otherwise
+# findata.fred raises ImportError at first import and the whole notebook
+# cascades NameErrors from the failed imports cell.
+fredapi>=0.5
 
 # Internal libraries the generated notebooks call.
 # fin-kit is installed separately in the Dockerfile with

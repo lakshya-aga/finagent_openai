@@ -262,24 +262,36 @@ def _md_step(n: int, title: str, node: str, rationale: str) -> CellSpec:
 
 
 def _code_imports(recipe: Recipe) -> CellSpec:
+    """Imports + frozen RECIPE constant.
+
+    Built as a plain ``"\\n".join(lines)`` instead of a ``textwrap.dedent``
+    f-string. The previous implementation interpolated ``json.dumps(indent=2)``
+    into a dedented f-string — but the multi-line JSON's continuation lines
+    don't share the f-string's indentation, so ``dedent`` mis-computed the
+    common-indent and the imports came out at column 8 (IndentationError on
+    line 1 of the cell). Building line-by-line avoids that whole class of bug.
+    """
     module, cls = recipe.model.class_path.rsplit(".", 1)
-    src = textwrap.dedent(f"""\
-        from __future__ import annotations
-        import json
-        import math
-        from dataclasses import dataclass
-
-        import numpy as np
-        import pandas as pd
-
-        from {module} import {cls}
-
-        # Recipe metadata, pinned in a constant so the cell makes the run reproducible.
-        RECIPE = {json.dumps(recipe.model_dump(mode="json"), indent=2, default=str)}
-        SEED = {recipe.seed}
-        np.random.seed(SEED)
-        """)
-    return CellSpec("code", src, "n2_imports", "Imports + frozen recipe blob.")
+    # Compact JSON keeps RECIPE on a single line — easier on parsers, no
+    # indentation interaction with the surrounding cell source.
+    recipe_json = json.dumps(recipe.model_dump(mode="json"), default=str)
+    lines = [
+        "from __future__ import annotations",
+        "import json",
+        "import math",
+        "from dataclasses import dataclass",
+        "",
+        "import numpy as np",
+        "import pandas as pd",
+        "",
+        f"from {module} import {cls}",
+        "",
+        "# Recipe metadata, pinned in a constant so the cell is reproducible.",
+        f"RECIPE = {recipe_json}",
+        f"SEED = {recipe.seed}",
+        "np.random.seed(SEED)",
+    ]
+    return CellSpec("code", "\n".join(lines), "n2_imports", "Imports + frozen recipe blob.")
 
 
 def _code_load_data(recipe: Recipe) -> CellSpec:
@@ -374,6 +386,14 @@ def _code_target(recipe: Recipe) -> CellSpec:
 
 
 def _code_walk_forward(recipe: Recipe) -> CellSpec:
+    """Walk-forward (or expanding-window) fit/predict loop.
+
+    Built line-by-line with explicit indentation. The previous version mixed
+    ``textwrap.dedent`` with ``textwrap.indent + .strip()`` interpolated mid-
+    line via an f-string — which dropped the substituted block's continuation
+    lines outside the for-loop body. Lines came out at column 0 instead of
+    column 4, causing IndentationError + cascade of NameErrors.
+    """
     e = recipe.evaluation
     train, test = e.train_window, e.test_window
     model_kwargs = json.dumps(recipe.model.params, default=str)
@@ -381,51 +401,61 @@ def _code_walk_forward(recipe: Recipe) -> CellSpec:
     is_unsupervised = recipe.target.kind == "unsupervised_regime"
 
     if e.splits == "walk_forward":
-        loop = textwrap.dedent(f"""\
-            from typing import Iterator
-
-            def _walk_forward(n: int, train: int = {train}, test: int = {test}) -> Iterator[tuple[slice, slice]]:
-                start = 0
-                while start + train + test <= n:
-                    yield slice(start, start + train), slice(start + train, start + train + test)
-                    start += test  # rolling step; switch to expanding by setting `start` constant
-        """)
+        loop_def = [
+            "from typing import Iterator",
+            "",
+            f"def _walk_forward(n: int, train: int = {train}, test: int = {test}) -> Iterator[tuple[slice, slice]]:",
+            "    start = 0",
+            "    while start + train + test <= n:",
+            "        yield slice(start, start + train), slice(start + train, start + train + test)",
+            "        start += test  # rolling step",
+        ]
     elif e.splits == "expanding_window":
-        loop = textwrap.dedent(f"""\
-            from typing import Iterator
-
-            def _walk_forward(n: int, train: int = {train}, test: int = {test}) -> Iterator[tuple[slice, slice]]:
-                start = 0
-                tr_end = train
-                while tr_end + test <= n:
-                    yield slice(start, tr_end), slice(tr_end, tr_end + test)
-                    tr_end += test  # train window grows
-            """)
+        loop_def = [
+            "from typing import Iterator",
+            "",
+            f"def _walk_forward(n: int, train: int = {train}, test: int = {test}) -> Iterator[tuple[slice, slice]]:",
+            "    start = 0",
+            "    tr_end = train",
+            "    while tr_end + test <= n:",
+            "        yield slice(start, tr_end), slice(tr_end, tr_end + test)",
+            "        tr_end += test  # train window grows",
+        ]
     else:
-        loop = "raise NotImplementedError('only walk_forward and expanding_window are templated today')"
+        loop_def = [
+            "raise NotImplementedError('only walk_forward and expanding_window are templated today')",
+        ]
 
+    # Lines INSIDE the for-loop body all start at column 4. Use try/except to
+    # tolerate models that don't accept random_state (instead of inspecting
+    # __init__.__code__.co_varnames at runtime, which is fragile).
     if is_unsupervised:
-        fit_block = textwrap.dedent(f"""\
-            model = {cls_name}(**{model_kwargs}, random_state=SEED) if 'random_state' in {cls_name}.__init__.__code__.co_varnames else {cls_name}(**{model_kwargs})
-            model.fit(X.iloc[tr])
-            preds = model.predict(X.iloc[te])
-            """)
+        fit_lines = [
+            "    try:",
+            f"        model = {cls_name}(**{model_kwargs}, random_state=SEED)",
+            "    except TypeError:",
+            f"        model = {cls_name}(**{model_kwargs})",
+            "    model.fit(X.iloc[tr])",
+            "    preds = model.predict(X.iloc[te])",
+        ]
     else:
-        fit_block = textwrap.dedent(f"""\
-            model = {cls_name}(**{model_kwargs})
-            model.fit(X.iloc[tr], y.iloc[tr])
-            preds = model.predict(X.iloc[te])
-            """)
+        fit_lines = [
+            f"    model = {cls_name}(**{model_kwargs})",
+            "    model.fit(X.iloc[tr], y.iloc[tr])",
+            "    preds = model.predict(X.iloc[te])",
+        ]
 
-    body = loop + "\n" + textwrap.dedent(f"""\
-        oos_predictions = pd.Series(index=X.index, dtype='float64', name='pred')
-        for tr, te in _walk_forward(len(X)):
-            {textwrap.indent(fit_block, ' ' * 4).strip()}
-            oos_predictions.iloc[te] = preds
-        oos_predictions = oos_predictions.dropna()
-        print(f'OOS predictions: {{len(oos_predictions)}} rows')
-        """)
-    return CellSpec("code", body, "n6_walk_forward", "Walk-forward fit/predict loop.")
+    body_lines = [
+        *loop_def,
+        "",
+        "oos_predictions = pd.Series(index=X.index, dtype='float64', name='pred')",
+        "for tr, te in _walk_forward(len(X)):",
+        *fit_lines,
+        "    oos_predictions.iloc[te] = preds",
+        "oos_predictions = oos_predictions.dropna()",
+        "print(f'OOS predictions: {len(oos_predictions)} rows')",
+    ]
+    return CellSpec("code", "\n".join(body_lines), "n6_walk_forward", "Walk-forward fit/predict loop.")
 
 
 _METRIC_CODE = {
