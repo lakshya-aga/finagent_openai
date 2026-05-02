@@ -27,7 +27,7 @@ import nbformat
 from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook
 
 from .experiments import get_store
-from .functions.notebook_io import _OUTPUTS_DIR, _get_latest_path
+from .functions.notebook_io import _OUTPUTS_DIR, _get_latest_path, _path_for_recipe
 from .functions.notebook_tools import run_all_cells_to_disk
 from .lineage import extract_lineage_ast
 from .recipes.compiler import compile_recipe
@@ -132,8 +132,18 @@ def run_recipe(
 
 
 def _materialise_notebook(recipe: Recipe, cells) -> Path:
-    """Build a fresh outputs/notebook_N.ipynb from CellSpec list."""
-    path = _get_latest_path()
+    """Build a fresh notebook on disk from a CellSpec list.
+
+    File path is derived from the recipe identity (name + fingerprint +
+    UTC minute timestamp) so the Notebooks list is human-searchable. The
+    legacy `notebook_N.ipynb` naming is reserved for free-form chat-agent
+    notebooks that don't carry a recipe identity.
+    """
+    try:
+        fp = recipe.fingerprint()
+    except Exception:
+        fp = None
+    path = _path_for_recipe(recipe.name, fp)
     path.parent.mkdir(parents=True, exist_ok=True)
     nb = new_notebook(cells=[])
     nb.metadata["kernelspec"] = {

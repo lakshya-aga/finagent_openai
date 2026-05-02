@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+from datetime import datetime
 from pathlib import Path
 
 import nbformat
@@ -18,12 +20,63 @@ _OUTPUTS_DIR = Path(__file__).resolve().parents[2] / "outputs"
 
 
 def _get_latest_path() -> Path:
-    """Return the next unused notebook_N.ipynb path in outputs/."""
+    """Return the next unused notebook_N.ipynb path in outputs/.
+
+    Used as a fallback for free-form chat-agent runs that don't carry a
+    recipe identity. Recipe runs go through `_path_for_recipe` instead so
+    the file name carries the recipe name + fingerprint + timestamp.
+    """
     i = 1
     while True:
         path = _OUTPUTS_DIR / f"notebook_{i}.ipynb"
         if not path.exists():
             return path
+        i += 1
+
+
+# Restrict file names to a conservative ASCII charset. Whitespace and
+# anything that could break shell quoting / URL encoding gets folded to
+# underscore. Two trailing underscores collapse to one.
+_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _slugify(s: str) -> str:
+    cleaned = _SAFE_NAME_RE.sub("_", s.strip()).strip("_")
+    while "__" in cleaned:
+        cleaned = cleaned.replace("__", "_")
+    return cleaned or "recipe"
+
+
+def _path_for_recipe(
+    recipe_name: str,
+    fingerprint: str | None,
+    when: datetime | None = None,
+) -> Path:
+    """Build a semantic notebook path for a recipe run.
+
+    Format: ``<recipe>__<short-hash>__<YYYYMMDD-HHMM>.ipynb``. Reviewer
+    feedback was that the previous ``notebook_N.ipynb`` scheme made the
+    Notebooks list useless once a team has more than a handful of files
+    (UAT P1 #3). The new pattern is searchable by recipe and sorted by
+    timestamp without relying on metadata.
+
+    Collisions are resolved by appending a counter (``__2``, ``__3``…).
+    """
+    when = when or datetime.utcnow()
+    slug = _slugify(recipe_name)
+    short = (fingerprint or "")[:8] or "nofp"
+    stamp = when.strftime("%Y%m%d-%H%M")
+    base = f"{slug}__{short}__{stamp}"
+    candidate = _OUTPUTS_DIR / f"{base}.ipynb"
+    if not candidate.exists():
+        return candidate
+    # Two runs of the same recipe finishing in the same minute — append a
+    # disambiguating counter rather than overwriting.
+    i = 2
+    while True:
+        candidate = _OUTPUTS_DIR / f"{base}__{i}.ipynb"
+        if not candidate.exists():
+            return candidate
         i += 1
 
 
