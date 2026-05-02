@@ -122,12 +122,47 @@ class ModelSpec(BaseModel):
 SplitKind = Literal["walk_forward", "expanding_window", "kfold", "holdout"]
 
 
+class Costs(BaseModel):
+    """Transaction cost model applied to gross book returns to produce net.
+
+    Three knobs, kept deliberately simple for v1:
+
+    - ``bps_per_side``: per-trade execution cost in basis points. Captures
+      bid/ask half-spread + commission + slippage. Applied to per-day
+      gross turnover (Σ |Δw|). A round-trip rebalance pays
+      ``2 × bps_per_side`` because both legs (buy and sell) trade.
+    - ``borrow_bps``: annualised short-borrow rate in basis points.
+      Applied per-day to gross short exposure (Σ |w_i| over w_i < 0)
+      divided by ``periods_per_year``. Long-only books pay zero.
+
+    Market impact (ADV-based, square-root) is NOT modelled — needs ADV
+    data per ticker plus a notional dollar size, neither of which the
+    current data path has. Pad ``bps_per_side`` for noisy / small-cap
+    universes. Phase-3 wires findata's volume series in for true impact.
+    """
+
+    bps_per_side: float = Field(
+        0.0, ge=0.0, le=500.0,
+        description="Per-trade cost in bps. Round-trip ≈ 2× this.",
+    )
+    borrow_bps: float = Field(
+        0.0, ge=0.0, le=2000.0,
+        description="Annualised short borrow rate in bps.",
+    )
+
+
 class Evaluation(BaseModel):
     splits: SplitKind
     train_window: Optional[int] = Field(None, ge=20, description="bars in each train fold")
     test_window: Optional[int] = Field(None, ge=1, description="bars in each test fold")
     n_folds: Optional[int] = Field(None, ge=2, le=20)
     metrics: list[str] = Field(default_factory=list)
+    # Optional transaction-cost overlay. When pinned, the run emits both
+    # gross and net metric packs; the project-page headline aliases point
+    # at NET so the user sees the cost-of-trading number first. None
+    # means "report gross only" — backwards-compatible with legacy
+    # recipes.
+    costs: Optional[Costs] = None
 
     @model_validator(mode="after")
     def _coherent(self) -> "Evaluation":

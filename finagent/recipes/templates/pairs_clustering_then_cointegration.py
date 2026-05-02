@@ -103,7 +103,10 @@ METADATA = {
                 "  splits: walk_forward\n"
                 "  train_window: 504\n"
                 "  test_window: 63\n"
-                "  metrics: [sharpe, sortino, annual_return, max_drawdown, turnover]\n\n"
+                "  metrics: [sharpe, sortino, annual_return, max_drawdown, turnover]\n"
+                "  costs:\n"
+                "    bps_per_side: 5    # ETF spreads tighter, but pairs trades churn\n"
+                "    borrow_bps: 50     # liquid ETF short borrow ~50bps annualised\n\n"
                 "seed: 42\n"
             ),
         },
@@ -133,7 +136,10 @@ METADATA = {
                 "  splits: walk_forward\n"
                 "  train_window: 504\n"
                 "  test_window: 63\n"
-                "  metrics: [sharpe, sortino, annual_return, max_drawdown, turnover]\n\n"
+                "  metrics: [sharpe, sortino, annual_return, max_drawdown, turnover]\n"
+                "  costs:\n"
+                "    bps_per_side: 8    # sector ETFs less liquid than SPY/TLT\n"
+                "    borrow_bps: 75     # sector ETF short borrow slightly wider\n\n"
                 "seed: 42\n"
             ),
         },
@@ -464,6 +470,10 @@ def _code_model_book(recipe: Recipe) -> CellSpec:
 
 def _code_financial_metrics(recipe: Recipe) -> CellSpec:
     requested = list(recipe.evaluation.metrics)
+    costs = recipe.evaluation.costs
+    costs_blob = (
+        repr(costs.model_dump()) if costs is not None else "None"
+    )
     body = textwrap.dedent(f"""\
         from finagent.recipes import strategy_metrics as sm
 
@@ -473,29 +483,62 @@ def _code_financial_metrics(recipe: Recipe) -> CellSpec:
             'both_legs':     _both_w,
         }}
 
+        # Cost overlay — see regime_modeling for the full design notes.
+        # When pinned, we emit gross AND net metric packs side-by-side
+        # and re-point the headline aliases at the net values.
+        _costs = {costs_blob}
+        _costs_applied = _costs is not None
+
         metrics_out: dict[str, float] = {{}}
         for _book_name, _w in _books.items():
-            _pack = sm.summary(_w, asset_returns_full)
-            for _k, _v in _pack.items():
+            _gross_book = sm.book_returns(_w, asset_returns_full)
+            _gross_pack = sm.summary(_w, asset_returns_full)
+            for _k, _v in _gross_pack.items():
                 metrics_out[f'{{_book_name}}_{{_k}}'] = _v
+            if _costs_applied:
+                _net_book = sm.apply_costs(_gross_book, _w, **_costs)
+                metrics_out[f'{{_book_name}}_total_return_net'] = sm.total_return(_net_book)
+                metrics_out[f'{{_book_name}}_annual_return_net'] = sm.annual_return(_net_book)
+                metrics_out[f'{{_book_name}}_sharpe_net'] = sm.sharpe(_net_book)
+                metrics_out[f'{{_book_name}}_sortino_net'] = sm.sortino(_net_book)
+                metrics_out[f'{{_book_name}}_max_drawdown_net'] = sm.max_drawdown(_net_book)
+                metrics_out[f'{{_book_name}}_calmar_net'] = sm.calmar(_net_book)
+                metrics_out[f'{{_book_name}}_hit_rate_net'] = sm.hit_rate(_net_book)
+                metrics_out[f'{{_book_name}}_turnover_net'] = _gross_pack['turnover']
+                metrics_out[f'{{_book_name}}_exposure_net'] = _gross_pack['exposure']
 
-        # Headline aliases point at the model book.
+        # Headline aliases — net when costs pinned, else gross.
+        _alias_suffix = '_net' if _costs_applied else ''
         for _alias in {requested!r}:
-            _src = f'model_{{_alias}}'
+            _src = f'model_{{_alias}}{{_alias_suffix}}'
             if _src in metrics_out:
                 metrics_out[_alias] = metrics_out[_src]
 
         print()
-        print('book          sharpe   sortino   ann_ret    max_dd   turnover')
-        for _name in ['model', 'buy_and_hold', 'both_legs']:
-            print(
-                f'  {{_name:13s}} '
-                f'{{metrics_out[_name + "_sharpe"]:>6.2f}}  '
-                f'{{metrics_out[_name + "_sortino"]:>7.2f}}  '
-                f'{{metrics_out[_name + "_annual_return"] * 100:>+6.2f}}%  '
-                f'{{metrics_out[_name + "_max_drawdown"] * 100:>+6.2f}}%  '
-                f'{{metrics_out[_name + "_turnover"]:>6.3f}}'
-            )
+        if _costs_applied:
+            print(f'costs applied: bps_per_side={{_costs.get("bps_per_side", 0)}}, '
+                  f'borrow_bps={{_costs.get("borrow_bps", 0)}}')
+            print('book          sharpe(net) sortino(net) ann_ret(net)  max_dd(net) turnover')
+            for _name in ['model', 'buy_and_hold', 'both_legs']:
+                print(
+                    f'  {{_name:13s}} '
+                    f'{{metrics_out[_name + "_sharpe_net"]:>10.2f}}  '
+                    f'{{metrics_out[_name + "_sortino_net"]:>11.2f}}  '
+                    f'{{metrics_out[_name + "_annual_return_net"] * 100:>+10.2f}}%  '
+                    f'{{metrics_out[_name + "_max_drawdown_net"] * 100:>+10.2f}}%  '
+                    f'{{metrics_out[_name + "_turnover"]:>6.3f}}'
+                )
+        else:
+            print('book          sharpe   sortino   ann_ret    max_dd   turnover')
+            for _name in ['model', 'buy_and_hold', 'both_legs']:
+                print(
+                    f'  {{_name:13s}} '
+                    f'{{metrics_out[_name + "_sharpe"]:>6.2f}}  '
+                    f'{{metrics_out[_name + "_sortino"]:>7.2f}}  '
+                    f'{{metrics_out[_name + "_annual_return"] * 100:>+6.2f}}%  '
+                    f'{{metrics_out[_name + "_max_drawdown"] * 100:>+6.2f}}%  '
+                    f'{{metrics_out[_name + "_turnover"]:>6.3f}}'
+                )
 
         asset_returns = asset_returns_full.fillna(0.0)
         asset_weights = model_weights.fillna(0.0)

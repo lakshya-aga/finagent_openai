@@ -124,6 +124,56 @@ def calmar(book: pd.Series, periods_per_year: int = 252) -> float:
     return float(ar / abs(mdd))
 
 
+def apply_costs(
+    book: pd.Series,
+    weights: pd.DataFrame,
+    *,
+    bps_per_side: float = 0.0,
+    borrow_bps: float = 0.0,
+    periods_per_year: int = 252,
+) -> pd.Series:
+    """Net out transaction costs from a book's gross daily returns.
+
+    Two cost components, additive:
+
+      ``bps_per_side`` · Per-trade execution cost in basis points
+        (bid/ask half-spread + commission + slippage). Charged on
+        per-day gross turnover (Σ |Δw|). A 100%-long book that swaps
+        half its names pays ``0.5 × bps_per_side / 10000`` that day.
+        The first row's "trade" (initial allocation) is NOT charged —
+        we only charge for actual rebalances.
+
+      ``borrow_bps`` · Annualised short-borrow rate in basis points.
+        Charged per-day on gross short exposure (Σ |w_i| where w_i < 0)
+        divided by ``periods_per_year``.
+
+    Market impact is NOT modelled — see Costs docstring in types.py for
+    the rationale. Phase-3 work.
+
+    Returns a new Series; does not mutate ``book``.
+    """
+    if book is None or book.empty or weights is None or weights.empty:
+        return book
+
+    w = weights.fillna(0.0)
+
+    # Transaction cost: |Δw| × bps_per_side / 10000.
+    turnover_per_day = w.diff().abs().sum(axis=1).fillna(0.0)
+    turnover_per_day.iloc[0] = 0.0  # don't charge for the initial allocation
+    txn_cost = turnover_per_day * (bps_per_side / 10000.0)
+
+    # Borrow cost: |shorts| × borrow_bps / 10000 / periods_per_year.
+    short_exposure = w.clip(upper=0.0).abs().sum(axis=1)
+    borrow_cost = short_exposure * (borrow_bps / 10000.0) / periods_per_year
+
+    # Align indices in case the book slice and weights frame don't overlap
+    # exactly — book.index wins.
+    aligned_txn = txn_cost.reindex(book.index, fill_value=0.0)
+    aligned_borrow = borrow_cost.reindex(book.index, fill_value=0.0)
+
+    return book - aligned_txn - aligned_borrow
+
+
 def turnover(weights: pd.DataFrame) -> float:
     """Mean per-period gross weight change. A 100%-long book that swaps
     half its names every day has turnover ≈ 0.5; a buy-and-hold book has

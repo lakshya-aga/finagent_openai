@@ -116,7 +116,13 @@ METADATA = {
                 "  splits: walk_forward\n"
                 "  train_window: 504\n"
                 "  test_window: 21\n"
-                "  metrics: [sharpe, sortino, annual_return, max_drawdown, turnover]\n\n"
+                "  metrics: [sharpe, sortino, annual_return, max_drawdown, turnover]\n"
+                "  # Net-of-cost metrics. Headline Sharpe/return on the project page\n"
+                "  # are reported NET of these costs; the gross numbers are still\n"
+                "  # available in the metric drawer for diagnostic comparison.\n"
+                "  costs:\n"
+                "    bps_per_side: 3   # institutional ETF execution\n"
+                "    borrow_bps: 0     # long-only book — no shorts\n\n"
                 "seed: 42\n"
             ),
         },
@@ -157,7 +163,13 @@ METADATA = {
                 "  splits: walk_forward\n"
                 "  train_window: 504\n"
                 "  test_window: 21\n"
-                "  metrics: [sharpe, sortino, annual_return, max_drawdown, turnover]\n\n"
+                "  metrics: [sharpe, sortino, annual_return, max_drawdown, turnover]\n"
+                "  # Net-of-cost metrics. Headline Sharpe/return on the project page\n"
+                "  # are reported NET of these costs; the gross numbers are still\n"
+                "  # available in the metric drawer for diagnostic comparison.\n"
+                "  costs:\n"
+                "    bps_per_side: 3   # institutional ETF execution\n"
+                "    borrow_bps: 0     # long-only book — no shorts\n\n"
                 "seed: 42\n"
             ),
         },
@@ -709,6 +721,16 @@ def _code_financial_metrics(recipe: Recipe) -> CellSpec:
     compare. Binds asset_returns + asset_weights to the model book so the
     platform's downstream lineage / replay still works."""
     requested = list(recipe.evaluation.metrics)
+    # Cost knobs are part of the recipe.evaluation block. When set, we
+    # emit gross AND net metric packs side-by-side; when None, behaviour
+    # is unchanged (gross only). The headline aliases (sharpe / etc.)
+    # re-point at NET values when costs are pinned, so the project page
+    # shows the after-trading-cost number first — which is the only
+    # number that actually matters for capital allocation.
+    costs = recipe.evaluation.costs
+    costs_blob = (
+        repr(costs.model_dump()) if costs is not None else "None"
+    )
     body = textwrap.dedent(f"""\
         from finagent.recipes import strategy_metrics as sm
 
@@ -719,34 +741,75 @@ def _code_financial_metrics(recipe: Recipe) -> CellSpec:
             'model':         model_weights,
         }}
 
+        # Cost overlay (None when the recipe doesn't pin costs). When
+        # present we compute both gross and net metric packs.
+        _costs = {costs_blob}
+        _costs_applied = _costs is not None
+
         # Compute the standard pack for every book, then namespace each metric
         # by book so the project page columns are <book>_<metric>.
         metrics_out: dict[str, float] = {{}}
         for _book_name, _w in _books.items():
-            _pack = sm.summary(_w, asset_returns_full)
-            for _k, _v in _pack.items():
+            _gross_book = sm.book_returns(_w, asset_returns_full)
+            _gross_pack = sm.summary(_w, asset_returns_full)
+            for _k, _v in _gross_pack.items():
                 metrics_out[f'{{_book_name}}_{{_k}}'] = _v
+            if _costs_applied:
+                _net_book = sm.apply_costs(_gross_book, _w, **_costs)
+                # Re-derive the metric pack from the net daily series.
+                # We can't call sm.summary directly because it takes
+                # weights+returns; instead we use the individual helpers
+                # against the net Series (turnover/exposure are weight-
+                # only and therefore identical net vs gross).
+                metrics_out[f'{{_book_name}}_total_return_net'] = sm.total_return(_net_book)
+                metrics_out[f'{{_book_name}}_annual_return_net'] = sm.annual_return(_net_book)
+                metrics_out[f'{{_book_name}}_sharpe_net'] = sm.sharpe(_net_book)
+                metrics_out[f'{{_book_name}}_sortino_net'] = sm.sortino(_net_book)
+                metrics_out[f'{{_book_name}}_max_drawdown_net'] = sm.max_drawdown(_net_book)
+                metrics_out[f'{{_book_name}}_calmar_net'] = sm.calmar(_net_book)
+                metrics_out[f'{{_book_name}}_hit_rate_net'] = sm.hit_rate(_net_book)
+                # turnover and exposure are properties of the weights
+                # frame, not the returns series; their net values match
+                # gross by definition. Mirror them so the API contract
+                # (every gross key has a _net twin) is intact.
+                metrics_out[f'{{_book_name}}_turnover_net'] = _gross_pack['turnover']
+                metrics_out[f'{{_book_name}}_exposure_net'] = _gross_pack['exposure']
 
-        # Headline aliases that Project-page filters use today (sharpe,
-        # sortino, etc.) refer to the MODEL book — that's the strategy we'd
-        # actually trade. Reference books surface as model_*-prefixed extras.
+        # Headline aliases the project page reads. When costs are pinned,
+        # alias → MODEL NET (so the user sees the after-cost number first).
+        # Otherwise → MODEL GROSS (legacy behaviour for cost-free recipes).
+        _alias_suffix = '_net' if _costs_applied else ''
         for _alias in {requested!r}:
-            _src = f'model_{{_alias}}'
+            _src = f'model_{{_alias}}{{_alias_suffix}}'
             if _src in metrics_out:
                 metrics_out[_alias] = metrics_out[_src]
 
         # Pretty-print so the notebook output is human-readable too.
         print()
-        print('book          sharpe   sortino   ann_ret    max_dd   turnover')
-        for _name in ['model', 'value', 'momentum', 'buy_and_hold']:
-            print(
-                f'  {{_name:13s}} '
-                f'{{metrics_out[_name + "_sharpe"]:>6.2f}}  '
-                f'{{metrics_out[_name + "_sortino"]:>7.2f}}  '
-                f'{{metrics_out[_name + "_annual_return"] * 100:>+6.2f}}%  '
-                f'{{metrics_out[_name + "_max_drawdown"] * 100:>+6.2f}}%  '
-                f'{{metrics_out[_name + "_turnover"]:>6.3f}}'
-            )
+        if _costs_applied:
+            print(f'costs applied: bps_per_side={{_costs.get("bps_per_side", 0)}}, '
+                  f'borrow_bps={{_costs.get("borrow_bps", 0)}}')
+            print('book          sharpe(net) sortino(net) ann_ret(net)  max_dd(net) turnover')
+            for _name in ['model', 'value', 'momentum', 'buy_and_hold']:
+                print(
+                    f'  {{_name:13s}} '
+                    f'{{metrics_out[_name + "_sharpe_net"]:>10.2f}}  '
+                    f'{{metrics_out[_name + "_sortino_net"]:>11.2f}}  '
+                    f'{{metrics_out[_name + "_annual_return_net"] * 100:>+10.2f}}%  '
+                    f'{{metrics_out[_name + "_max_drawdown_net"] * 100:>+10.2f}}%  '
+                    f'{{metrics_out[_name + "_turnover"]:>6.3f}}'
+                )
+        else:
+            print('book          sharpe   sortino   ann_ret    max_dd   turnover')
+            for _name in ['model', 'value', 'momentum', 'buy_and_hold']:
+                print(
+                    f'  {{_name:13s}} '
+                    f'{{metrics_out[_name + "_sharpe"]:>6.2f}}  '
+                    f'{{metrics_out[_name + "_sortino"]:>7.2f}}  '
+                    f'{{metrics_out[_name + "_annual_return"] * 100:>+6.2f}}%  '
+                    f'{{metrics_out[_name + "_max_drawdown"] * 100:>+6.2f}}%  '
+                    f'{{metrics_out[_name + "_turnover"]:>6.3f}}'
+                )
 
         # Bind the canonical platform contract: asset_returns + asset_weights
         # represent the model's actual book. The reference comparisons are
