@@ -64,6 +64,7 @@ class Target(BaseModel):
     horizon_days: Optional[int] = Field(None, ge=1, le=63)
     label_strategy: Optional[Literal[
         "next_return_sign", "future_return_sign", "triple_barrier", "vol_quantile",
+        "cointegration_zscore",
     ]] = None
     threshold: Optional[float] = None  # e.g. for triple_barrier or vol_quantile
 
