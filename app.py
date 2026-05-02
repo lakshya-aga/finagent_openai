@@ -235,8 +235,24 @@ async def list_notebooks():
     Parsing is cached per (path, mtime); a stale entry is dropped when the
     file's mtime moves.
     """
+    from finagent.experiments import get_store
+
     if not _OUTPUTS_DIR.exists():
         return {"notebooks": []}
+
+    # Single read of the runs table — much cheaper than per-notebook lookups.
+    # Index by run_id AND by recipe_hash (fingerprint) since notebook metadata
+    # uses the latter as a fallback when no explicit run_id is stamped.
+    runs_by_key: dict[str, dict] = {}
+    try:
+        for r in get_store().list_runs(limit=2000):
+            d = r.as_public_dict()
+            runs_by_key[r.id] = d
+            if r.recipe_hash:
+                runs_by_key.setdefault(r.recipe_hash, d)
+    except Exception:
+        logging.exception("could not load runs index for notebooks list")
+
     items = []
     seen: set[str] = set()
     for p in _OUTPUTS_DIR.glob("*.ipynb"):
@@ -259,6 +275,22 @@ async def list_notebooks():
             _NOTEBOOK_META_CACHE[cache_key] = (st.st_mtime, extra)
         if extra:
             entry.update(extra)
+        # Join with the runs table to surface audit verdict + run status.
+        # Frontend uses these to render the Quarantined / Flagged tabs and
+        # to decide whether a notebook is eligible for comparison/export.
+        run = None
+        rid = entry.get("run_id")
+        if rid and rid in runs_by_key:
+            run = runs_by_key[rid]
+        elif entry.get("fingerprint") and entry["fingerprint"] in runs_by_key:
+            run = runs_by_key[entry["fingerprint"]]
+        if run is not None:
+            audit = run.get("bias_audit") or {}
+            entry["bias_audit_verdict"] = audit.get("verdict") if audit else None
+            entry["run_status"] = run.get("status")
+            # Surface flag count too — Quarantined-style filtering can also
+            # key on plausibility flags, not just audit verdict.
+            entry["flag_count"] = len(run.get("metrics_flags") or {})
         items.append(entry)
     # Drop cache entries for notebooks that no longer exist on disk so the
     # cache tracks the directory rather than growing forever.
