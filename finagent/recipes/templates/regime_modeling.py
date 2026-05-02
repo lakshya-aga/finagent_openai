@@ -247,10 +247,20 @@ def compile(recipe: Recipe) -> list[CellSpec]:
     ))
     cells.append(_code_charts(recipe))
 
-    # ── Step 11 — Persist run summary for the experiment store ────────
+    # ── Step 11 — Decomposition (asset contribution + per-year returns) ─
     cells.append(_md_step(
-        11, "Run summary",
-        "n11_summary",
+        11, "Decomposition",
+        "n11_decomposition",
+        "Where did the returns come from? Per-asset contribution bar chart "
+        "across books, plus a calendar-year return table for like-for-like "
+        "year comparison.",
+    ))
+    cells.append(_code_decomposition(recipe))
+
+    # ── Step 12 — Persist run summary for the experiment store ────────
+    cells.append(_md_step(
+        12, "Run summary",
+        "n12_summary",
         "Print a JSON summary the experiment runner harvests for the Project page.",
     ))
     cells.append(_code_summary(recipe))
@@ -826,6 +836,127 @@ def _code_charts(recipe: Recipe) -> CellSpec:
                     "Equity curves + drawdown + (unsup) regime ribbon as inline PNGs.")
 
 
+def _code_decomposition(recipe: Recipe) -> CellSpec:
+    """Per-asset contribution bar plot + per-year return table.
+
+    Two questions every PM asks after the headline numbers:
+
+      1. Which assets actually drove the returns? "The model book made
+         12%/yr" hides the fact that 11% of it came from one ticker. The
+         per-asset contribution (sum over time of weight × return) makes
+         this visible. Stacked side-by-side per book so you can also see
+         that, e.g., value loaded onto TLT and momentum onto SPY.
+
+      2. How does the model compare year-by-year? A 4% Sharpe with one
+         great year and three flat ones is a different beast from a 1.5
+         Sharpe with consistent 8%/yr. The calendar-year table makes the
+         year-by-year story explicit.
+
+    Both rendered inline: bars as image/png, table as HTML via display().
+    """
+    body = textwrap.dedent("""\
+        import matplotlib.pyplot as plt
+        from finagent.recipes import strategy_metrics as sm
+
+        # ── Per-asset contribution to total return for each book ────────
+        # contribution_a = sum_t (w_{t-1, a} * r_{t, a})
+        # i.e. the time-summed dollar return earned through asset `a`.
+        # This is the additive decomposition: sum across assets equals
+        # the total simple-return sum (NOT the compounded return — exact
+        # decomposition of the compounded number requires log-returns,
+        # but the simple-sum view is the one PMs actually read).
+        _palette = {
+            'model':         '#2563eb',
+            'value':         '#16a34a',
+            'momentum':      '#f59e0b',
+            'buy_and_hold':  '#94a3b8',
+        }
+        _contrib_rows = {}
+        for _name, _w in _books.items():
+            _aligned_w = _w.reindex(asset_returns_full.index).fillna(0.0).shift(1)
+            _per_asset = (_aligned_w * asset_returns_full.fillna(0.0)).sum(axis=0)
+            _contrib_rows[_name] = _per_asset
+
+        contribution_df = pd.DataFrame(_contrib_rows)
+        # Order assets by absolute model contribution so the largest bars
+        # sit on the left — easier to read on a wide screen.
+        if 'model' in contribution_df.columns and contribution_df['model'].abs().sum() > 0:
+            contribution_df = contribution_df.reindex(
+                contribution_df['model'].abs().sort_values(ascending=False).index
+            )
+
+        # Grouped bar chart: one group per asset, one bar per book.
+        _book_order = [b for b in ['model', 'value', 'momentum', 'buy_and_hold']
+                       if b in contribution_df.columns]
+        _n_books = len(_book_order)
+        _assets = list(contribution_df.index)
+        _n_assets = len(_assets)
+        if _n_assets > 0 and _n_books > 0:
+            import numpy as _np
+            _bar_w = 0.8 / max(_n_books, 1)
+            _x = _np.arange(_n_assets)
+            fig, ax = plt.subplots(figsize=(max(8, _n_assets * 1.2), 4.0))
+            for _i, _book in enumerate(_book_order):
+                _vals = (contribution_df[_book].values * 100.0)  # to percent
+                ax.bar(
+                    _x + (_i - (_n_books - 1) / 2) * _bar_w,
+                    _vals,
+                    width=_bar_w,
+                    label=_book,
+                    color=_palette.get(_book),
+                )
+            ax.axhline(0, color='#475569', linewidth=0.5)
+            ax.set_xticks(_x)
+            ax.set_xticklabels(_assets, rotation=0)
+            ax.set_ylabel('Total contribution (% of $1)')
+            ax.set_title('Per-asset contribution to total return — by book')
+            ax.legend(loc='best', frameon=False)
+            ax.grid(axis='y', alpha=0.25)
+            plt.tight_layout()
+            plt.show()
+
+            # Print the underlying table too — useful for screen-reader
+            # audiences and for reading exact numbers off the bars.
+            print('Per-asset contribution (% of $1):')
+            print((contribution_df * 100.0).round(2).to_string())
+
+        # ── Calendar-year returns by book ───────────────────────────────
+        # Compound within each year: (1 + r).groupby(year).prod() - 1
+        _yearly_rows = {}
+        for _name, _w in _books.items():
+            _bk = sm.book_returns(_w, asset_returns_full).fillna(0.0)
+            if _bk.empty:
+                continue
+            _yearly_rows[_name] = ((1.0 + _bk).groupby(_bk.index.year).prod() - 1.0)
+        yearly_df = pd.DataFrame(_yearly_rows)
+        # Reorder columns to the canonical book order so headers don't
+        # randomise based on dict insertion order across kernel restarts.
+        _ordered_cols = [b for b in ['model', 'value', 'momentum', 'buy_and_hold']
+                         if b in yearly_df.columns]
+        yearly_df = yearly_df[_ordered_cols] if _ordered_cols else yearly_df
+
+        # Add an "all" row at the bottom for the full-window compounded
+        # return — same as model_total_return etc. but inline so the
+        # reader doesn't have to scroll back to the metrics step.
+        if not yearly_df.empty:
+            _full = ((1.0 + yearly_df).prod() - 1.0)
+            _full.name = 'all'
+            yearly_df_with_full = pd.concat([yearly_df, _full.to_frame().T])
+
+            # Render as HTML for a clean notebook table; format as percentages.
+            try:
+                from IPython.display import display
+                _styled = (yearly_df_with_full * 100.0).round(2).style.format('{:+.2f}%')
+                display(_styled)
+            except Exception:
+                # Fallback if IPython display isn't wired up — print plain
+                print('Calendar-year returns (%):')
+                print((yearly_df_with_full * 100.0).round(2).to_string())
+        """)
+    return CellSpec("code", body, "n11_decomposition",
+                    "Per-asset contribution bars + per-year return table.")
+
+
 def _code_summary(recipe: Recipe) -> CellSpec:
     body = textwrap.dedent("""\
         # Emit a JSON line the experiment runner picks up to populate the Project page.
@@ -840,4 +971,4 @@ def _code_summary(recipe: Recipe) -> CellSpec:
         }
         print('FINAGENT_RUN_SUMMARY ' + _json.dumps(SUMMARY, default=str))
         """)
-    return CellSpec("code", body, "n11_summary", "Run-summary marker for harness ingestion.")
+    return CellSpec("code", body, "n12_summary", "Run-summary marker for harness ingestion.")
