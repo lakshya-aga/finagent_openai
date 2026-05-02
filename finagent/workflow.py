@@ -437,21 +437,38 @@ async def run_workflow(
         await _emit_agent_input("build", orchestration_agent.name, build_prompt)
         async with MCPServerManager([make_fruit_thrower(), make_data_mcp()]) as _orch_mcp_mgr:
             _orchestration_agent = orchestration_agent.clone(mcp_servers=_orch_mcp_mgr.active_servers)
-            orchestration_agent_result_temp = await Runner.run(
-                _orchestration_agent,
-                input=[
-                    *conversation_history,
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": build_prompt}
-                        ],
-                    },
-                ],
-                run_config=RunConfig(trace_metadata=trace_metadata),
-                hooks=_hooks("build"),
-                max_turns=40,
-            )
+            try:
+                orchestration_agent_result_temp = await Runner.run(
+                    _orchestration_agent,
+                    input=[
+                        *conversation_history,
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": build_prompt}
+                            ],
+                        },
+                    ],
+                    run_config=RunConfig(trace_metadata=trace_metadata),
+                    hooks=_hooks("build"),
+                    # Bumped from 40 → 80. The build phase often needs ~25-30
+                    # tool calls (search_code, list_data_sources, write_cell ×N)
+                    # to compose a single notebook, and 40 was too tight on
+                    # complex requests — orchestrator hit the cap and returned
+                    # silently, leaving the chat UI showing only the plan.
+                    max_turns=80,
+                )
+            except Exception as exc:
+                # Surface the failure explicitly so the chat UI doesn't go
+                # silent after the plan. Without this catch, a build-phase
+                # exception bubbled to run_workflow's outer except and the
+                # frontend rendered the plan + an unfriendly server error
+                # — unhelpful in a customer demo. Now the error reaches the
+                # user as a structured event AND we re-raise so the outer
+                # error handler still records the failure.
+                logging.exception("orchestrator build phase failed")
+                await _emit(f"⚠ Build phase failed: {type(exc).__name__}: {str(exc)[:200]}")
+                raise
         await emit_phase(progress_cb, "build", "end")
         await _emit_trace(orchestration_agent_result_temp)
         conversation_history.extend(
