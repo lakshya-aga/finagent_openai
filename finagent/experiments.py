@@ -52,6 +52,7 @@ class Run:
     hypothesis_verdict_json: Optional[str] = None
     fold_metrics_json: Optional[str] = None
     regime_metrics_json: Optional[str] = None
+    tags_json: Optional[str] = None
 
     def metrics(self) -> dict[str, float | None]:
         # Scrub non-finite floats (NaN / ±Infinity) on the way out. Starlette's
@@ -65,6 +66,21 @@ class Run:
         except Exception:
             return {}
         return {k: _finite_or_none(v) for k, v in raw.items()}
+
+    def tags(self) -> list[str]:
+        """Decode the user-applied tag list, or [].
+
+        Recognised pre-baked tags carry a colour convention on the
+        frontend (candidate=blue, production=emerald, rejected=rose);
+        anything else renders neutral. Free-form text is allowed.
+        """
+        if not self.tags_json:
+            return []
+        try:
+            raw = json.loads(self.tags_json)
+            return [str(t) for t in raw] if isinstance(raw, list) else []
+        except Exception:
+            return []
 
     def regime_metrics(self) -> list[dict[str, Any]]:
         """Decode the per-regime metric breakdown for unsupervised runs, or [].
@@ -143,11 +159,13 @@ class Run:
         d["hypothesis_verdict"] = self.hypothesis_verdict()
         d["fold_metrics"] = self.fold_metrics()
         d["regime_metrics"] = self.regime_metrics()
+        d["tags"] = self.tags()
         d.pop("metrics_json", None)
         d.pop("bias_audit_json", None)
         d.pop("hypothesis_verdict_json", None)
         d.pop("fold_metrics_json", None)
         d.pop("regime_metrics_json", None)
+        d.pop("tags_json", None)
         return d
 
     def _bands(self) -> dict[str, tuple[float, float]]:
@@ -219,7 +237,8 @@ CREATE TABLE IF NOT EXISTS runs (
     bias_audit_json TEXT,
     hypothesis_verdict_json TEXT,
     fold_metrics_json TEXT,
-    regime_metrics_json TEXT
+    regime_metrics_json TEXT,
+    tags_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project);
 CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
@@ -274,6 +293,8 @@ class ExperimentStore:
             conn.execute("ALTER TABLE runs ADD COLUMN fold_metrics_json TEXT")
         if "regime_metrics_json" not in existing:
             conn.execute("ALTER TABLE runs ADD COLUMN regime_metrics_json TEXT")
+        if "tags_json" not in existing:
+            conn.execute("ALTER TABLE runs ADD COLUMN tags_json TEXT")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -404,6 +425,20 @@ class ExperimentStore:
             conn.execute(
                 "UPDATE runs SET regime_metrics_json = ? WHERE id = ?",
                 (regime_metrics_json, run_id),
+            )
+
+    def update_run_tags(self, run_id: str, tags_json: str) -> None:
+        """Persist user-applied tags (workflow signal).
+
+        Recognised pre-baked tags: 'candidate', 'production', 'rejected'
+        — they get colour conventions on the frontend. Anything else
+        is free-form text. Storage is just a JSON list; deduplication
+        + normalisation happens at write time in the API handler.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE runs SET tags_json = ? WHERE id = ?",
+                (tags_json, run_id),
             )
 
     # ── reads ───────────────────────────────────────────────────────────
@@ -609,6 +644,7 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         hypothesis_verdict_json=(row["hypothesis_verdict_json"] if "hypothesis_verdict_json" in keys else None),
         fold_metrics_json=(row["fold_metrics_json"] if "fold_metrics_json" in keys else None),
         regime_metrics_json=(row["regime_metrics_json"] if "regime_metrics_json" in keys else None),
+        tags_json=(row["tags_json"] if "tags_json" in keys else None),
     )
 
 

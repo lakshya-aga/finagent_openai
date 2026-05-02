@@ -380,6 +380,35 @@ async def delete_run(run_id: str):
     return {"ok": True}
 
 
+class _TagsBody(BaseModel):
+    tags: List[str]
+
+
+@app.patch("/api/runs/{run_id}/tags")
+async def patch_run_tags(run_id: str, body: _TagsBody):
+    """Replace the run's tag list. Trims, lowercases, dedupes, and caps
+    at 12 tags / 32 chars each — a workflow signal, not a search index.
+    """
+    from finagent.experiments import get_store
+
+    store = get_store()
+    run = store.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in body.tags[:24]:  # input cap before dedupe
+        t = (raw or "").strip().lower()[:32]
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        cleaned.append(t)
+        if len(cleaned) >= 12:
+            break
+    store.update_run_tags(run_id, json.dumps(cleaned))
+    return {"ok": True, "tags": cleaned}
+
+
 @app.get("/api/runs/{run_id}/tearsheet")
 async def run_tearsheet(run_id: str):
     """Self-contained HTML tearsheet for a single run.
