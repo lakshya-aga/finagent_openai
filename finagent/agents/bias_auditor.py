@@ -181,7 +181,13 @@ def _digest_notebook(notebook_json: dict) -> str:
 # ── LLM call ───────────────────────────────────────────────────────────
 
 
-async def _call_llm(user_payload: str) -> BiasAuditVerdict:
+_AUDIT_MODEL = "gpt-4o-mini"
+
+
+async def _call_llm(
+    user_payload: str,
+    run_id: Optional[str] = None,
+) -> BiasAuditVerdict:
     """Hit gpt-4o-mini with structured-output and parse the result.
 
     Isolated as a thin function so tests can monkey-patch
@@ -190,7 +196,7 @@ async def _call_llm(user_payload: str) -> BiasAuditVerdict:
     """
     client = AsyncOpenAI()
     resp = await client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=_AUDIT_MODEL,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_payload},
@@ -199,6 +205,17 @@ async def _call_llm(user_payload: str) -> BiasAuditVerdict:
         max_tokens=2000,
         temperature=0,
     )
+    # Cost ledger — recorded best-effort; never fails the call.
+    try:
+        from finagent.cost_tracking import record_cost_event
+        record_cost_event(
+            response=resp,
+            purpose="bias_audit",
+            model=_AUDIT_MODEL,
+            run_id=run_id,
+        )
+    except Exception:
+        pass
     raw = resp.choices[0].message.content or "{}"
     return BiasAuditVerdict.model_validate_json(raw)
 
@@ -207,6 +224,7 @@ async def audit_run(
     notebook_json: dict,
     recipe_yaml: str,
     metrics: dict[str, Any],
+    run_id: Optional[str] = None,
 ) -> BiasAuditVerdict:
     """Audit a completed run and return a structured verdict.
 
@@ -230,7 +248,7 @@ async def audit_run(
             "NOTEBOOK DIGEST (code cells + first lines of stdout):\n"
             f"{digest}"
         )
-        return await _call_llm(user_payload)
+        return await _call_llm(user_payload, run_id=run_id)
     except Exception as exc:
         logging.exception("bias audit failed")
         return BiasAuditVerdict(

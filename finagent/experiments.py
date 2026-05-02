@@ -260,6 +260,26 @@ CREATE TABLE IF NOT EXISTS searches (
 );
 CREATE INDEX IF NOT EXISTS idx_searches_project ON searches(project);
 CREATE INDEX IF NOT EXISTS idx_searches_started ON searches(started_at DESC);
+
+-- Cost ledger — one row per LLM call. Sum these for per-day / per-user /
+-- per-purpose burn-rate. Per-call resolution is overkill for monthly
+-- bookkeeping but useful when investigating a spike ("this run alone
+-- chewed $4 in audit calls because it had 80 cells").
+CREATE TABLE IF NOT EXISTS cost_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              REAL NOT NULL,
+    user            TEXT,
+    run_id          TEXT,
+    purpose         TEXT NOT NULL,   -- 'bias_audit' / 'chat' / ...
+    provider        TEXT NOT NULL,   -- 'openai' / 'anthropic'
+    model           TEXT NOT NULL,
+    prompt_tokens   INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd        REAL NOT NULL DEFAULT 0.0
+);
+CREATE INDEX IF NOT EXISTS idx_cost_ts      ON cost_events(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_cost_run     ON cost_events(run_id);
+CREATE INDEX IF NOT EXISTS idx_cost_purpose ON cost_events(purpose);
 """
 
 # Indexes that reference columns added by _migrate(). Created after the
@@ -426,6 +446,98 @@ class ExperimentStore:
                 "UPDATE runs SET regime_metrics_json = ? WHERE id = ?",
                 (regime_metrics_json, run_id),
             )
+
+    # ── cost ledger ──────────────────────────────────────────────────
+
+    def record_cost_event(
+        self,
+        *,
+        purpose: str,
+        provider: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cost_usd: float,
+        run_id: Optional[str] = None,
+        user: Optional[str] = None,
+    ) -> None:
+        """Append a single cost-event row. One per LLM call."""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO cost_events (ts, user, run_id, purpose, provider, "
+                "model, prompt_tokens, completion_tokens, cost_usd) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    time.time(), user, run_id, purpose, provider, model,
+                    int(prompt_tokens), int(completion_tokens), float(cost_usd),
+                ),
+            )
+
+    def cost_summary(self, days: int = 30) -> dict[str, Any]:
+        """Aggregate the cost ledger for the last ``days`` days.
+
+        Returns:
+          {
+            "window_days": days,
+            "total_usd": <float>,
+            "total_calls": <int>,
+            "by_day":     [{date, calls, usd}, ...],
+            "by_purpose": [{purpose, calls, usd}, ...],
+            "by_user":    [{user, calls, usd}, ...],
+            "by_model":   [{model, calls, usd}, ...],
+            "top_runs":   [{run_id, calls, usd}, ...]   -- top 20
+          }
+        """
+        cutoff = time.time() - days * 86400.0
+        with self._conn() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) AS c, COALESCE(SUM(cost_usd), 0) AS u "
+                "FROM cost_events WHERE ts >= ?",
+                (cutoff,),
+            ).fetchone()
+            by_day = conn.execute(
+                "SELECT date(ts, 'unixepoch') AS d, COUNT(*) AS c, "
+                "COALESCE(SUM(cost_usd), 0) AS u "
+                "FROM cost_events WHERE ts >= ? GROUP BY d ORDER BY d",
+                (cutoff,),
+            ).fetchall()
+            by_purpose = conn.execute(
+                "SELECT purpose, COUNT(*) AS c, COALESCE(SUM(cost_usd), 0) AS u "
+                "FROM cost_events WHERE ts >= ? GROUP BY purpose ORDER BY u DESC",
+                (cutoff,),
+            ).fetchall()
+            by_user = conn.execute(
+                "SELECT COALESCE(user, '') AS user, COUNT(*) AS c, "
+                "COALESCE(SUM(cost_usd), 0) AS u "
+                "FROM cost_events WHERE ts >= ? GROUP BY user ORDER BY u DESC",
+                (cutoff,),
+            ).fetchall()
+            by_model = conn.execute(
+                "SELECT model, COUNT(*) AS c, COALESCE(SUM(cost_usd), 0) AS u "
+                "FROM cost_events WHERE ts >= ? GROUP BY model ORDER BY u DESC",
+                (cutoff,),
+            ).fetchall()
+            top_runs = conn.execute(
+                "SELECT COALESCE(run_id, '') AS run_id, COUNT(*) AS c, "
+                "COALESCE(SUM(cost_usd), 0) AS u "
+                "FROM cost_events WHERE ts >= ? AND run_id IS NOT NULL "
+                "GROUP BY run_id ORDER BY u DESC LIMIT 20",
+                (cutoff,),
+            ).fetchall()
+
+        def _rows(rows, key_col):
+            return [{key_col: r[key_col], "calls": r["c"], "usd": r["u"]} for r in rows]
+
+        return {
+            "window_days": days,
+            "total_usd": float(total["u"]),
+            "total_calls": int(total["c"]),
+            "by_day": [{"date": r["d"], "calls": r["c"], "usd": r["u"]} for r in by_day],
+            "by_purpose": _rows(by_purpose, "purpose"),
+            "by_user":    _rows(by_user, "user"),
+            "by_model":   _rows(by_model, "model"),
+            "top_runs":   _rows(top_runs, "run_id"),
+        }
 
     def update_run_tags(self, run_id: str, tags_json: str) -> None:
         """Persist user-applied tags (workflow signal).

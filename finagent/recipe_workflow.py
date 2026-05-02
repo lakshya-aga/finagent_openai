@@ -458,7 +458,7 @@ async def _run_bias_audit(
             logging.exception("could not read notebook for audit run_id=%s", run_id)
             notebook_json = {"cells": []}
 
-        verdict = await audit_run(notebook_json, recipe_yaml, metrics)
+        verdict = await audit_run(notebook_json, recipe_yaml, metrics, run_id=run_id)
         get_store().update_run_bias_audit(
             run_id, json.dumps(verdict.model_dump())
         )

@@ -456,6 +456,17 @@ async def admin_metrics(days: int = 7, keys: Optional[str] = None):
     return await asyncio.to_thread(compute_metrics, days=days, keys=selected)
 
 
+@app.get("/api/admin/costs")
+async def admin_costs(days: int = 30):
+    """Cost ledger summary — total $ spend + breakdowns by day, purpose,
+    user, model, and top runs. Auth-gated at the synapse proxy layer.
+    """
+    from finagent.experiments import get_store
+
+    days = max(1, min(365, int(days)))
+    return await asyncio.to_thread(get_store().cost_summary, days)
+
+
 @app.get("/api/admin/metrics/keys")
 async def admin_metric_keys():
     """Return the registry of available metric keys for the toggle UI."""
