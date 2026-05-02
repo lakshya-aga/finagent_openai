@@ -380,6 +380,27 @@ async def delete_run(run_id: str):
     return {"ok": True}
 
 
+@app.get("/api/runs/{run_id}/tearsheet")
+async def run_tearsheet(run_id: str):
+    """Self-contained HTML tearsheet for a single run.
+
+    Browser 'Save as PDF' produces a static copy suitable for the Friday
+    investor memo. Server-side PDF generation deferred (weasyprint /
+    headless-chromium add deployment complexity for a feature that
+    browser print already covers).
+    """
+    from fastapi.responses import HTMLResponse
+    from finagent.experiments import get_store
+    from finagent.tearsheet import render_tearsheet
+
+    run = get_store().get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+    nb_path = Path(run.notebook_path) if run.notebook_path else None
+    body = render_tearsheet(run.as_public_dict(), nb_path)
+    return HTMLResponse(content=body)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Admin metrics dashboard.
 #
