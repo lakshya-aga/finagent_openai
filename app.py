@@ -4,6 +4,7 @@ load_dotenv()
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import uuid
@@ -174,10 +175,19 @@ def _extract_notebook_metadata(path: Path) -> dict:
             break
 
     metrics = (summary or {}).get("metrics") or {}
+    # NaN passes isinstance(_, float) and so would land in the response
+    # payload — Starlette's JSONResponse uses allow_nan=False (strict JSON
+    # spec) and 502s the whole notebooks endpoint when it encounters one.
+    # Same scrub pattern as Run.metrics() in finagent/experiments.py.
+    def _finite(v: object) -> bool:
+        return isinstance(v, (int, float)) and not (
+            isinstance(v, float) and not math.isfinite(v)
+        )
+
     headline = {
         k: metrics[k]
         for k in ("sharpe", "annual_return")
-        if isinstance(metrics.get(k), (int, float))
+        if _finite(metrics.get(k))
     }
 
     fingerprint = recipe_meta.get("fingerprint")
