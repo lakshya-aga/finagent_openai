@@ -238,10 +238,19 @@ def compile(recipe: Recipe) -> list[CellSpec]:
     ))
     cells.append(_code_financial_metrics(recipe))
 
-    # ── Step 10 — Persist run summary for the experiment store ────────
+    # ── Step 10 — Charts ──────────────────────────────────────────────
     cells.append(_md_step(
-        10, "Run summary",
-        "n10_summary",
+        10, "Charts",
+        "n10_charts",
+        "Equity curves for every book, drawdown for the model book, "
+        "and (unsupervised only) a regime ribbon overlaying price.",
+    ))
+    cells.append(_code_charts(recipe))
+
+    # ── Step 11 — Persist run summary for the experiment store ────────
+    cells.append(_md_step(
+        11, "Run summary",
+        "n11_summary",
         "Print a JSON summary the experiment runner harvests for the Project page.",
     ))
     cells.append(_code_summary(recipe))
@@ -658,6 +667,97 @@ def _code_financial_metrics(recipe: Recipe) -> CellSpec:
                     "Financial metrics for value / momentum / buy-and-hold / model + canonical asset_returns/weights.")
 
 
+def _code_charts(recipe: Recipe) -> CellSpec:
+    """Render the headline charts as inline PNGs.
+
+    Three plots — equity curves (all books), drawdown of the model book, and
+    (unsupervised only) a regime ribbon overlaying the first asset price. We
+    explicitly call ``plt.show()`` so the kernel emits ``image/png`` outputs;
+    without ``show()`` the figure object is the cell value and only ``text/
+    plain`` (the repr) ends up in the notebook — which is how every prior run
+    landed without renderable charts.
+    """
+    is_unsupervised = recipe.target.kind == "unsupervised_regime"
+    body = textwrap.dedent("""\
+        # NOTE: do NOT call matplotlib.use(...) here — the Jupyter kernel sets
+        # the inline backend on startup, which routes figure outputs into the
+        # cell as image/png. Forcing 'Agg' would suppress that and the notebook
+        # would render with text/plain only (which is how earlier runs landed
+        # without visible charts).
+        import matplotlib.pyplot as plt
+        from finagent.recipes import strategy_metrics as sm
+
+        # ── Equity curves: growth of $1 for each book ───────────────────
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        _palette = {
+            'model':         '#2563eb',
+            'value':         '#16a34a',
+            'momentum':      '#f59e0b',
+            'buy_and_hold':  '#94a3b8',
+        }
+        for _name, _w in _books.items():
+            _bk = sm.book_returns(_w, asset_returns_full).fillna(0.0)
+            if _bk.empty:
+                continue
+            _eq = (1.0 + _bk).cumprod()
+            ax.plot(_eq.index, _eq.values, label=_name, linewidth=1.5,
+                    color=_palette.get(_name))
+        ax.set_title('Equity curves — model vs. reference books')
+        ax.set_ylabel('Growth of $1 (compounded)')
+        ax.legend(loc='best', frameon=False)
+        ax.grid(alpha=0.25)
+        plt.tight_layout()
+        plt.show()
+
+        # ── Drawdown of the model book ──────────────────────────────────
+        _bk_m = sm.book_returns(model_weights, asset_returns_full).fillna(0.0)
+        if not _bk_m.empty:
+            _eq_m = (1.0 + _bk_m).cumprod()
+            _peak = _eq_m.cummax()
+            _dd = _eq_m / _peak - 1.0
+            fig, ax = plt.subplots(figsize=(10, 2.8))
+            ax.fill_between(_dd.index, _dd.values, 0.0,
+                            color='#dc2626', alpha=0.35, linewidth=0)
+            ax.plot(_dd.index, _dd.values, color='#991b1b', linewidth=1.0)
+            ax.set_title('Model book drawdown')
+            ax.set_ylabel('Drawdown')
+            ax.grid(alpha=0.25)
+            plt.tight_layout()
+            plt.show()
+    """)
+    if is_unsupervised:
+        body += textwrap.dedent("""\
+
+            # ── Regime ribbon overlay (unsupervised only) ───────────────
+            # Shade the price track by the OOS regime label so a researcher
+            # can visually check whether transitions line up with regime
+            # changes. First numeric column of ASSET_PRICES is the proxy.
+            _price = ASSET_PRICES.iloc[:, 0].dropna()
+            _labels = oos_predictions.reindex(_price.index)
+            if _labels.notna().any():
+                fig, ax = plt.subplots(figsize=(10, 3.2))
+                ax.plot(_price.index, _price.values, color='#0f172a', linewidth=1.0)
+                _state_colors = ['#dbeafe', '#fee2e2', '#dcfce7', '#fef9c3', '#ede9fe']
+                _states = sorted(_labels.dropna().unique())
+                _ymin, _ymax = float(_price.min()), float(_price.max())
+                for _i, _state in enumerate(_states):
+                    _mask = (_labels == _state).reindex(_price.index, fill_value=False)
+                    ax.fill_between(_price.index, _ymin, _ymax,
+                                    where=_mask.values,
+                                    color=_state_colors[_i % len(_state_colors)],
+                                    alpha=0.6, linewidth=0,
+                                    label=f'state {int(_state)}')
+                ax.set_title(f'{ASSET_PRICES.columns[0]} with OOS regime ribbon')
+                ax.set_ylabel(str(ASSET_PRICES.columns[0]))
+                ax.legend(loc='best', frameon=False, ncol=min(4, len(_states)))
+                ax.grid(alpha=0.25)
+                plt.tight_layout()
+                plt.show()
+        """)
+    return CellSpec("code", body, "n10_charts",
+                    "Equity curves + drawdown + (unsup) regime ribbon as inline PNGs.")
+
+
 def _code_summary(recipe: Recipe) -> CellSpec:
     body = textwrap.dedent("""\
         # Emit a JSON line the experiment runner picks up to populate the Project page.
@@ -672,4 +772,4 @@ def _code_summary(recipe: Recipe) -> CellSpec:
         }
         print('FINAGENT_RUN_SUMMARY ' + _json.dumps(SUMMARY, default=str))
         """)
-    return CellSpec("code", body, "n10_summary", "Run-summary marker for harness ingestion.")
+    return CellSpec("code", body, "n11_summary", "Run-summary marker for harness ingestion.")
