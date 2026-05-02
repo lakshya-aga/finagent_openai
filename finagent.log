@@ -2445,3 +2445,6 @@ FileNotFoundError: [Errno 2] No such file or directory: '/Users/lakshya/Desktop/
 2026-03-29 16:39:15,925 [INFO] HTTP Request: POST https://api.openai.com/v1/traces/ingest "HTTP/1.1 204 No Content"
 2026-03-29 16:39:21,336 [INFO] HTTP Request: POST https://api.openai.com/v1/responses "HTTP/1.1 200 OK"
 2026-03-29 16:39:22,215 [INFO] HTTP Request: POST https://api.openai.com/v1/traces/ingest "HTTP/1.1 204 No Content"
+2026-04-30 01:45:47,379 [WARNING] No span to add error {'message': 'Error running tool (non-fatal)', 'data': {'tool_name': 'install_packages', 'error': "'NoneType' object has no attribute 'tool_name'"}} to
+2026-04-30 01:47:47,791 [INFO] NumExpr defaulting to 8 threads.
+2026-04-30 01:48:06,379 [INFO] NumExpr defaulting to 8 threads.
