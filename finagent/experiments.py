@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -46,11 +47,18 @@ class Run:
     search_id: Optional[str] = None
     search_iteration: Optional[int] = None
 
-    def metrics(self) -> dict[str, float]:
+    def metrics(self) -> dict[str, float | None]:
+        # Scrub non-finite floats (NaN / ±Infinity) on the way out. Starlette's
+        # JSONResponse serializes with allow_nan=False (strict JSON spec), so a
+        # NaN in the response payload returns 500 from the project-runs endpoint
+        # — the symptom we hit when strategy_metrics emits NaN for degenerate
+        # folds (zero-std book, empty intersection, etc.). None renders as "—"
+        # on the project page; NaN crashes the whole list endpoint.
         try:
-            return json.loads(self.metrics_json) if self.metrics_json else {}
+            raw = json.loads(self.metrics_json) if self.metrics_json else {}
         except Exception:
             return {}
+        return {k: _finite_or_none(v) for k, v in raw.items()}
 
     def as_public_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -229,8 +237,11 @@ class ExperimentStore:
             sets.append("notebook_path = ?")
             args.append(notebook_path)
         if metrics is not None:
+            # Scrub NaN/Inf before storing — keeps the DB JSON-spec-clean and
+            # prevents a future schema migration from re-encountering this.
+            clean = {k: _finite_or_none(v) for k, v in metrics.items()}
             sets.append("metrics_json = ?")
-            args.append(json.dumps(metrics))
+            args.append(json.dumps(clean))
         if error is not None:
             sets.append("error = ?")
             args.append(error)
@@ -390,6 +401,19 @@ class ExperimentStore:
              "last_run": r["last_run"]}
             for r in rows
         ]
+
+
+def _finite_or_none(v: Any) -> Any:
+    """Return v unchanged unless it's a non-finite float, in which case None.
+
+    Centralises the NaN/Inf scrub so both reads (Run.metrics) and writes
+    (update_run) emit JSON-spec-compliant payloads. Starlette's JSONResponse
+    rejects NaN/Infinity (allow_nan=False); leaving them in causes 500s on
+    /api/projects/{name}/runs once any run records a degenerate metric.
+    """
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    return v
 
 
 def _row_to_run(row: sqlite3.Row) -> Run:
