@@ -82,6 +82,7 @@ def run_recipe(
         # Harvest metrics from the run-summary marker if any cell emitted it.
         metrics = _extract_metrics_from_notebook(notebook_path)
         fold_metrics = _extract_fold_metrics_from_notebook(notebook_path)
+        regime_metrics = _extract_regime_metrics_from_notebook(notebook_path)
 
         # Stash AST lineage immediately; runtime lineage is the same path the
         # Graph viewer will fetch on demand.
@@ -111,6 +112,11 @@ def run_recipe(
                 store.update_run_fold_metrics(run.id, json.dumps(fold_metrics, default=str))
             except Exception:
                 logging.exception("could not persist fold_metrics run_id=%s", run.id)
+        if regime_metrics:
+            try:
+                store.update_run_regime_metrics(run.id, json.dumps(regime_metrics, default=str))
+            except Exception:
+                logging.exception("could not persist regime_metrics run_id=%s", run.id)
 
         # Pre-registered hypothesis verdict — synchronous, deterministic,
         # cheap. Just compares the actual metrics against the success /
@@ -259,6 +265,14 @@ def _extract_fold_metrics_from_notebook(path: Path) -> list[dict]:
     """
     summary = _read_summary(path)
     raw = summary.get("fold_metrics")
+    return raw if isinstance(raw, list) else []
+
+
+def _extract_regime_metrics_from_notebook(path: Path) -> list[dict]:
+    """Pull the per-regime metric breakdown (C4). Empty for non-unsupervised
+    runs and for runs predating C4 instrumentation."""
+    summary = _read_summary(path)
+    raw = summary.get("regime_metrics")
     return raw if isinstance(raw, list) else []
 
 

@@ -863,6 +863,32 @@ def _code_financial_metrics(recipe: Recipe) -> CellSpec:
                     'hit_rate': sm.hit_rate(_slice_book),
                 }})
         print(f'\\nfold metrics: {{len(fold_metrics)}} folds captured')
+
+        # ── Regime-conditional performance (C4) ──────────────────────────
+        # When this is an unsupervised regime run, oos_predictions carries
+        # the OOS regime label per day. Group days by label and compute
+        # the metric pack within each regime — answers "your Sharpe per
+        # regime", which is the diagnostic the reviewer specifically
+        # called out as the highest-leverage missing chart.
+        regime_metrics: list[dict] = []
+        if RECIPE.get('target', {{}}).get('kind') == 'unsupervised_regime' and 'oos_predictions' in dir():
+            _labels = oos_predictions.dropna()
+            for _state in sorted(_labels.unique()):
+                _mask_idx = _labels[_labels == _state].index
+                _regime_book = _model_book_full.reindex(_mask_idx).dropna()
+                if _regime_book.empty:
+                    continue
+                regime_metrics.append({{
+                    'regime': int(_state) if not pd.isna(_state) else None,
+                    'n_obs': int(len(_regime_book)),
+                    'pct_of_oos': float(len(_regime_book) / max(1, len(_labels))),
+                    'sharpe': sm.sharpe(_regime_book),
+                    'sortino': sm.sortino(_regime_book),
+                    'annual_return': sm.annual_return(_regime_book),
+                    'max_drawdown': sm.max_drawdown(_regime_book),
+                    'hit_rate': sm.hit_rate(_regime_book),
+                }})
+            print(f'regime metrics: {{len(regime_metrics)}} regimes captured')
         """)
     return CellSpec("code", body, "n9_metrics",
                     "Financial metrics for value / momentum / buy-and-hold / model + canonical asset_returns/weights.")
@@ -1091,6 +1117,7 @@ def _code_summary(recipe: Recipe) -> CellSpec:
             'fingerprint': RECIPE.get('fingerprint') if 'fingerprint' in RECIPE else None,
             'metrics': metrics_out,
             'fold_metrics': fold_metrics if 'fold_metrics' in dir() else [],
+            'regime_metrics': regime_metrics if 'regime_metrics' in dir() else [],
             'rows_oos': int(len(oos_predictions)) if 'oos_predictions' in dir() else 0,
         }
         print('FINAGENT_RUN_SUMMARY ' + _json.dumps(SUMMARY, default=str))

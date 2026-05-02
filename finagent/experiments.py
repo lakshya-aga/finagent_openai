@@ -51,6 +51,7 @@ class Run:
     bias_audit_json: Optional[str] = None
     hypothesis_verdict_json: Optional[str] = None
     fold_metrics_json: Optional[str] = None
+    regime_metrics_json: Optional[str] = None
 
     def metrics(self) -> dict[str, float | None]:
         # Scrub non-finite floats (NaN / ±Infinity) on the way out. Starlette's
@@ -64,6 +65,21 @@ class Run:
         except Exception:
             return {}
         return {k: _finite_or_none(v) for k, v in raw.items()}
+
+    def regime_metrics(self) -> list[dict[str, Any]]:
+        """Decode the per-regime metric breakdown for unsupervised runs, or [].
+
+        Each entry: {regime, n_obs, pct_of_oos, sharpe, sortino,
+        annual_return, max_drawdown, hit_rate}. Only populated for
+        target.kind == 'unsupervised_regime' runs.
+        """
+        if not self.regime_metrics_json:
+            return []
+        try:
+            raw = json.loads(self.regime_metrics_json)
+            return raw if isinstance(raw, list) else []
+        except Exception:
+            return []
 
     def fold_metrics(self) -> list[dict[str, Any]]:
         """Decode the per-walk-forward-fold metric list, or [].
@@ -126,10 +142,12 @@ class Run:
         d["bias_audit"] = self.bias_audit()
         d["hypothesis_verdict"] = self.hypothesis_verdict()
         d["fold_metrics"] = self.fold_metrics()
+        d["regime_metrics"] = self.regime_metrics()
         d.pop("metrics_json", None)
         d.pop("bias_audit_json", None)
         d.pop("hypothesis_verdict_json", None)
         d.pop("fold_metrics_json", None)
+        d.pop("regime_metrics_json", None)
         return d
 
     def _bands(self) -> dict[str, tuple[float, float]]:
@@ -200,7 +218,8 @@ CREATE TABLE IF NOT EXISTS runs (
     error         TEXT,
     bias_audit_json TEXT,
     hypothesis_verdict_json TEXT,
-    fold_metrics_json TEXT
+    fold_metrics_json TEXT,
+    regime_metrics_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project);
 CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
@@ -253,6 +272,8 @@ class ExperimentStore:
             conn.execute("ALTER TABLE runs ADD COLUMN hypothesis_verdict_json TEXT")
         if "fold_metrics_json" not in existing:
             conn.execute("ALTER TABLE runs ADD COLUMN fold_metrics_json TEXT")
+        if "regime_metrics_json" not in existing:
+            conn.execute("ALTER TABLE runs ADD COLUMN regime_metrics_json TEXT")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -375,6 +396,14 @@ class ExperimentStore:
             conn.execute(
                 "UPDATE runs SET fold_metrics_json = ? WHERE id = ?",
                 (fold_metrics_json, run_id),
+            )
+
+    def update_run_regime_metrics(self, run_id: str, regime_metrics_json: str) -> None:
+        """Persist the per-regime metric breakdown (unsupervised runs)."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE runs SET regime_metrics_json = ? WHERE id = ?",
+                (regime_metrics_json, run_id),
             )
 
     # ── reads ───────────────────────────────────────────────────────────
@@ -579,6 +608,7 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         bias_audit_json=(row["bias_audit_json"] if "bias_audit_json" in keys else None),
         hypothesis_verdict_json=(row["hypothesis_verdict_json"] if "hypothesis_verdict_json" in keys else None),
         fold_metrics_json=(row["fold_metrics_json"] if "fold_metrics_json" in keys else None),
+        regime_metrics_json=(row["regime_metrics_json"] if "regime_metrics_json" in keys else None),
     )
 
 
