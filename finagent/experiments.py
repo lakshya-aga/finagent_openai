@@ -50,6 +50,7 @@ class Run:
     search_iteration: Optional[int] = None
     bias_audit_json: Optional[str] = None
     hypothesis_verdict_json: Optional[str] = None
+    fold_metrics_json: Optional[str] = None
 
     def metrics(self) -> dict[str, float | None]:
         # Scrub non-finite floats (NaN / ±Infinity) on the way out. Starlette's
@@ -63,6 +64,23 @@ class Run:
         except Exception:
             return {}
         return {k: _finite_or_none(v) for k, v in raw.items()}
+
+    def fold_metrics(self) -> list[dict[str, Any]]:
+        """Decode the per-walk-forward-fold metric list, or [].
+
+        Each entry is a dict like
+            {"fold": 0, "start": "2018-01-01", "end": "2018-04-01",
+             "n_obs": 60, "sharpe": 0.41, "sortino": 0.58, ...}
+        Used by the C3 walk-forward stability dashboard. Empty for runs
+        that predate C3 instrumentation or had no folds.
+        """
+        if not self.fold_metrics_json:
+            return []
+        try:
+            raw = json.loads(self.fold_metrics_json)
+            return raw if isinstance(raw, list) else []
+        except Exception:
+            return []
 
     def hypothesis_verdict(self) -> Optional[dict[str, Any]]:
         """Decode the pre-registered-hypothesis verdict, or None.
@@ -107,9 +125,11 @@ class Run:
         d["metrics_flags"] = plausibility.flag(metrics, self._bands())
         d["bias_audit"] = self.bias_audit()
         d["hypothesis_verdict"] = self.hypothesis_verdict()
+        d["fold_metrics"] = self.fold_metrics()
         d.pop("metrics_json", None)
         d.pop("bias_audit_json", None)
         d.pop("hypothesis_verdict_json", None)
+        d.pop("fold_metrics_json", None)
         return d
 
     def _bands(self) -> dict[str, tuple[float, float]]:
@@ -179,7 +199,8 @@ CREATE TABLE IF NOT EXISTS runs (
     metrics_json  TEXT NOT NULL DEFAULT '{}',
     error         TEXT,
     bias_audit_json TEXT,
-    hypothesis_verdict_json TEXT
+    hypothesis_verdict_json TEXT,
+    fold_metrics_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project);
 CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
@@ -230,6 +251,8 @@ class ExperimentStore:
             conn.execute("ALTER TABLE runs ADD COLUMN bias_audit_json TEXT")
         if "hypothesis_verdict_json" not in existing:
             conn.execute("ALTER TABLE runs ADD COLUMN hypothesis_verdict_json TEXT")
+        if "fold_metrics_json" not in existing:
+            conn.execute("ALTER TABLE runs ADD COLUMN fold_metrics_json TEXT")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -344,6 +367,14 @@ class ExperimentStore:
             conn.execute(
                 "UPDATE runs SET hypothesis_verdict_json = ? WHERE id = ?",
                 (verdict_json, run_id),
+            )
+
+    def update_run_fold_metrics(self, run_id: str, fold_metrics_json: str) -> None:
+        """Persist the per-walk-forward-fold metric list."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE runs SET fold_metrics_json = ? WHERE id = ?",
+                (fold_metrics_json, run_id),
             )
 
     # ── reads ───────────────────────────────────────────────────────────
@@ -547,6 +578,7 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         search_iteration=(row["search_iteration"] if "search_iteration" in keys else None),
         bias_audit_json=(row["bias_audit_json"] if "bias_audit_json" in keys else None),
         hypothesis_verdict_json=(row["hypothesis_verdict_json"] if "hypothesis_verdict_json" in keys else None),
+        fold_metrics_json=(row["fold_metrics_json"] if "fold_metrics_json" in keys else None),
     )
 
 

@@ -532,11 +532,16 @@ def _code_walk_forward(recipe: Recipe) -> CellSpec:
         *loop_def,
         "",
         "oos_predictions = pd.Series(index=X.index, dtype='float64', name='pred')",
+        # Capture per-fold test slices so the financial-metrics step can compute
+        # walk-forward-stability metrics. List of (start, stop) integer pairs;
+        # consumed in step 9 to slice the model book per fold.
+        "_fold_test_slices: list[tuple[int, int]] = []",
         "for tr, te in _walk_forward(len(X)):",
         *fit_lines,
         "    oos_predictions.iloc[te] = preds",
+        "    _fold_test_slices.append((te.start, te.stop))",
         "oos_predictions = oos_predictions.dropna()",
-        "print(f'OOS predictions: {len(oos_predictions)} rows')",
+        "print(f'OOS predictions: {len(oos_predictions)} rows · {len(_fold_test_slices)} folds')",
     ]
     return CellSpec("code", "\n".join(body_lines), "n6_walk_forward", "Walk-forward fit/predict loop.")
 
@@ -829,6 +834,35 @@ def _code_financial_metrics(recipe: Recipe) -> CellSpec:
         asset_returns = asset_returns_full.fillna(0.0)
         asset_weights = model_weights.fillna(0.0)
         print(f'\\nasset_returns shape={{asset_returns.shape}}, asset_weights shape={{asset_weights.shape}}')
+
+        # ── Walk-forward stability — per-fold metrics on the model book ──
+        # Slice model book returns by each walk-forward test window and run
+        # the metric helpers on the slice. Feeds the C3 stability dashboard
+        # so the reviewer can see whether Sharpe collapses on certain folds
+        # (the regime where the strategy doesn't work) — a strategy whose
+        # Sharpe varies wildly across folds is not really a strategy.
+        _model_book_full = sm.book_returns(model_weights, asset_returns_full)
+        fold_metrics: list[dict] = []
+        if '_fold_test_slices' in dir():
+            for _i, (_start, _stop) in enumerate(_fold_test_slices):
+                if _start >= len(X.index) or _stop > len(X.index) or _start >= _stop:
+                    continue
+                _idx_slice = X.index[_start:_stop]
+                _slice_book = _model_book_full.reindex(_idx_slice).dropna()
+                if _slice_book.empty:
+                    continue
+                fold_metrics.append({{
+                    'fold': _i,
+                    'start': str(_idx_slice.min().date()) if len(_idx_slice) else None,
+                    'end': str(_idx_slice.max().date()) if len(_idx_slice) else None,
+                    'n_obs': int(len(_slice_book)),
+                    'sharpe': sm.sharpe(_slice_book),
+                    'sortino': sm.sortino(_slice_book),
+                    'annual_return': sm.annual_return(_slice_book),
+                    'max_drawdown': sm.max_drawdown(_slice_book),
+                    'hit_rate': sm.hit_rate(_slice_book),
+                }})
+        print(f'\\nfold metrics: {{len(fold_metrics)}} folds captured')
         """)
     return CellSpec("code", body, "n9_metrics",
                     "Financial metrics for value / momentum / buy-and-hold / model + canonical asset_returns/weights.")
@@ -1056,6 +1090,7 @@ def _code_summary(recipe: Recipe) -> CellSpec:
             'project': RECIPE['project'],
             'fingerprint': RECIPE.get('fingerprint') if 'fingerprint' in RECIPE else None,
             'metrics': metrics_out,
+            'fold_metrics': fold_metrics if 'fold_metrics' in dir() else [],
             'rows_oos': int(len(oos_predictions)) if 'oos_predictions' in dir() else 0,
         }
         print('FINAGENT_RUN_SUMMARY ' + _json.dumps(SUMMARY, default=str))

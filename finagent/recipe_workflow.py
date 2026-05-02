@@ -81,6 +81,7 @@ def run_recipe(
 
         # Harvest metrics from the run-summary marker if any cell emitted it.
         metrics = _extract_metrics_from_notebook(notebook_path)
+        fold_metrics = _extract_fold_metrics_from_notebook(notebook_path)
 
         # Stash AST lineage immediately; runtime lineage is the same path the
         # Graph viewer will fetch on demand.
@@ -105,6 +106,11 @@ def run_recipe(
             error=error,
             finished=True,
         )
+        if fold_metrics:
+            try:
+                store.update_run_fold_metrics(run.id, json.dumps(fold_metrics, default=str))
+            except Exception:
+                logging.exception("could not persist fold_metrics run_id=%s", run.id)
 
         # Pre-registered hypothesis verdict — synchronous, deterministic,
         # cheap. Just compares the actual metrics against the success /
@@ -239,6 +245,25 @@ def _materialise_notebook(recipe: Recipe, cells) -> Path:
 
 def _extract_metrics_from_notebook(path: Path) -> dict[str, float]:
     """Tail the saved notebook for the FINAGENT_RUN_SUMMARY stream output."""
+    summary = _read_summary(path)
+    return {k: float(v) for k, v in (summary.get("metrics") or {}).items()
+            if isinstance(v, (int, float))}
+
+
+def _extract_fold_metrics_from_notebook(path: Path) -> list[dict]:
+    """Same SUMMARY block, but pull the per-fold list. Used by the
+    walk-forward stability dashboard to render small-multiples.
+
+    Returns ``[]`` when the notebook predates the C3 instrumentation or
+    when the run had no folds to evaluate.
+    """
+    summary = _read_summary(path)
+    raw = summary.get("fold_metrics")
+    return raw if isinstance(raw, list) else []
+
+
+def _read_summary(path: Path) -> dict:
+    """Pull the FINAGENT_RUN_SUMMARY JSON blob out of a saved notebook."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             nb = nbformat.read(f, as_version=4)
@@ -256,11 +281,9 @@ def _extract_metrics_from_notebook(path: Path) -> dict[str, float]:
             m = _SUMMARY_RE.search(text)
             if m:
                 try:
-                    summary = json.loads(m.group(1))
+                    return json.loads(m.group(1))
                 except Exception:
                     return {}
-                return {k: float(v) for k, v in (summary.get("metrics") or {}).items()
-                        if isinstance(v, (int, float))}
     return {}
 
 
