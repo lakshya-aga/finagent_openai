@@ -55,9 +55,12 @@ METADATA = {
             "xgboost.XGBClassifier",
             "sklearn.ensemble.RandomForestClassifier",
         ],
+        # Financial metrics. Each is also emitted with a book-prefix
+        # (model_<m> / value_<m> / momentum_<m> / buy_and_hold_<m>) so the
+        # project page can sort by any one and compare strategies head-to-head.
         "metrics": [
-            "log_likelihood", "regime_persistence", "transition_entropy",
-            "accuracy", "f1",
+            "sharpe", "sortino", "annual_return", "total_return",
+            "max_drawdown", "calmar", "turnover", "hit_rate", "exposure",
         ],
     },
     "presets": [
@@ -98,7 +101,7 @@ METADATA = {
                 "  splits: walk_forward\n"
                 "  train_window: 504\n"
                 "  test_window: 21\n"
-                "  metrics: [log_likelihood, regime_persistence, transition_entropy]\n\n"
+                "  metrics: [sharpe, sortino, annual_return, max_drawdown, turnover]\n\n"
                 "seed: 42\n"
             ),
         },
@@ -139,7 +142,7 @@ METADATA = {
                 "  splits: walk_forward\n"
                 "  train_window: 504\n"
                 "  test_window: 21\n"
-                "  metrics: [accuracy, f1]\n\n"
+                "  metrics: [sharpe, sortino, annual_return, max_drawdown, turnover]\n\n"
                 "seed: 42\n"
             ),
         },
@@ -207,26 +210,38 @@ def compile(recipe: Recipe) -> list[CellSpec]:
     ))
     cells.append(_code_walk_forward(recipe))
 
-    # ── Step 7 — Metrics ───────────────────────────────────────────────
+    # ── Step 7 — Reference strategy books ─────────────────────────────
     cells.append(_md_step(
-        7, "Compute metrics",
-        "n7_metrics",
-        f"Metrics: {', '.join(recipe.evaluation.metrics)}",
+        7, "Build reference strategy books",
+        "n7_reference_books",
+        "Construct value (laggard), momentum (12-1), and buy-and-hold "
+        "weight frames — the strategies a researcher would compare against.",
     ))
-    cells.append(_code_metrics(recipe))
+    cells.append(_code_reference_books(recipe))
 
-    # ── Step 8 — Backtest output (asset_returns / asset_weights) ──────
+    # ── Step 8 — Model-driven book (switching for unsup, signal for sup) ─
     cells.append(_md_step(
-        8, "Build asset_returns and asset_weights",
-        "n8_backtest",
-        "Map regime predictions to portfolio weights and run the standard backtest hook.",
+        8, "Build model-driven book",
+        "n8_model_book",
+        "Unsupervised: walk-forward learn regime→strategy mapping in-sample, "
+        "switch out-of-sample. Supervised: use the prediction as a long/flat signal.",
     ))
-    cells.append(_code_backtest(recipe))
+    cells.append(_code_model_book(recipe))
 
-    # ── Step 9 — Persist run summary for the experiment store ─────────
+    # ── Step 9 — Financial metrics for every book + canonical output ──
     cells.append(_md_step(
-        9, "Run summary",
-        "n9_summary",
+        9, "Financial metrics + asset_returns / asset_weights",
+        "n9_metrics",
+        "Sharpe / Sortino / drawdown / turnover for each strategy. "
+        "asset_weights / asset_returns bound to the model book — the "
+        "platform's canonical comparison surface.",
+    ))
+    cells.append(_code_financial_metrics(recipe))
+
+    # ── Step 10 — Persist run summary for the experiment store ────────
+    cells.append(_md_step(
+        10, "Run summary",
+        "n10_summary",
         "Print a JSON summary the experiment runner harvests for the Project page.",
     ))
     cells.append(_code_summary(recipe))
@@ -469,79 +484,178 @@ def _code_walk_forward(recipe: Recipe) -> CellSpec:
     return CellSpec("code", "\n".join(body_lines), "n6_walk_forward", "Walk-forward fit/predict loop.")
 
 
-_METRIC_CODE = {
-    # Supervised classification metrics — y and oos_predictions can have
-    # different index coverage (y was dropna'd by horizon_days; predictions
-    # only land on test slices). Align on the intersection and cast preds
-    # to int to satisfy sklearn classifiers.
-    "accuracy": (
-        "_idx = y.index.intersection(oos_predictions.index)\n"
-        "_yt = y.loc[_idx].astype(int)\n"
-        "_yp = oos_predictions.loc[_idx].astype(int)\n"
-        "metrics_out['accuracy'] = float((_yt == _yp).mean()) if len(_idx) else float('nan')"
-    ),
-    "f1": (
-        "from sklearn.metrics import f1_score\n"
-        "_idx = y.index.intersection(oos_predictions.index)\n"
-        "_yt = y.loc[_idx].astype(int)\n"
-        "_yp = oos_predictions.loc[_idx].astype(int)\n"
-        "metrics_out['f1'] = float(f1_score(_yt, _yp, average='macro')) if len(_idx) else float('nan')"
-    ),
-    "log_likelihood": (
-        "metrics_out['log_likelihood'] = float(getattr(model, 'score', lambda *_: float('nan'))(X.iloc[-1:].values))"
-    ),
-    "regime_persistence": (
-        "metrics_out['regime_persistence'] = float((oos_predictions.shift(1) == oos_predictions).mean())"
-    ),
-    "transition_entropy": (
-        "import numpy as _np\n"
-        "_t = pd.crosstab(oos_predictions.shift(1), oos_predictions, normalize='index').fillna(0).values\n"
-        "_with_log = _np.where(_t > 0, _t * _np.log(_t + 1e-12), 0.0)\n"
-        "metrics_out['transition_entropy'] = float(-_with_log.sum())"
-    ),
-    "sharpe": (
-        "_strat_returns = oos_predictions.diff().fillna(0).abs() * 0  # placeholder; real Sharpe lands in step 8\n"
-        "metrics_out['sharpe'] = float('nan')"
-    ),
-}
-
-
-def _code_metrics(recipe: Recipe) -> CellSpec:
-    lines = ["metrics_out: dict[str, float] = {}"]
-    for m in recipe.evaluation.metrics:
-        snippet = _METRIC_CODE.get(m)
-        if snippet is None:
-            lines.append(f"# unknown metric {m!r}; skipped (add to _METRIC_CODE in template)")
-            continue
-        lines.append(snippet)
-    lines.append("for k, v in metrics_out.items():")
-    lines.append("    print(f'  {k}: {v:.4f}' if v == v else f'  {k}: nan')")
-    return CellSpec("code", "\n".join(lines), "n7_metrics", "Compute requested metrics.")
-
-
-def _code_backtest(recipe: Recipe) -> CellSpec:
+def _code_reference_books(recipe: Recipe) -> CellSpec:
+    """Builds the reference strategies (value, momentum, buy-and-hold) on
+    the prices DataFrame from recipe.data. These are the books a researcher
+    would compare *against* — without them you can't tell whether the
+    regime model adds value or just makes a different mistake.
+    """
     body = textwrap.dedent("""\
-        # Translate regime predictions into a tradable weight series.
-        # For unsupervised regimes: equal-weight long when in state 0, flat otherwise — a placeholder
-        # the researcher should replace with a real allocation policy.
-        ASSET_RETURNS_DF = next(
+        from finagent.recipes import strategy_metrics as sm
+
+        # Find the prices frame: first DataFrame in scope with at least one
+        # numeric column. Same heuristic the target cell uses.
+        ASSET_PRICES = next(
             (v for v in list(globals().values()) if isinstance(v, pd.DataFrame) and v.select_dtypes('number').shape[1] > 0),
             None,
         )
-        if ASSET_RETURNS_DF is None:
-            raise RuntimeError("no DataFrame available to derive asset_returns")
-        _asset = ASSET_RETURNS_DF.select_dtypes('number').iloc[:, [0]]
-        _asset.columns = [_asset.columns[0]]
-        asset_returns = _asset.pct_change().fillna(0).reindex(oos_predictions.index)
+        if ASSET_PRICES is None:
+            raise RuntimeError("no DataFrame available to derive asset_prices")
+        ASSET_PRICES = ASSET_PRICES.select_dtypes('number')
+        asset_returns_full = ASSET_PRICES.pct_change()
 
-        # Default policy: long-when-state-0; researcher overrides by editing this cell.
-        _signal = (oos_predictions == 0).astype(int)
-        asset_weights = pd.DataFrame(
-            {asset_returns.columns[0]: _signal.reindex(asset_returns.index).fillna(0)}
-        )
-        print(f'asset_returns shape={asset_returns.shape}, asset_weights shape={asset_weights.shape}')
+        # Reference books — same lookbacks across all regime studies so they
+        # stay comparable across recipes. Tweak via the recipe later if you
+        # want a sweep over windows.
+        _value_w = sm.value_book(ASSET_PRICES, lookback=252)
+        _momentum_w = sm.momentum_book(ASSET_PRICES, lookback=252, skip=21)
+        _bh_w = sm.buy_and_hold_book(ASSET_PRICES)
+
+        print(f'reference books built — assets: {list(ASSET_PRICES.columns)}')
+        print(f'  value avg exposure   : {sm.exposure(_value_w):.2f}')
+        print(f'  momentum avg exposure: {sm.exposure(_momentum_w):.2f}')
         """)
-    return CellSpec("code", body, "n8_backtest", "Default policy maps state→weights; override here.")
+    return CellSpec("code", body, "n7_reference_books",
+                    "Value + momentum + buy-and-hold reference weights.")
+
+
+def _code_model_book(recipe: Recipe) -> CellSpec:
+    """Build the model-driven book.
+
+    Unsupervised path: walk-forward learn `regime → strategy` mapping from
+    in-sample value/momentum returns within each fold's train window, then
+    apply the mapping on the test window. Strategy choice is *learned*, not
+    hardcoded — that's what makes the comparison meaningful.
+
+    Supervised path: prediction is binary (forward-return-sign), so the
+    book is "long when prediction=1, flat when prediction=0". No regime
+    switching — the prediction itself is the signal.
+    """
+    is_unsupervised = recipe.target.kind == "unsupervised_regime"
+    if is_unsupervised:
+        body = textwrap.dedent("""\
+            # ── Unsupervised path: regime-learned switching ────────────────
+            # For each walk-forward fold:
+            #   1. Inside the train window, compute value_book + momentum_book
+            #      *book returns* aligned to the fitted regime labels.
+            #   2. For each regime label, choose the strategy with the best
+            #      in-sample Sharpe.
+            #   3. Apply the mapping on the test window's regimes.
+            from finagent.recipes import strategy_metrics as sm
+
+            model_weights = pd.DataFrame(0.0, index=ASSET_PRICES.index, columns=ASSET_PRICES.columns)
+
+            # We re-walk the same fold layout as Step 6. The regime labels
+            # produced inside Step 6 (via fit_predict per fold) are reused via
+            # `oos_predictions`; for the *training* fold we need fresh
+            # in-sample regime labels — so we refit the model briefly on each
+            # train slice purely to get train labels (cheap; same shape).
+            _value_book_full = sm.book_returns(_value_w, asset_returns_full)
+            _momentum_book_full = sm.book_returns(_momentum_w, asset_returns_full)
+
+            for tr, te in _walk_forward(len(X)):
+                # Fit a fresh model on this fold's train window to get train labels
+                _m = type(model)(**RECIPE['model']['params'])
+                if 'random_state' in type(_m).__init__.__code__.co_varnames:
+                    _m = type(model)(**{**RECIPE['model']['params'], 'random_state': SEED})
+                _m.fit(X.iloc[tr])
+                _train_labels = pd.Series(_m.predict(X.iloc[tr]), index=X.index[tr])
+
+                # In-sample regime-conditional strategy returns
+                _train_idx = X.index[tr]
+                _vb_train = _value_book_full.reindex(_train_idx).fillna(0.0)
+                _mb_train = _momentum_book_full.reindex(_train_idx).fillna(0.0)
+                _mapping = sm.regime_strategy_mapping(
+                    {'value': _vb_train, 'momentum': _mb_train},
+                    _train_labels,
+                )
+
+                # Apply mapping on the test window
+                _test_idx = X.index[te]
+                _test_labels = oos_predictions.reindex(_test_idx)
+                for ts, label in _test_labels.items():
+                    if pd.isna(label):
+                        continue
+                    pick = _mapping.get(label, 'value')
+                    src = _value_w if pick == 'value' else _momentum_w
+                    if ts in src.index:
+                        model_weights.loc[ts] = src.loc[ts]
+            print(f'model book built (regime-switched). nonzero weeks: {(model_weights.abs().sum(axis=1) > 0).sum()}')
+        """)
+    else:
+        body = textwrap.dedent("""\
+            # ── Supervised path: long-when-prediction=1, flat otherwise ────
+            # Equal-weight long across all assets in scope when the model
+            # signals up; flat (cash) otherwise. This is the simplest faithful
+            # use of a binary classifier — fancier weight schemes (size by
+            # predicted probability, etc.) are easy to swap in here.
+            from finagent.recipes import strategy_metrics as sm
+
+            _signal = oos_predictions.reindex(ASSET_PRICES.index).fillna(0).astype(float)
+            _signal = _signal.clip(lower=0.0, upper=1.0)
+            _eq_w = sm.buy_and_hold_book(ASSET_PRICES)  # row-normalised equal-weight
+            model_weights = _eq_w.mul(_signal, axis=0).fillna(0.0)
+            print(f'model book built (signal-driven). long weeks: {(_signal > 0).sum()}')
+        """)
+    return CellSpec("code", body, "n8_model_book",
+                    "Model book: regime-switched (unsup) or signal-driven (sup).")
+
+
+def _code_financial_metrics(recipe: Recipe) -> CellSpec:
+    """Compute Sharpe / Sortino / drawdown / turnover / etc. for every book
+    and emit them under namespaced keys so the project page can sort and
+    compare. Binds asset_returns + asset_weights to the model book so the
+    platform's downstream lineage / replay still works."""
+    requested = list(recipe.evaluation.metrics)
+    body = textwrap.dedent(f"""\
+        from finagent.recipes import strategy_metrics as sm
+
+        _books = {{
+            'value':         _value_w,
+            'momentum':      _momentum_w,
+            'buy_and_hold':  _bh_w,
+            'model':         model_weights,
+        }}
+
+        # Compute the standard pack for every book, then namespace each metric
+        # by book so the project page columns are <book>_<metric>.
+        metrics_out: dict[str, float] = {{}}
+        for _book_name, _w in _books.items():
+            _pack = sm.summary(_w, asset_returns_full)
+            for _k, _v in _pack.items():
+                metrics_out[f'{{_book_name}}_{{_k}}'] = _v
+
+        # Headline aliases that Project-page filters use today (sharpe,
+        # sortino, etc.) refer to the MODEL book — that's the strategy we'd
+        # actually trade. Reference books surface as model_*-prefixed extras.
+        for _alias in {requested!r}:
+            _src = f'model_{{_alias}}'
+            if _src in metrics_out:
+                metrics_out[_alias] = metrics_out[_src]
+
+        # Pretty-print so the notebook output is human-readable too.
+        print()
+        print('book          sharpe   sortino   ann_ret    max_dd   turnover')
+        for _name in ['model', 'value', 'momentum', 'buy_and_hold']:
+            print(
+                f'  {{_name:13s}} '
+                f'{{metrics_out[_name + "_sharpe"]:>6.2f}}  '
+                f'{{metrics_out[_name + "_sortino"]:>7.2f}}  '
+                f'{{metrics_out[_name + "_annual_return"] * 100:>+6.2f}}%  '
+                f'{{metrics_out[_name + "_max_drawdown"] * 100:>+6.2f}}%  '
+                f'{{metrics_out[_name + "_turnover"]:>6.3f}}'
+            )
+
+        # Bind the canonical platform contract: asset_returns + asset_weights
+        # represent the model's actual book. The reference comparisons are
+        # captured in metrics_out (and surfaced on the project page) but
+        # don't pollute the lineage / kernel state for downstream cells.
+        asset_returns = asset_returns_full.fillna(0.0)
+        asset_weights = model_weights.fillna(0.0)
+        print(f'\\nasset_returns shape={{asset_returns.shape}}, asset_weights shape={{asset_weights.shape}}')
+        """)
+    return CellSpec("code", body, "n9_metrics",
+                    "Financial metrics for value / momentum / buy-and-hold / model + canonical asset_returns/weights.")
 
 
 def _code_summary(recipe: Recipe) -> CellSpec:
@@ -554,8 +668,8 @@ def _code_summary(recipe: Recipe) -> CellSpec:
             'project': RECIPE['project'],
             'fingerprint': RECIPE.get('fingerprint') if 'fingerprint' in RECIPE else None,
             'metrics': metrics_out,
-            'rows_oos': int(len(oos_predictions)),
+            'rows_oos': int(len(oos_predictions)) if 'oos_predictions' in dir() else 0,
         }
         print('FINAGENT_RUN_SUMMARY ' + _json.dumps(SUMMARY, default=str))
         """)
-    return CellSpec("code", body, "n9_summary", "Run-summary marker for harness ingestion.")
+    return CellSpec("code", body, "n10_summary", "Run-summary marker for harness ingestion.")
