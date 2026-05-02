@@ -131,6 +131,36 @@ def run_recipe(
 # ── helpers ─────────────────────────────────────────────────────────────
 
 
+# Libraries whose versions are stamped into every recipe notebook. These
+# match the pinned scientific stack the orchestrator advertises to the
+# planner (see finagent/agents/orchestration.py). A missing import means
+# the package isn't installed in this environment — we surface that as
+# ``null`` rather than crashing, so the metadata stamping never fails a
+# run.
+_PINNED_LIBS = (
+    "pandas", "numpy", "scipy", "scikit-learn", "statsmodels",
+    "hmmlearn", "xgboost", "matplotlib", "yfinance", "findata",
+    "openai", "fastapi",
+)
+
+
+def _capture_library_versions() -> dict[str, str | None]:
+    """Snapshot the exact versions of every pinned library at compile time."""
+    try:
+        from importlib.metadata import version, PackageNotFoundError
+    except Exception:
+        return {}
+    out: dict[str, str | None] = {}
+    for lib in _PINNED_LIBS:
+        try:
+            out[lib] = version(lib)
+        except PackageNotFoundError:
+            out[lib] = None
+        except Exception:
+            out[lib] = None
+    return out
+
+
 def _materialise_notebook(recipe: Recipe, cells) -> Path:
     """Build a fresh notebook on disk from a CellSpec list.
 
@@ -161,6 +191,19 @@ def _materialise_notebook(recipe: Recipe, cells) -> Path:
         "template": recipe.template,
         "fingerprint": recipe.fingerprint(),
         "compiled_at": datetime.now(timezone.utc).isoformat(),
+        # Reproducibility fingerprint (UAT P2 #1): seed + pinned-library
+        # versions + data vintage. Sufficient for a researcher to
+        # reconstruct the exact environment that produced this notebook.
+        "seed": recipe.seed,
+        "library_versions": _capture_library_versions(),
+        "data_vintage": {
+            var: {
+                "kind": ds.kind,
+                "start": getattr(ds, "start", None),
+                "end": getattr(ds, "end", None),
+            }
+            for var, ds in recipe.data.items()
+        },
     }
 
     for spec in cells:
