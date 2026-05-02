@@ -498,20 +498,84 @@ def _code_reference_books(recipe: Recipe) -> CellSpec:
     the prices DataFrame from recipe.data. These are the books a researcher
     would compare *against* — without them you can't tell whether the
     regime model adds value or just makes a different mistake.
+
+    Two bugs we hit and now defend against here:
+
+    1. Picking the wrong frame. The previous version iterated globals() and
+       took the first DataFrame — fragile, because notebook scope can have
+       feature matrices, macro frames, IPython repl variables in
+       indeterminate order. Now we hardcode the prices variable name from
+       the recipe at compile time.
+
+    2. Volume contamination. yfinance multi-ticker downloads return a
+       MultiIndex column frame ``(field, ticker)`` with all of OHLCV +
+       dividends. ``select_dtypes('number')`` keeps Volume, whose daily
+       pct_change is routinely ±10×. Compounded across 2000 days that
+       hits 10^45 territory — exactly what the user reported.
     """
-    body = textwrap.dedent("""\
+    # Bake the prices variable in at compile time. Convention across all
+    # presets: the FIRST key in recipe.data is the prices frame. Fall back
+    # to the first source whose kind is a price source if convention is
+    # broken.
+    keys = list(recipe.data.keys())
+    if not keys:
+        raise ValueError("recipe.data is empty — cannot build reference books")
+    price_kinds = {"yfinance", "binance", "coingecko", "csv", "fin_kit"}
+    prices_var = next(
+        (k for k in keys if recipe.data[k].kind in price_kinds),
+        keys[0],
+    )
+
+    body = textwrap.dedent(f"""\
         from finagent.recipes import strategy_metrics as sm
 
-        # Find the prices frame: first DataFrame in scope with at least one
-        # numeric column. Same heuristic the target cell uses.
-        ASSET_PRICES = next(
-            (v for v in list(globals().values()) if isinstance(v, pd.DataFrame) and v.select_dtypes('number').shape[1] > 0),
-            None,
-        )
-        if ASSET_PRICES is None:
-            raise RuntimeError("no DataFrame available to derive asset_prices")
+        # Use the recipe-declared prices source ({prices_var!r}) directly
+        # instead of guessing from globals(). The previous heuristic
+        # occasionally picked up the FRED macro frame or the feature
+        # matrix, producing nonsense compound returns.
+        ASSET_PRICES = {prices_var}
+        if not isinstance(ASSET_PRICES, pd.DataFrame) or ASSET_PRICES.empty:
+            raise RuntimeError(f"prices source {prices_var!r} is not a usable DataFrame")
+
+        # yfinance with multiple tickers returns columns as a MultiIndex
+        # (field, ticker). Flatten to a single price-per-ticker frame:
+        # prefer 'Adj Close', fall back to 'Close', else first level.
+        if isinstance(ASSET_PRICES.columns, pd.MultiIndex):
+            _levels = list(ASSET_PRICES.columns.get_level_values(0).unique())
+            _field = next(
+                (f for f in ['Adj Close', 'Close', 'close', 'adj_close'] if f in _levels),
+                _levels[0],
+            )
+            ASSET_PRICES = ASSET_PRICES[_field].copy()
+
+        # Drop OHLCV / corporate-action columns by name — these survive a
+        # single-ticker yfinance download and contaminate pct_change().
+        # Whitelist by elimination: keep columns whose name doesn't match
+        # any known non-price field.
+        _drop_lower = {{'open', 'high', 'low', 'volume', 'dividends',
+                       'stock splits', 'capital gains', 'adj volume'}}
+        ASSET_PRICES = ASSET_PRICES.loc[
+            :, [c for c in ASSET_PRICES.columns
+                if str(c).strip().lower() not in _drop_lower]
+        ]
         ASSET_PRICES = ASSET_PRICES.select_dtypes('number')
+
+        if ASSET_PRICES.shape[1] == 0:
+            raise RuntimeError(
+                f"no price columns survived filtering on {{prices_var!r}}; "
+                f"original columns were {{list({prices_var}.columns)[:8]}}"
+            )
+
+        # Sanity check daily returns. ETF / index returns above ±50% in a
+        # single day indicate bad data (split not adjusted, stale tick,
+        # macro series with sign flip in pct_change). Drop offending rows
+        # so they don't poison compounded metrics.
         asset_returns_full = ASSET_PRICES.pct_change()
+        _bad = asset_returns_full.abs() > 0.5
+        if _bad.any().any():
+            _n_bad = int(_bad.sum().sum())
+            print(f'WARNING: {{_n_bad}} return cells > 50% daily move — zeroing.')
+            asset_returns_full = asset_returns_full.where(~_bad, 0.0)
 
         # Reference books — same lookbacks across all regime studies so they
         # stay comparable across recipes. Tweak via the recipe later if you
@@ -520,9 +584,13 @@ def _code_reference_books(recipe: Recipe) -> CellSpec:
         _momentum_w = sm.momentum_book(ASSET_PRICES, lookback=252, skip=21)
         _bh_w = sm.buy_and_hold_book(ASSET_PRICES)
 
-        print(f'reference books built — assets: {list(ASSET_PRICES.columns)}')
-        print(f'  value avg exposure   : {sm.exposure(_value_w):.2f}')
-        print(f'  momentum avg exposure: {sm.exposure(_momentum_w):.2f}')
+        print(f'reference books built — assets: {{list(ASSET_PRICES.columns)}}')
+        print(f'  shape: {{ASSET_PRICES.shape}}')
+        print(f'  daily return percentiles: '
+              f'1%={{float(asset_returns_full.stack().quantile(0.01)):.4f}}, '
+              f'99%={{float(asset_returns_full.stack().quantile(0.99)):.4f}}')
+        print(f'  value avg exposure   : {{sm.exposure(_value_w):.2f}}')
+        print(f'  momentum avg exposure: {{sm.exposure(_momentum_w):.2f}}')
         """)
     return CellSpec("code", body, "n7_reference_books",
                     "Value + momentum + buy-and-hold reference weights.")
