@@ -169,6 +169,27 @@ _PINNED_LIBS = (
 )
 
 
+def _stringify_date(v):
+    """Coerce date/datetime values to ISO strings; pass anything else through.
+
+    Recipe YAMLs commonly carry ``start: 2018-01-01`` which yaml parses as
+    ``datetime.date``. Anything that ends up in nbformat metadata or a
+    JSON column has to be JSON-spec-clean before serialization — this is
+    the cheapest place to enforce that.
+    """
+    if v is None:
+        return None
+    try:
+        # Both date and datetime carry isoformat(). isinstance is cheaper
+        # than try/except but gets us the same coverage with fewer imports.
+        from datetime import date, datetime
+        if isinstance(v, (date, datetime)):
+            return v.isoformat()
+    except Exception:
+        pass
+    return v
+
+
 def _capture_library_versions() -> dict[str, str | None]:
     """Snapshot the exact versions of every pinned library at compile time."""
     try:
@@ -221,11 +242,17 @@ def _materialise_notebook(recipe: Recipe, cells) -> Path:
         # reconstruct the exact environment that produced this notebook.
         "seed": recipe.seed,
         "library_versions": _capture_library_versions(),
+        # YAML auto-parses ISO-8601 dates (e.g. ``start: 2018-01-01``) into
+        # Python ``datetime.date`` objects. Those propagate through pydantic's
+        # ``extra="allow"`` slot on DataSource and then crash nbformat.write
+        # downstream — the JSON serializer chokes on date objects with
+        # ``Object of type date is not JSON serializable``. Stringify here so
+        # the metadata block is always JSON-spec-clean.
         "data_vintage": {
             var: {
                 "kind": ds.kind,
-                "start": getattr(ds, "start", None),
-                "end": getattr(ds, "end", None),
+                "start": _stringify_date(getattr(ds, "start", None)),
+                "end": _stringify_date(getattr(ds, "end", None)),
             }
             for var, ds in recipe.data.items()
         },
