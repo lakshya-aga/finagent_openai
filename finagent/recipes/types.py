@@ -122,6 +122,53 @@ class ModelSpec(BaseModel):
 SplitKind = Literal["walk_forward", "expanding_window", "kfold", "holdout"]
 
 
+class HypothesisCriterion(BaseModel):
+    """Single threshold check evaluated against the run's metrics dict.
+
+    ``metric`` references a key from the headline aliases the templates
+    emit (``sharpe``, ``annual_return``, ``max_drawdown``…). Namespaced
+    keys (``model_sharpe`` etc.) also work if the user wants to pin the
+    check against a specific book.
+    """
+
+    metric: str = Field(..., min_length=1, max_length=80)
+    op: Literal[">=", ">", "<=", "<", "==", "!="]
+    value: float
+
+
+class Hypothesis(BaseModel):
+    """Pre-registered research hypothesis.
+
+    UAT P1: 'Hypothesis registry & pre-registration. Before running, the
+    analyst writes the hypothesis, the success threshold, and the
+    cancellation criteria. The platform locks them, runs the recipe,
+    then reports pass/fail vs. the pre-registered threshold. Kills
+    p-hacking and HARKing.'
+
+    Pre-registration is mechanical: a recipe declares
+    ``success_criteria`` (every one must hold for PASS) and optional
+    ``cancel_criteria`` (any one triggers CANCEL — i.e. the result is
+    so bad we shouldn't even keep investigating this thesis). The
+    backend evaluates against the post-run metrics dict and stores a
+    verdict on the run row alongside the bias audit. Crucially, the
+    thresholds are pinned in the recipe YAML BEFORE the run executes,
+    so they survive in git history — no post-hoc moving of goalposts.
+    """
+
+    thesis: str = Field(..., min_length=10, max_length=2000)
+    success_criteria: list[HypothesisCriterion] = Field(default_factory=list)
+    cancel_criteria: list[HypothesisCriterion] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _at_least_one_criterion(self) -> "Hypothesis":
+        if not self.success_criteria and not self.cancel_criteria:
+            raise ValueError(
+                "hypothesis must declare at least one success_criterion "
+                "or cancel_criterion — otherwise pass/fail is undefined"
+            )
+        return self
+
+
 class Costs(BaseModel):
     """Transaction cost model applied to gross book returns to produce net.
 
@@ -194,6 +241,12 @@ class Recipe(BaseModel):
     features: list[Feature]
     model: ModelSpec
     evaluation: Evaluation
+    # Pre-registered hypothesis. None means "no formal hypothesis" — the
+    # run still produces metrics but no PASS/FAIL verdict is rendered.
+    # When set, the post-run hook in recipe_workflow evaluates the
+    # success_criteria + cancel_criteria against the actual metrics dict
+    # and stores a structured verdict on Run.hypothesis_verdict_json.
+    hypothesis: Optional[Hypothesis] = None
 
     @field_validator("name", "project")
     @classmethod

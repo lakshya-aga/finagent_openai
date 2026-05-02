@@ -49,6 +49,7 @@ class Run:
     search_id: Optional[str] = None
     search_iteration: Optional[int] = None
     bias_audit_json: Optional[str] = None
+    hypothesis_verdict_json: Optional[str] = None
 
     def metrics(self) -> dict[str, float | None]:
         # Scrub non-finite floats (NaN / ±Infinity) on the way out. Starlette's
@@ -62,6 +63,27 @@ class Run:
         except Exception:
             return {}
         return {k: _finite_or_none(v) for k, v in raw.items()}
+
+    def hypothesis_verdict(self) -> Optional[dict[str, Any]]:
+        """Decode the pre-registered-hypothesis verdict, or None.
+
+        Verdict shape (when present):
+            {
+              "verdict": "PASS" | "FAIL" | "CANCEL",
+              "summary": "<one-line>",
+              "checks": [
+                {"criterion": {metric, op, value}, "actual": <float|None>,
+                 "passed": <bool>, "kind": "success"|"cancel"},
+                ...
+              ]
+            }
+        """
+        if not self.hypothesis_verdict_json:
+            return None
+        try:
+            return json.loads(self.hypothesis_verdict_json)
+        except Exception:
+            return None
 
     def bias_audit(self) -> Optional[dict[str, Any]]:
         """Decode the stored audit verdict, or None if not yet audited.
@@ -84,8 +106,10 @@ class Run:
         d["metrics"] = metrics
         d["metrics_flags"] = plausibility.flag(metrics, self._bands())
         d["bias_audit"] = self.bias_audit()
+        d["hypothesis_verdict"] = self.hypothesis_verdict()
         d.pop("metrics_json", None)
         d.pop("bias_audit_json", None)
+        d.pop("hypothesis_verdict_json", None)
         return d
 
     def _bands(self) -> dict[str, tuple[float, float]]:
@@ -154,7 +178,8 @@ CREATE TABLE IF NOT EXISTS runs (
     notebook_path TEXT,
     metrics_json  TEXT NOT NULL DEFAULT '{}',
     error         TEXT,
-    bias_audit_json TEXT
+    bias_audit_json TEXT,
+    hypothesis_verdict_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project);
 CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
@@ -203,6 +228,8 @@ class ExperimentStore:
             conn.execute("ALTER TABLE runs ADD COLUMN search_iteration INTEGER")
         if "bias_audit_json" not in existing:
             conn.execute("ALTER TABLE runs ADD COLUMN bias_audit_json TEXT")
+        if "hypothesis_verdict_json" not in existing:
+            conn.execute("ALTER TABLE runs ADD COLUMN hypothesis_verdict_json TEXT")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -309,6 +336,14 @@ class ExperimentStore:
             conn.execute(
                 "UPDATE runs SET bias_audit_json = ? WHERE id = ?",
                 (audit_json, run_id),
+            )
+
+    def update_run_hypothesis_verdict(self, run_id: str, verdict_json: str) -> None:
+        """Persist the pre-registered hypothesis verdict (PASS / FAIL / CANCEL)."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE runs SET hypothesis_verdict_json = ? WHERE id = ?",
+                (verdict_json, run_id),
             )
 
     # ── reads ───────────────────────────────────────────────────────────
@@ -511,6 +546,7 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         search_id=(row["search_id"] if "search_id" in keys else None),
         search_iteration=(row["search_iteration"] if "search_iteration" in keys else None),
         bias_audit_json=(row["bias_audit_json"] if "bias_audit_json" in keys else None),
+        hypothesis_verdict_json=(row["hypothesis_verdict_json"] if "hypothesis_verdict_json" in keys else None),
     )
 
 

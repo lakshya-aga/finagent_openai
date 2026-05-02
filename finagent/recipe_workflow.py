@@ -106,6 +106,19 @@ def run_recipe(
             finished=True,
         )
 
+        # Pre-registered hypothesis verdict — synchronous, deterministic,
+        # cheap. Just compares the actual metrics against the success /
+        # cancel criteria pinned in the recipe YAML. We do this inline
+        # (not async) because the verdict is part of the run's terminal
+        # state from the user's POV. Skipped on failed runs (no metrics
+        # to evaluate against) and on recipes with no hypothesis block.
+        if status == "completed" and recipe.hypothesis is not None:
+            try:
+                verdict = _evaluate_hypothesis(recipe.hypothesis, metrics)
+                store.update_run_hypothesis_verdict(run.id, json.dumps(verdict))
+            except Exception:
+                logging.exception("hypothesis evaluation failed run_id=%s", run.id)
+
         # Fire-and-forget bias audit. Failed runs are skipped — there is no
         # methodology to evaluate when the kernel crashed before producing
         # results. We deliberately do NOT await this: the user-visible run
@@ -261,6 +274,89 @@ def _stash_lineage_on_notebook(path: Path, method: str, lineage: dict) -> None:
             nbformat.write(nb, f)
     except Exception:
         logging.exception("could not stash lineage")
+
+
+# ── hypothesis verdict evaluator ────────────────────────────────────────────
+
+
+def _check_one(actual: float | None, op: str, target: float) -> bool:
+    """Apply a comparison op. None / NaN actuals always fail."""
+    if actual is None:
+        return False
+    try:
+        a = float(actual)
+    except (TypeError, ValueError):
+        return False
+    if a != a:  # NaN
+        return False
+    if op == ">=": return a >= target
+    if op == ">":  return a >  target
+    if op == "<=": return a <= target
+    if op == "<":  return a <  target
+    if op == "==": return a == target
+    if op == "!=": return a != target
+    return False
+
+
+def _evaluate_hypothesis(hypothesis, metrics: dict) -> dict:
+    """Compare the run's actual metrics against the pre-registered
+    success_criteria + cancel_criteria. Returns a structured verdict dict
+    suitable for serialization onto the run row.
+
+    Decision rule:
+      * If ANY cancel_criterion holds → verdict = "CANCEL".
+      * Else if ALL success_criteria hold → "PASS".
+      * Else → "FAIL".
+
+    Empty success_criteria + at-least-one cancel_criterion is supported
+    (nothing-but-cancel-bands is a valid spec for "this idea has no
+    explicit success threshold but I want to know when it's clearly
+    broken"). The Pydantic validator already requires at least one
+    criterion across both arrays.
+    """
+    checks: list[dict] = []
+    cancel_hit = False
+    for c in hypothesis.cancel_criteria:
+        actual = metrics.get(c.metric)
+        passed = _check_one(actual, c.op, c.value)
+        if passed:
+            cancel_hit = True
+        checks.append({
+            "criterion": c.model_dump(),
+            "actual": actual,
+            "passed": passed,
+            "kind": "cancel",
+        })
+
+    success_all = bool(hypothesis.success_criteria)
+    for c in hypothesis.success_criteria:
+        actual = metrics.get(c.metric)
+        passed = _check_one(actual, c.op, c.value)
+        if not passed:
+            success_all = False
+        checks.append({
+            "criterion": c.model_dump(),
+            "actual": actual,
+            "passed": passed,
+            "kind": "success",
+        })
+
+    if cancel_hit:
+        verdict = "CANCEL"
+        summary = "Hypothesis cancelled — at least one cancel-criterion was hit."
+    elif success_all:
+        verdict = "PASS"
+        summary = "Hypothesis confirmed — every pre-registered success criterion held."
+    else:
+        verdict = "FAIL"
+        summary = "Hypothesis not confirmed — at least one success criterion did not hold."
+
+    return {
+        "verdict": verdict,
+        "summary": summary,
+        "thesis": hypothesis.thesis,
+        "checks": checks,
+    }
 
 
 # ── bias audit hook ─────────────────────────────────────────────────────────

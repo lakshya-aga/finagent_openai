@@ -123,6 +123,17 @@ METADATA = {
                 "  costs:\n"
                 "    bps_per_side: 3   # institutional ETF execution\n"
                 "    borrow_bps: 0     # long-only book — no shorts\n\n"
+                "# Pre-registered hypothesis (optional). Locks the success/failure\n"
+                "# threshold BEFORE the run executes — kills HARKing.\n"
+                "hypothesis:\n"
+                "  thesis: \"A 3-state HMM that switches between value and momentum strategies\\n"
+                "    on SPY/TLT/GLD should outperform passive buy-and-hold on a\\n"
+                "    risk-adjusted basis (Sharpe) net of 3 bps execution costs.\"\n"
+                "  success_criteria:\n"
+                "    - { metric: sharpe, op: '>=', value: 0.6 }\n"
+                "    - { metric: annual_return, op: '>=', value: 0.06 }\n"
+                "  cancel_criteria:\n"
+                "    - { metric: max_drawdown, op: '<', value: -0.4 }\n\n"
                 "seed: 42\n"
             ),
         },
