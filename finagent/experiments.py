@@ -23,6 +23,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from .recipes import plausibility
+
 
 _DEFAULT_PATH = Path(os.environ.get(
     "FINAGENT_EXPERIMENT_DB",
@@ -46,6 +48,7 @@ class Run:
     error: Optional[str]
     search_id: Optional[str] = None
     search_iteration: Optional[int] = None
+    bias_audit_json: Optional[str] = None
 
     def metrics(self) -> dict[str, float | None]:
         # Scrub non-finite floats (NaN / ±Infinity) on the way out. Starlette's
@@ -60,11 +63,42 @@ class Run:
             return {}
         return {k: _finite_or_none(v) for k, v in raw.items()}
 
+    def bias_audit(self) -> Optional[dict[str, Any]]:
+        """Decode the stored audit verdict, or None if not yet audited.
+
+        The DB column is NULL until the post-run audit producer writes a
+        verdict (see ``finagent.agents.bias_auditor`` and the hook in
+        ``recipe_workflow``). The API surfaces ``bias_audit: null`` so
+        frontends can render a "PENDING" badge without an extra round-trip.
+        """
+        if not self.bias_audit_json:
+            return None
+        try:
+            return json.loads(self.bias_audit_json)
+        except Exception:
+            return None
+
     def as_public_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        d["metrics"] = self.metrics()
+        metrics = self.metrics()
+        d["metrics"] = metrics
+        d["metrics_flags"] = plausibility.flag(metrics, self._bands())
+        d["bias_audit"] = self.bias_audit()
         d.pop("metrics_json", None)
+        d.pop("bias_audit_json", None)
         return d
+
+    def _bands(self) -> dict[str, tuple[float, float]]:
+        """Resolve plausibility bands for this run's template.
+
+        Templates may declare ``METADATA["plausibility"]`` to override the
+        default bands (e.g. a crypto template might widen the Sharpe band
+        because vol is higher and the daily-equity heuristics don't apply).
+        Falls back to ``plausibility.DEFAULT_BANDS`` when the template is
+        unknown or doesn't declare its own. Cached per template name to
+        avoid re-importing on every public-dict serialization.
+        """
+        return _resolve_bands(self.template)
 
 
 @dataclass
@@ -119,7 +153,8 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at   REAL,
     notebook_path TEXT,
     metrics_json  TEXT NOT NULL DEFAULT '{}',
-    error         TEXT
+    error         TEXT,
+    bias_audit_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project);
 CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC);
@@ -166,6 +201,8 @@ class ExperimentStore:
             conn.execute("ALTER TABLE runs ADD COLUMN search_id TEXT")
         if "search_iteration" not in existing:
             conn.execute("ALTER TABLE runs ADD COLUMN search_iteration INTEGER")
+        if "bias_audit_json" not in existing:
+            conn.execute("ALTER TABLE runs ADD COLUMN bias_audit_json TEXT")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -260,6 +297,19 @@ class ExperimentStore:
     def delete_run(self, run_id: str) -> None:
         with self._conn() as conn:
             conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+
+    def update_run_bias_audit(self, run_id: str, audit_json: str) -> None:
+        """Persist the LLM-judge audit verdict (a JSON-serialised dict).
+
+        Separate from ``update_run`` because the audit writes lag behind the
+        run's terminal status — they happen on a background task — and we
+        don't want to accidentally re-open a finished run's status field.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE runs SET bias_audit_json = ? WHERE id = ?",
+                (audit_json, run_id),
+            )
 
     # ── reads ───────────────────────────────────────────────────────────
 
@@ -403,6 +453,33 @@ class ExperimentStore:
         ]
 
 
+# Cache: template name → bands dict. Built lazily on first lookup. The
+# template registry import is deferred to here because templates import
+# from .recipes.types and we want to keep the experiments module
+# import-cheap for tooling that just wants the Run dataclass.
+_BANDS_CACHE: dict[Optional[str], dict[str, tuple[float, float]]] = {}
+
+
+def _resolve_bands(template_name: Optional[str]) -> dict[str, tuple[float, float]]:
+    if template_name in _BANDS_CACHE:
+        return _BANDS_CACHE[template_name]
+    bands = plausibility.DEFAULT_BANDS
+    if template_name:
+        try:
+            from .recipes.templates import REGISTRY  # local import: avoid cycle at module load
+            module = REGISTRY.get(template_name)
+            metadata = getattr(module, "METADATA", None) if module else None
+            declared = metadata.get("plausibility") if isinstance(metadata, dict) else None
+            if isinstance(declared, dict):
+                bands = declared
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "failed to resolve plausibility bands for template %s", template_name,
+            )
+    _BANDS_CACHE[template_name] = bands
+    return bands
+
+
 def _finite_or_none(v: Any) -> Any:
     """Return v unchanged unless it's a non-finite float, in which case None.
 
@@ -433,6 +510,7 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         error=row["error"],
         search_id=(row["search_id"] if "search_id" in keys else None),
         search_iteration=(row["search_iteration"] if "search_iteration" in keys else None),
+        bias_audit_json=(row["bias_audit_json"] if "bias_audit_json" in keys else None),
     )
 
 

@@ -13,10 +13,12 @@ Flow:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -103,6 +105,15 @@ def run_recipe(
             error=error,
             finished=True,
         )
+
+        # Fire-and-forget bias audit. Failed runs are skipped — there is no
+        # methodology to evaluate when the kernel crashed before producing
+        # results. We deliberately do NOT await this: the user-visible run
+        # finishes the moment status flips to "completed"; the audit
+        # populates `bias_audit_json` whenever it lands. The frontend
+        # exposes that as `bias_audit: null` until the verdict arrives.
+        if status == "completed":
+            _spawn_bias_audit(run.id, notebook_path, recipe_yaml, metrics)
 
         return {
             "run_id": run.id,
@@ -197,3 +208,76 @@ def _stash_lineage_on_notebook(path: Path, method: str, lineage: dict) -> None:
             nbformat.write(nb, f)
     except Exception:
         logging.exception("could not stash lineage")
+
+
+# ── bias audit hook ─────────────────────────────────────────────────────────
+
+
+def _spawn_bias_audit(
+    run_id: str,
+    notebook_path: Path,
+    recipe_yaml: str,
+    metrics: dict,
+) -> None:
+    """Kick the bias audit off the run's critical path.
+
+    Two execution contexts call ``run_recipe``:
+      • the ASGI app worker, which already has a running event loop —
+        ``asyncio.create_task`` is the right primitive there;
+      • the synchronous search executor / CLI, which has no loop —
+        we spin up a daemon thread that owns its own event loop so
+        the audit can still complete without blocking the caller.
+
+    Either way, every failure is swallowed and logged: a misbehaving
+    auditor must never break a successful run.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None:
+        loop.create_task(_run_bias_audit(run_id, notebook_path, recipe_yaml, metrics))
+        return
+
+    def _thread_target() -> None:
+        try:
+            asyncio.run(
+                _run_bias_audit(run_id, notebook_path, recipe_yaml, metrics)
+            )
+        except Exception:
+            logging.exception("bias audit thread crashed run_id=%s", run_id)
+
+    threading.Thread(
+        target=_thread_target,
+        name=f"bias-audit-{run_id}",
+        daemon=True,
+    ).start()
+
+
+async def _run_bias_audit(
+    run_id: str,
+    notebook_path: Path,
+    recipe_yaml: str,
+    metrics: dict,
+) -> None:
+    """Read the executed notebook, call the auditor, persist the verdict."""
+    try:
+        from .agents.bias_auditor import audit_run  # local import: optional dep
+
+        try:
+            with open(notebook_path, "r", encoding="utf-8") as f:
+                notebook_json = json.load(f)
+        except Exception:
+            logging.exception("could not read notebook for audit run_id=%s", run_id)
+            notebook_json = {"cells": []}
+
+        verdict = await audit_run(notebook_json, recipe_yaml, metrics)
+        get_store().update_run_bias_audit(
+            run_id, json.dumps(verdict.model_dump())
+        )
+        logging.info(
+            "bias audit complete run_id=%s verdict=%s", run_id, verdict.verdict
+        )
+    except Exception:
+        logging.exception("bias audit failed run_id=%s", run_id)

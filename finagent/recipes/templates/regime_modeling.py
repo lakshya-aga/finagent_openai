@@ -63,6 +63,21 @@ METADATA = {
             "max_drawdown", "calmar", "turnover", "hit_rate", "exposure",
         ],
     },
+    # Plausibility bands consumed by ``finagent.recipes.plausibility.flag``
+    # at API-serialization time. Values outside these ranges produce an
+    # amber warning on the project page rather than silently rendering as
+    # green. Bounds are inclusive. Defaults are correct for an equity-
+    # regime strategy at daily frequency; future templates (crypto,
+    # high-turnover intraday, etc.) can override with their own ranges.
+    "plausibility": {
+        "sharpe": (-3, 3),
+        "annual_return": (-1, 1),
+        "total_return": (-10, 50),
+        "calmar": (-50, 50),
+        "max_drawdown": (-1, 0),
+        "turnover": (0, 5),
+        "sortino": (-5, 5),
+    },
     "presets": [
         {
             "key": "hmm_3state",

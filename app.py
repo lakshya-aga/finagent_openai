@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -73,7 +74,8 @@ async def chat(req: ChatRequest):
                 "summary": result.get("output_text", ""),  # used by question mode
             })
         except Exception as e:
-            await progress_queue.put({"type": "error", "message": str(e)})
+            logging.exception("/api/chat run_workflow failed")
+            await progress_queue.put(_client_error_payload(e))
 
     asyncio.create_task(_run())
 
@@ -119,6 +121,79 @@ async def clear_session(session_id: str):
 _OUTPUTS_DIR = (Path(__file__).parent / "outputs").resolve()
 
 
+# Cache parsed notebook metadata so repeated /api/notebooks calls don't re-read
+# every .ipynb. Key: absolute path string. Value: (mtime, parsed_dict). When the
+# file's mtime changes we re-parse — no disk cache, plain in-memory dict.
+_NOTEBOOK_META_CACHE: dict[str, tuple[float, dict]] = {}
+
+# Marker the templated final cell prints; same regex as recipe_workflow but we
+# duplicate it here to avoid importing the heavy workflow module on the request
+# path.
+_RUN_SUMMARY_RE = re.compile(r"^FINAGENT_RUN_SUMMARY\s+(\{.*\})\s*$", re.MULTILINE)
+
+
+def _extract_notebook_metadata(path: Path) -> dict:
+    """Parse a notebook and pull out recipe identity + headline metrics.
+
+    Returns the extra fields to merge into the listing entry. If the file is
+    malformed or carries no recipe metadata, returns an empty dict so the
+    caller still gets {name, size, mtime}.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            nb = json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+    nb_meta = nb.get("metadata") or {}
+    recipe_meta = nb_meta.get("finagent_recipe") or {}
+    if not recipe_meta:
+        return {}
+
+    # Tail the code cells for the FINAGENT_RUN_SUMMARY stream output. The
+    # template prints it from the last code cell, so iterate in reverse for
+    # cheaper hits on the common case.
+    summary: dict | None = None
+    for cell in reversed(nb.get("cells") or []):
+        if cell.get("cell_type") != "code":
+            continue
+        for out in cell.get("outputs") or []:
+            if out.get("output_type") != "stream":
+                continue
+            text = out.get("text", "")
+            if isinstance(text, list):
+                text = "".join(text)
+            m = _RUN_SUMMARY_RE.search(text)
+            if m:
+                try:
+                    summary = json.loads(m.group(1))
+                except ValueError:
+                    summary = None
+                break
+        if summary is not None:
+            break
+
+    metrics = (summary or {}).get("metrics") or {}
+    headline = {
+        k: metrics[k]
+        for k in ("sharpe", "annual_return")
+        if isinstance(metrics.get(k), (int, float))
+    }
+
+    fingerprint = recipe_meta.get("fingerprint")
+    return {
+        "recipe_name": recipe_meta.get("name"),
+        "project": recipe_meta.get("project"),
+        "template": recipe_meta.get("template"),
+        "fingerprint": fingerprint,
+        # run_id isn't part of the stamped metadata today, but the spec asks
+        # us to surface it if present — fall back to the fingerprint, which is
+        # what the workflow uses to key runs.
+        "run_id": nb_meta.get("finagent_run_id") or fingerprint,
+        "headline_metrics": headline,
+    }
+
+
 def _safe_notebook_path(name: str) -> Path:
     """Resolve `name` inside the outputs directory or raise 404/403.
 
@@ -141,20 +216,44 @@ def _safe_notebook_path(name: str) -> Path:
 
 @app.get("/api/notebooks")
 async def list_notebooks():
-    """Return every .ipynb in the outputs dir, newest first."""
+    """Return every .ipynb in the outputs dir, newest first.
+
+    Each entry now carries the recipe identity (name/project/template/
+    fingerprint/run_id) and headline metrics (sharpe, annual_return) parsed
+    out of the notebook's metadata + FINAGENT_RUN_SUMMARY marker — so the UI
+    can render a useful list once a project has more than a handful of runs.
+    Parsing is cached per (path, mtime); a stale entry is dropped when the
+    file's mtime moves.
+    """
     if not _OUTPUTS_DIR.exists():
         return {"notebooks": []}
     items = []
+    seen: set[str] = set()
     for p in _OUTPUTS_DIR.glob("*.ipynb"):
         try:
             st = p.stat()
         except OSError:
             continue
-        items.append({
+        entry: dict = {
             "name": p.name,
             "size": st.st_size,
             "mtime": st.st_mtime,
-        })
+        }
+        cache_key = str(p)
+        seen.add(cache_key)
+        cached = _NOTEBOOK_META_CACHE.get(cache_key)
+        if cached is not None and cached[0] == st.st_mtime:
+            extra = cached[1]
+        else:
+            extra = _extract_notebook_metadata(p)
+            _NOTEBOOK_META_CACHE[cache_key] = (st.st_mtime, extra)
+        if extra:
+            entry.update(extra)
+        items.append(entry)
+    # Drop cache entries for notebooks that no longer exist on disk so the
+    # cache tracks the directory rather than growing forever.
+    for stale in _NOTEBOOK_META_CACHE.keys() - seen:
+        _NOTEBOOK_META_CACHE.pop(stale, None)
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return {"notebooks": items}
 
@@ -529,6 +628,60 @@ def _to_internal_history(messages: List[_WebMessage]) -> list:
     return history
 
 
+def _hint_for(e: Exception) -> Optional[str]:
+    """Map an exception to a one-sentence remediation hint for the end user.
+
+    Pattern-matches on the exception class and message. Returns None when no
+    actionable hint applies — callers should treat that as "no hint" and not
+    surface a placeholder. Class names are matched by string so we don't need
+    to import optional SDKs (openai, anthropic) just to do isinstance checks.
+    """
+    cls = e.__class__.__name__
+    msg = str(e).lower()
+
+    if cls in ("ImportError", "ModuleNotFoundError"):
+        return (
+            "The agent tried to import a module that isn't pinned in the "
+            "environment. Try a recipe template instead."
+        )
+    if cls == "TimeoutError" or isinstance(e, asyncio.TimeoutError):
+        return (
+            "The agent took too long. Try simplifying your prompt or using a "
+            "recipe template."
+        )
+    if cls in ("KeyError", "AttributeError") and "pandas" in msg:
+        return (
+            "Likely a column or attribute name mismatch in the generated "
+            "code. Try rephrasing your prompt."
+        )
+    if cls == "RateLimitError":
+        return "API rate limit hit. Wait 30 seconds and retry."
+    return None
+
+
+def _client_error_payload(e: Exception) -> dict:
+    """Build the SSE/stream error event surfaced to the browser.
+
+    Contract (consumed by the Synapse frontend in U7):
+        {
+            "type": "error",
+            "error_class": <exception class name>,
+            "message": <first line of str(e), truncated to 200 chars>,
+            "hint": <remediation string or None>,
+        }
+
+    Tracebacks are deliberately *not* included — they are a security boundary.
+    Full tracebacks are still emitted to server logs via logging.exception.
+    """
+    first_line = str(e).split("\n", 1)[0][:200]
+    return {
+        "type": "error",
+        "error_class": e.__class__.__name__,
+        "message": first_line,
+        "hint": _hint_for(e),
+    }
+
+
 @app.post("/chat")
 async def chat_web(req: _WebChatRequest):
     # Last user message = new input. Everything before it = prior history.
@@ -564,12 +717,9 @@ async def chat_web(req: _WebChatRequest):
                 "mode": result.get("mode", "new"),
                 "notebook_path": session["notebook_path"],
             })
-        except Exception:
+        except Exception as e:
             logging.exception("/chat run_workflow failed")
-            await progress_queue.put({
-                "type": "error",
-                "message": "The research agent hit an unexpected error. Check server logs.",
-            })
+            await progress_queue.put(_client_error_payload(e))
 
     asyncio.create_task(_run())
 
@@ -608,7 +758,22 @@ async def chat_web(req: _WebChatRequest):
                     yield f"\n\n---\n*Notebook updated: `{Path(nb_path).name}`*\n"
                 break
             elif kind == "error":
-                yield f"\n\n**Error:** {update.get('message', 'unknown error')}\n"
+                # Structured error contract (consumed by Synapse frontend in U7):
+                # {type, error_class, message, hint}. Emit as a FINAGENT_EVT
+                # comment so the client can sniff the raw stream, and also
+                # render a plaintext fallback for older clients.
+                try:
+                    encoded = json.dumps(update, ensure_ascii=False)
+                    yield f"<!--FINAGENT_EVT {encoded}-->\n"
+                except Exception:
+                    pass
+                msg = update.get("message", "unknown error")
+                hint = update.get("hint")
+                err_cls = update.get("error_class")
+                prefix = f"**Error ({err_cls}):**" if err_cls else "**Error:**"
+                yield f"\n\n{prefix} {msg}\n"
+                if hint:
+                    yield f"\n_Hint: {hint}_\n"
                 break
             else:
                 # Unknown event type — surface a compact debug line rather than drop it.
