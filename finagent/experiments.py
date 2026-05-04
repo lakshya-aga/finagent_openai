@@ -182,6 +182,51 @@ class Run:
 
 
 @dataclass
+class Debate:
+    """Bull/bear/moderator debate row.
+
+    Stored on the ``debates`` table; one row per debate, immutable
+    once status flips to completed/failed. The transcript is the full
+    list of {speaker, phase, text, ts} entries; verdict is the
+    moderator's DebateVerdict dict.
+    """
+
+    id: str
+    ticker: str
+    asset_class: str
+    rounds: int
+    status: str
+    started_at: float
+    finished_at: Optional[float]
+    transcript_json: str
+    verdict_json: Optional[str]
+    error: Optional[str]
+
+    def transcript(self) -> list[dict[str, Any]]:
+        try:
+            raw = json.loads(self.transcript_json) if self.transcript_json else []
+            return raw if isinstance(raw, list) else []
+        except Exception:
+            return []
+
+    def verdict(self) -> Optional[dict[str, Any]]:
+        if not self.verdict_json:
+            return None
+        try:
+            return json.loads(self.verdict_json)
+        except Exception:
+            return None
+
+    def as_public_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["transcript"] = self.transcript()
+        d["verdict"] = self.verdict()
+        d.pop("transcript_json", None)
+        d.pop("verdict_json", None)
+        return d
+
+
+@dataclass
 class Search:
     id: str
     project: str
@@ -280,6 +325,24 @@ CREATE TABLE IF NOT EXISTS cost_events (
 CREATE INDEX IF NOT EXISTS idx_cost_ts      ON cost_events(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_cost_run     ON cost_events(run_id);
 CREATE INDEX IF NOT EXISTS idx_cost_purpose ON cost_events(purpose);
+
+-- Debate runs — bull/bear/moderator multi-agent verdicts on a single
+-- ticker. Transcript and verdict stored as JSON columns (one debate per
+-- row, immutable once finished).
+CREATE TABLE IF NOT EXISTS debates (
+    id              TEXT PRIMARY KEY,
+    ticker          TEXT NOT NULL,
+    asset_class     TEXT NOT NULL,
+    rounds          INTEGER NOT NULL DEFAULT 2,
+    status          TEXT NOT NULL,           -- queued|running|completed|failed
+    started_at      REAL NOT NULL,
+    finished_at     REAL,
+    transcript_json TEXT NOT NULL DEFAULT '[]',
+    verdict_json    TEXT,
+    error           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_debates_started ON debates(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_debates_ticker  ON debates(ticker);
 """
 
 # Indexes that reference columns added by _migrate(). Created after the
@@ -539,6 +602,86 @@ class ExperimentStore:
             "top_runs":   _rows(top_runs, "run_id"),
         }
 
+    # ── debates ──────────────────────────────────────────────────────
+
+    def create_debate(
+        self,
+        *,
+        ticker: str,
+        asset_class: str,
+        rounds: int,
+    ) -> Debate:
+        debate_id = uuid.uuid4().hex[:16]
+        now = time.time()
+        d = Debate(
+            id=debate_id,
+            ticker=ticker,
+            asset_class=asset_class,
+            rounds=rounds,
+            status="queued",
+            started_at=now,
+            finished_at=None,
+            transcript_json="[]",
+            verdict_json=None,
+            error=None,
+        )
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO debates (id, ticker, asset_class, rounds, status, "
+                "started_at, transcript_json) VALUES (?, ?, ?, ?, ?, ?, '[]')",
+                (debate_id, ticker, asset_class, rounds, "queued", now),
+            )
+        return d
+
+    def update_debate(
+        self,
+        debate_id: str,
+        *,
+        status: Optional[str] = None,
+        transcript: Optional[list[dict]] = None,
+        verdict: Optional[dict] = None,
+        error: Optional[str] = None,
+        finished: bool = False,
+    ) -> None:
+        sets: list[str] = []
+        args: list[Any] = []
+        if status is not None:
+            sets.append("status = ?"); args.append(status)
+        if transcript is not None:
+            sets.append("transcript_json = ?"); args.append(json.dumps(transcript, default=str))
+        if verdict is not None:
+            sets.append("verdict_json = ?"); args.append(json.dumps(verdict, default=str))
+        if error is not None:
+            sets.append("error = ?"); args.append(error)
+        if finished:
+            sets.append("finished_at = ?"); args.append(time.time())
+        if not sets:
+            return
+        args.append(debate_id)
+        with self._conn() as conn:
+            conn.execute(f"UPDATE debates SET {', '.join(sets)} WHERE id = ?", args)
+
+    def get_debate(self, debate_id: str) -> Optional[Debate]:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM debates WHERE id = ?", (debate_id,)).fetchone()
+        return _row_to_debate(row) if row else None
+
+    def list_debates(self, ticker: Optional[str] = None, limit: int = 100) -> list[Debate]:
+        sql = "SELECT * FROM debates"
+        args: list[Any] = []
+        if ticker:
+            sql += " WHERE ticker = ?"; args.append(ticker)
+        sql += " ORDER BY started_at DESC LIMIT ?"; args.append(limit)
+        with self._conn() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [_row_to_debate(r) for r in rows]
+
+    def delete_debate(self, debate_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM debates WHERE id = ?", (debate_id,))
+
+    # ── tags (existing) ──────────────────────────────────────────────
+
     def update_run_tags(self, run_id: str, tags_json: str) -> None:
         """Persist user-applied tags (workflow signal).
 
@@ -757,6 +900,21 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         fold_metrics_json=(row["fold_metrics_json"] if "fold_metrics_json" in keys else None),
         regime_metrics_json=(row["regime_metrics_json"] if "regime_metrics_json" in keys else None),
         tags_json=(row["tags_json"] if "tags_json" in keys else None),
+    )
+
+
+def _row_to_debate(row: sqlite3.Row) -> Debate:
+    return Debate(
+        id=row["id"],
+        ticker=row["ticker"],
+        asset_class=row["asset_class"],
+        rounds=int(row["rounds"]) if row["rounds"] is not None else 2,
+        status=row["status"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        transcript_json=row["transcript_json"] or "[]",
+        verdict_json=row["verdict_json"],
+        error=row["error"],
     )
 
 

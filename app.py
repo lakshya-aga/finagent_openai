@@ -409,6 +409,135 @@ async def patch_run_tags(run_id: str, body: _TagsBody):
     return {"ok": True, "tags": cleaned}
 
 
+class _DebateSubmission(BaseModel):
+    ticker: str
+    asset_class: str = "us_equity"
+    rounds: int = 2
+
+
+@app.post("/api/debates")
+async def start_debate(req: _DebateSubmission):
+    """Kick off a bull/bear/moderator debate and stream events as SSE.
+
+    Each line on the stream is a JSON event:
+      {"type":"phase","phase":"bull_round_1","speaker":"bull_analyst",...}
+      {"type":"message","speaker":"bull_analyst","phase":"bull_round_1","text":"..."}
+      {"type":"verdict","data":{...DebateVerdict...}}
+      {"type":"error","text":"..."}
+      {"type":"done","debate_id":"..."}
+
+    The debate is also persisted on the debates table so the frontend
+    can re-render it after the stream closes.
+    """
+    from finagent.debate import run_debate
+    from finagent.experiments import get_store
+
+    store = get_store()
+    rounds = max(1, min(4, int(req.rounds)))
+    debate = store.create_debate(
+        ticker=req.ticker.strip().upper()[:32],
+        asset_class=(req.asset_class or "us_equity").strip().lower()[:32],
+        rounds=rounds,
+    )
+
+    queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
+
+    async def _emit(evt: dict) -> None:
+        await queue.put(evt)
+
+    transcript_accum: list[dict] = []
+    verdict_accum: dict | None = None
+
+    async def _runner():
+        nonlocal verdict_accum
+        try:
+            store.update_debate(debate.id, status="running")
+            result = await run_debate(
+                ticker=debate.ticker,
+                asset_class=debate.asset_class,
+                rounds=debate.rounds,
+                emit=_emit_and_capture,
+                debate_id=debate.id,
+            )
+            verdict_accum = result.get("verdict")
+            store.update_debate(
+                debate.id,
+                status="completed",
+                transcript=transcript_accum,
+                verdict=verdict_accum,
+                finished=True,
+            )
+        except Exception as exc:
+            logging.exception("debate %s crashed", debate.id)
+            store.update_debate(
+                debate.id,
+                status="failed",
+                transcript=transcript_accum,
+                error=str(exc),
+                finished=True,
+            )
+        finally:
+            await queue.put(None)  # sentinel: stream done
+
+    async def _emit_and_capture(evt: dict) -> None:
+        # Capture for persistence AND forward to the client stream.
+        if evt.get("type") == "message":
+            transcript_accum.append({
+                "speaker": evt.get("speaker"),
+                "phase": evt.get("phase"),
+                "text": evt.get("text"),
+                "ts": evt.get("ts"),
+            })
+        elif evt.get("type") == "verdict":
+            # Persist incrementally so a stream reconnect can hit /get_debate
+            # and see the verdict already saved.
+            v = evt.get("data")
+            if isinstance(v, dict):
+                store.update_debate(debate.id, verdict=v, transcript=transcript_accum)
+        await _emit(evt)
+
+    asyncio.create_task(_runner())
+
+    async def _stream():
+        # Header event so the client immediately knows the debate id.
+        yield f"data: {json.dumps({'type': 'started', 'debate_id': debate.id, 'ticker': debate.ticker, 'asset_class': debate.asset_class, 'rounds': debate.rounds})}\n\n"
+        while True:
+            evt = await queue.get()
+            if evt is None:
+                yield f"data: {json.dumps({'type': 'done', 'debate_id': debate.id})}\n\n"
+                return
+            try:
+                yield f"data: {json.dumps(evt, default=str)}\n\n"
+            except Exception:
+                # Belt-and-braces: never let a bad event break the stream.
+                continue
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/debates")
+async def list_debates(ticker: Optional[str] = None, limit: int = 50):
+    from finagent.experiments import get_store
+    debates = get_store().list_debates(ticker=ticker, limit=max(1, min(200, int(limit))))
+    return {"debates": [d.as_public_dict() for d in debates]}
+
+
+@app.get("/api/debates/{debate_id}")
+async def get_debate(debate_id: str):
+    from finagent.experiments import get_store
+    d = get_store().get_debate(debate_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="debate not found")
+    return d.as_public_dict()
+
+
+@app.delete("/api/debates/{debate_id}")
+async def delete_debate(debate_id: str):
+    from finagent.experiments import get_store
+    get_store().delete_debate(debate_id)
+    return {"ok": True}
+
+
 @app.get("/api/runs/{run_id}/tearsheet")
 async def run_tearsheet(run_id: str):
     """Self-contained HTML tearsheet for a single run.
