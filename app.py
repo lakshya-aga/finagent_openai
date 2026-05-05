@@ -1,6 +1,13 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+# Phoenix tracing — auto-instruments openai / httpx / langchain calls
+# when PHOENIX_COLLECTOR_ENDPOINT is set in the env. No-op locally.
+# Must run before any LLM client is constructed so the instrumentation
+# patches the SDK before first use.
+from finagent.tracing import init_tracing
+init_tracing()
+
 import asyncio
 import json
 import logging

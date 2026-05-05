@@ -41,6 +41,12 @@ xgboost>=2.0
 # cascades NameErrors from the failed imports cell.
 fredapi>=0.5
 
+# Phoenix tracing (self-hosted OpenTelemetry-based LLM observability).
+# Auto-instruments OpenAI / httpx / LangChain calls when
+# PHOENIX_COLLECTOR_ENDPOINT is set; no-ops locally without it.
+arize-phoenix-otel>=0.10
+opentelemetry-instrumentation-openai>=0.1.0
+
 # Internal libraries the generated notebooks call.
 # fin-kit is installed separately in the Dockerfile with
 # --ignore-requires-python --no-deps because its setup.cfg still pins
