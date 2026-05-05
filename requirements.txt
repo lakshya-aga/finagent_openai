@@ -48,6 +48,11 @@ fredapi>=0.5
 pandas-ta>=0.3.14b0
 mplfinance>=0.12.10b0
 
+# Daily Nifty 50 debate scheduler. APScheduler runs in-process inside
+# the FastAPI event loop; cron triggers daily at 02:00 UTC. No new
+# container required.
+apscheduler>=3.10,<4.0
+
 # Phoenix tracing (self-hosted OpenTelemetry-based LLM observability).
 # Auto-instruments OpenAI / httpx / LangChain calls when
 # PHOENIX_COLLECTOR_ENDPOINT is set; no-ops locally without it.

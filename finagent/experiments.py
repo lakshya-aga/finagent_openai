@@ -201,6 +201,7 @@ class Debate:
     transcript_json: str
     verdict_json: Optional[str]
     error: Optional[str]
+    source: str = "user"  # 'user' (manual) or 'scheduled' (cron)
 
     def transcript(self) -> list[dict[str, Any]]:
         try:
@@ -339,10 +340,12 @@ CREATE TABLE IF NOT EXISTS debates (
     finished_at     REAL,
     transcript_json TEXT NOT NULL DEFAULT '[]',
     verdict_json    TEXT,
-    error           TEXT
+    error           TEXT,
+    source          TEXT NOT NULL DEFAULT 'user'  -- 'user' | 'scheduled'
 );
 CREATE INDEX IF NOT EXISTS idx_debates_started ON debates(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_debates_ticker  ON debates(ticker);
+CREATE INDEX IF NOT EXISTS idx_debates_source  ON debates(source);
 """
 
 # Indexes that reference columns added by _migrate(). Created after the
@@ -378,6 +381,14 @@ class ExperimentStore:
             conn.execute("ALTER TABLE runs ADD COLUMN regime_metrics_json TEXT")
         if "tags_json" not in existing:
             conn.execute("ALTER TABLE runs ADD COLUMN tags_json TEXT")
+
+        # ── debates table column migrations ─────────────────────────
+        try:
+            existing_dbates = {r[1] for r in conn.execute("PRAGMA table_info(debates)")}
+        except Exception:
+            existing_dbates = set()
+        if existing_dbates and "source" not in existing_dbates:
+            conn.execute("ALTER TABLE debates ADD COLUMN source TEXT NOT NULL DEFAULT 'user'")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -610,6 +621,7 @@ class ExperimentStore:
         ticker: str,
         asset_class: str,
         rounds: int,
+        source: str = "user",
     ) -> Debate:
         debate_id = uuid.uuid4().hex[:16]
         now = time.time()
@@ -624,12 +636,14 @@ class ExperimentStore:
             transcript_json="[]",
             verdict_json=None,
             error=None,
+            source=source,
         )
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO debates (id, ticker, asset_class, rounds, status, "
-                "started_at, transcript_json) VALUES (?, ?, ?, ?, ?, ?, '[]')",
-                (debate_id, ticker, asset_class, rounds, "queued", now),
+                "started_at, transcript_json, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, '[]', ?)",
+                (debate_id, ticker, asset_class, rounds, "queued", now, source),
             )
         return d
 
@@ -904,6 +918,7 @@ def _row_to_run(row: sqlite3.Row) -> Run:
 
 
 def _row_to_debate(row: sqlite3.Row) -> Debate:
+    keys = row.keys()
     return Debate(
         id=row["id"],
         ticker=row["ticker"],
@@ -915,6 +930,7 @@ def _row_to_debate(row: sqlite3.Row) -> Debate:
         transcript_json=row["transcript_json"] or "[]",
         verdict_json=row["verdict_json"],
         error=row["error"],
+        source=(row["source"] if "source" in keys else "user") or "user",
     )
 
 

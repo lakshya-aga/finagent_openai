@@ -8,6 +8,10 @@ load_dotenv()
 from finagent.tracing import init_tracing
 init_tracing()
 
+# Daily Nifty 50 debate scheduler. APScheduler in-process; cron at
+# 02:00 UTC (07:30 IST). No-op if apscheduler isn't installed locally.
+from finagent.scheduler import start_scheduler, stop_scheduler
+
 import asyncio
 import json
 import logging
@@ -27,6 +31,18 @@ from pydantic import BaseModel
 from agent_workflow import run_workflow, WorkflowInput
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def _startup():
+    # Scheduler must start AFTER the FastAPI event loop is running so
+    # AsyncIOScheduler hooks the same loop the cron job needs to use.
+    start_scheduler()
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    stop_scheduler()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # session_id -> {"notebook_path": str | None, "history": list}
@@ -527,6 +543,208 @@ async def list_debates(ticker: Optional[str] = None, limit: int = 50):
     from finagent.experiments import get_store
     debates = get_store().list_debates(ticker=ticker, limit=max(1, min(200, int(limit))))
     return {"debates": [d.as_public_dict() for d in debates]}
+
+
+@app.get("/api/debates/calendar")
+async def debates_calendar(
+    month: Optional[str] = None,  # "YYYY-MM"; default current month
+    source: str = "scheduled",
+):
+    """Return debates grouped by date for a month-grid calendar view.
+
+    The Nifty 50 daily-cron page consumes this. Filters to scheduled-source
+    debates by default; pass source='all' or source='user' to widen.
+    """
+    from datetime import datetime, timezone, timedelta
+    from finagent.experiments import get_store
+
+    if month:
+        try:
+            year, mon = month.split("-")
+            year, mon = int(year), int(mon)
+        except Exception:
+            raise HTTPException(status_code=400, detail="month must be YYYY-MM")
+    else:
+        now = datetime.now(timezone.utc)
+        year, mon = now.year, now.month
+
+    # Window covers the calendar's visible weeks (Sunday-anchored grid),
+    # so a month view always has 5-6 rows pre-filled. Pad ±7 days.
+    first = datetime(year, mon, 1, tzinfo=timezone.utc)
+    last = datetime(year + 1, 1, 1, tzinfo=timezone.utc) if mon == 12 else datetime(year, mon + 1, 1, tzinfo=timezone.utc)
+    start_ts = (first - timedelta(days=7)).timestamp()
+    end_ts = (last + timedelta(days=7)).timestamp()
+
+    store = get_store()
+    debates = store.list_debates(limit=1000)
+    out_by_day: dict[str, list[dict]] = {}
+    for d in debates:
+        if not (start_ts <= d.started_at <= end_ts):
+            continue
+        if source != "all" and d.source != source:
+            continue
+        date_str = datetime.fromtimestamp(d.started_at, tz=timezone.utc).strftime("%Y-%m-%d")
+        verdict = d.verdict() or {}
+        out_by_day.setdefault(date_str, []).append({
+            "id": d.id,
+            "ticker": d.ticker,
+            "asset_class": d.asset_class,
+            "status": d.status,
+            "started_at": d.started_at,
+            "verdict_action": verdict.get("action"),
+            "verdict_target": verdict.get("target_price"),
+            "verdict_stoploss": verdict.get("stoploss"),
+            "verdict_horizon": verdict.get("time_horizon"),
+            "verdict_confidence": verdict.get("confidence"),
+        })
+    # Sort each day's bucket by started_at ascending so the row reads in
+    # execution order.
+    for k in out_by_day:
+        out_by_day[k].sort(key=lambda r: r["started_at"])
+
+    return {
+        "month": f"{year:04d}-{mon:02d}",
+        "source": source,
+        "days": out_by_day,
+    }
+
+
+@app.post("/api/debates/scheduler/run-now")
+async def trigger_scheduler_now(n: int = 5, rounds: int = 2):
+    """Manually fire the daily Nifty cron (admin / smoke-test).
+
+    Runs in the background — returns immediately with the queued
+    ticker list so the caller can check progress on /api/debates.
+    """
+    from finagent.scheduler import select_least_recent, run_daily_nifty_debates
+
+    selected = select_least_recent(max(1, min(50, int(n))))
+    asyncio.create_task(run_daily_nifty_debates(n=len(selected), rounds=rounds))
+    return {"queued": selected, "rounds": rounds}
+
+
+@app.get("/api/debates/{debate_id}/performance")
+async def debate_performance(debate_id: str):
+    """Compute the actual return on a debate's underlying ticker since
+    the debate landed, for the calendar's verdict-vs-reality column.
+
+    Pulls historical OHLC for the window ``[debate_started, today]``,
+    computes:
+      * entry_price — close on the debate's first available trading day
+      * latest_price — most recent close
+      * return_pct — (latest - entry) / entry
+      * direction_correct — True if the verdict pointed the right way
+        (buy + positive return, sell + negative return); None when
+        verdict is 'avoid' or 'unknown'
+      * target_progress_pct — (current - entry) / (target - entry)
+        for buy verdicts; clipped to [-2, 2]; None otherwise
+
+    Falls back to a structured 'no_data' shape if the ticker can't be
+    fetched (delisted, tz-mismatch, illiquid).
+    """
+    from datetime import datetime, timezone, timedelta
+    from finagent.experiments import get_store
+
+    d = get_store().get_debate(debate_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="debate not found")
+
+    verdict = d.verdict() or {}
+    started = datetime.fromtimestamp(d.started_at, tz=timezone.utc)
+    end = datetime.now(timezone.utc) + timedelta(days=1)
+
+    out: dict = {
+        "debate_id": debate_id,
+        "ticker": d.ticker,
+        "asset_class": d.asset_class,
+        "started_at": d.started_at,
+        "verdict_action": verdict.get("action"),
+        "verdict_target": verdict.get("target_price"),
+        "verdict_stoploss": verdict.get("stoploss"),
+        "entry_price": None,
+        "entry_date": None,
+        "latest_price": None,
+        "latest_date": None,
+        "return_pct": None,
+        "direction_correct": None,
+        "target_progress_pct": None,
+        "status": "no_data",
+    }
+
+    try:
+        from findata.equity_prices import get_equity_prices
+        df = await asyncio.to_thread(
+            get_equity_prices,
+            tickers=[d.ticker],
+            start_date=(started - timedelta(days=2)).strftime("%Y-%m-%d"),
+            end_date=end.strftime("%Y-%m-%d"),
+            fields=["Close"],
+        )
+    except Exception as exc:
+        out["status"] = f"fetch_failed: {type(exc).__name__}"
+        return out
+
+    if df is None or df.empty:
+        return out
+
+    # Normalise to a flat Close series.
+    import pandas as pd
+    if isinstance(df.columns, pd.MultiIndex):
+        try:
+            close = df["Close"][d.ticker].dropna()
+        except Exception:
+            close = pd.Series(dtype=float)
+    else:
+        close = df.get("Close", pd.Series(dtype=float)).dropna()
+
+    if close.empty:
+        return out
+
+    # Entry: first close at or after started_at; latest: last close.
+    started_naive = pd.Timestamp(started)
+    if close.index.tz is not None and started_naive.tz is None:
+        started_naive = started_naive.tz_localize("UTC")
+    elif close.index.tz is None and started_naive.tz is not None:
+        started_naive = started_naive.tz_localize(None)
+    on_or_after = close[close.index >= started_naive]
+    entry_series = on_or_after.iloc[:1] if not on_or_after.empty else close.iloc[:1]
+    entry_price = float(entry_series.iloc[0])
+    entry_date = entry_series.index[0].strftime("%Y-%m-%d")
+    latest_price = float(close.iloc[-1])
+    latest_date = close.index[-1].strftime("%Y-%m-%d")
+
+    return_pct = (latest_price / entry_price) - 1.0 if entry_price else None
+
+    direction_correct = None
+    action = (verdict.get("action") or "").lower()
+    if return_pct is not None and action in ("buy", "sell"):
+        direction_correct = (
+            (action == "buy" and return_pct > 0) or
+            (action == "sell" and return_pct < 0)
+        )
+
+    target_progress_pct = None
+    target = verdict.get("target_price")
+    if (
+        action == "buy"
+        and isinstance(target, (int, float))
+        and entry_price is not None
+        and target != entry_price
+    ):
+        progress = (latest_price - entry_price) / (target - entry_price)
+        target_progress_pct = max(-2.0, min(2.0, progress))
+
+    out.update({
+        "entry_price": entry_price,
+        "entry_date": entry_date,
+        "latest_price": latest_price,
+        "latest_date": latest_date,
+        "return_pct": return_pct,
+        "direction_correct": direction_correct,
+        "target_progress_pct": target_progress_pct,
+        "status": "ok",
+    })
+    return out
 
 
 @app.get("/api/debates/{debate_id}")

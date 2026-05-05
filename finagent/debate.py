@@ -54,6 +54,7 @@ async def run_debate(
     rounds: int = 2,
     emit: Optional[EmitFn] = None,
     debate_id: Optional[str] = None,
+    source: str = "user",
 ) -> dict[str, Any]:
     """Run a bull/bear/moderator debate.
 
@@ -68,14 +69,36 @@ async def run_debate(
         emit: async callback for streaming events. Pass None for
             non-streaming use (tests, scheduled jobs).
         debate_id: pre-generated id to attach to events. If None, the
-            orchestrator generates one.
+            orchestrator generates one — and we persist the row inline
+            so the calendar / detail pages can pick it up after the
+            stream ends.
+        source: 'user' for manual submissions, 'scheduled' for the
+            cron-driven Nifty 50 sweep. Persisted on the debate row;
+            the calendar page filters on this.
 
     Returns:
         {debate_id, ticker, asset_class, rounds, transcript: [...],
          verdict: dict, started_at, finished_at}
     """
     emit = emit or _noop_emit
-    debate_id = debate_id or uuid.uuid4().hex[:16]
+    # If the caller didn't pre-create a debate row (typical of the
+    # scheduled / non-streaming path), create one now so the row exists
+    # in the store from the moment the work starts.
+    own_row = debate_id is None
+    if own_row:
+        from .experiments import get_store
+        _store = get_store()
+        _row = _store.create_debate(
+            ticker=ticker,
+            asset_class=asset_class,
+            rounds=rounds,
+            source=source,
+        )
+        debate_id = _row.id
+        try:
+            _store.update_debate(debate_id, status="running")
+        except Exception:
+            logging.exception("run_debate: could not flip status to running")
     started_at = time.time()
 
     # Stamp the agents with a fresh "now" — anchors any date-relative
@@ -193,6 +216,20 @@ async def run_debate(
             "data": verdict_dict,
             "ts": time.time(),
         })
+        # Persist completion when we own the row (no streaming caller is
+        # already doing so).
+        if own_row:
+            try:
+                from .experiments import get_store
+                get_store().update_debate(
+                    debate_id,
+                    status="completed",
+                    transcript=transcript,
+                    verdict=verdict_dict,
+                    finished=True,
+                )
+            except Exception:
+                logging.exception("run_debate: failed to persist completion")
 
     except Exception as exc:
         logging.exception("debate %s failed (ticker=%s)", debate_id, ticker)
@@ -202,6 +239,18 @@ async def run_debate(
             "text": f"{type(exc).__name__}: {exc}",
             "ts": time.time(),
         })
+        if own_row:
+            try:
+                from .experiments import get_store
+                get_store().update_debate(
+                    debate_id,
+                    status="failed",
+                    transcript=transcript,
+                    error=str(exc),
+                    finished=True,
+                )
+            except Exception:
+                logging.exception("run_debate: failed to persist failure")
         raise
 
     finished_at = time.time()
