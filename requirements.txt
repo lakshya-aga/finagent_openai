@@ -41,6 +41,13 @@ xgboost>=2.0
 # cascades NameErrors from the failed imports cell.
 fredapi>=0.5
 
+# Technical-analysis pack — candlestick patterns, indicators, OHLC charts.
+# pandas-ta provides ~60 candlestick recognisers + the standard indicator
+# pack (SMA / EMA / RSI / MACD / ADX / Bollinger). mplfinance renders
+# the candlestick charts the debate agents embed inline.
+pandas-ta>=0.3.14b0
+mplfinance>=0.12.10b0
+
 # Phoenix tracing (self-hosted OpenTelemetry-based LLM observability).
 # Auto-instruments OpenAI / httpx / LangChain calls when
 # PHOENIX_COLLECTOR_ENDPOINT is set; no-ops locally without it.

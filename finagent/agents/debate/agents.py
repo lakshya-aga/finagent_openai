@@ -21,12 +21,20 @@ from pydantic import BaseModel, Field
 from finagent.llm import get_model_name
 
 from .tools import (
+    # News + sentiment
     fetch_gdelt_news,
     fetch_yfinance_news,
+    # Fundamentals + analyst grounding
     fetch_equity_fundamentals,
     fetch_analyst_consensus,
     fetch_earnings_calendar,
     fetch_returns_stats,
+    # Technical analysis
+    detect_candlestick_patterns,
+    compute_support_resistance,
+    compute_trend_indicators,
+    compute_trend_regime,
+    plot_ohlc_chart,
 )
 
 
@@ -79,14 +87,45 @@ GROUNDING RULES — non-negotiable:
    for AAPL and the 50-day SMA crossed above the 200-day SMA on 2024-04-12" —
    not "the 50-day SMA recently crossed above the 200-day SMA".
 3. When the data isn't available, SAY SO explicitly — don't paper over it.
-4. Use search_tools (data-mcp) FIRST to discover the right fetcher for the
-   metric you need (e.g. "search for fundamentals fetcher", then call
-   get_tool_doc on the most relevant result).
-5. fetch_yfinance_news is the cheapest news source for US equities;
-   fetch_gdelt_news is broader (global, multi-language); web_search is the
-   fallback for everything else.
-6. Treat news headlines as one signal among many. Cross-reference with
+4. Treat news headlines as one signal among many. Cross-reference with
    price action and fundamentals before concluding.
+
+PREFERRED TOOLS (call these directly — fast, structured, free):
+  Fundamentals & valuation:
+    fetch_equity_fundamentals   — P/E, P/B, margins, ROE, FCF, balance sheet
+    fetch_analyst_consensus     — target prices, recommendation, # analysts
+    fetch_earnings_calendar     — past + upcoming earnings + EPS surprise %
+    fetch_returns_stats         — annual vol / Sharpe / beta / max DD
+
+  Technical analysis:
+    compute_trend_indicators    — SMA/EMA/RSI/MACD/ADX/Bollinger snapshot
+    compute_support_resistance  — algorithmic S/R levels with touch counts
+    detect_candlestick_patterns — hammer / engulfing / doji / etc.
+    compute_trend_regime        — Hurst + linear drift; trending vs noisy
+
+  News:
+    fetch_yfinance_news         — US equity company headlines (cheap)
+    fetch_gdelt_news            — global multi-language coverage + tone
+
+  Chart (CALL ONCE per turn):
+    plot_ohlc_chart             — candlestick + S/R + 50/200 SMA + RSI.
+                                  Returns a markdown_image string —
+                                  paste that string verbatim in your
+                                  response text and the chart renders
+                                  inline in the debate transcript.
+
+FALLBACK (slower / paid):
+  web_search                    — long-tail "what's the latest" only when
+                                  the tools above don't cover it.
+
+CHART ETIQUETTE:
+  * Always include exactly one chart per turn — it's how the user sees
+    your technical thesis.
+  * Place the chart near the top of your argument, BEFORE the catalysts
+    /concerns list, so the visual frames the text that follows.
+  * The plot_ohlc_chart tool returns markdown_image. Paste it verbatim:
+        ![title](data:image/png;base64,…)
+    Don't paraphrase, don't truncate the base64.
 """
 
 
@@ -111,13 +150,15 @@ YOUR ROLE
 
 OUTPUT
 Write a structured argument with:
-1. THESIS — one sentence: what's the trade and why.
-2. CATALYSTS — 3-5 specific positive drivers with quantitative anchors.
-3. KEY DATA — list the metrics you pulled, with values and dates.
-4. RISKS — what would break this thesis (be honest).
-5. PROPOSED LEVELS — entry, target, stoploss, with reasoning.
+1. CHART — call plot_ohlc_chart once and paste the markdown_image string
+   here verbatim. The user sees the chart inline.
+2. THESIS — one sentence: what's the trade and why.
+3. CATALYSTS — 3-5 specific positive drivers with quantitative anchors.
+4. KEY DATA — list the metrics you pulled, with values and dates.
+5. RISKS — what would break this thesis (be honest).
+6. PROPOSED LEVELS — entry, target, stoploss, with reasoning.
 
-Stay under 600 words.
+Stay under 600 words (excluding the chart's base64).
 """
 
 
@@ -145,14 +186,16 @@ YOUR ROLE
 
 OUTPUT
 Write a structured argument with:
-1. THESIS — one sentence: short / avoid, and why.
-2. CONCERNS — 3-5 specific negative drivers with quantitative anchors.
-3. KEY DATA — list the metrics you pulled, with values and dates.
-4. WHAT WOULD CHANGE YOUR MIND — be honest about disconfirming signals.
-5. PROPOSED LEVELS — short entry / target / stoploss, OR a clear "avoid"
+1. CHART — call plot_ohlc_chart once and paste the markdown_image string
+   here verbatim. The user sees the chart inline.
+2. THESIS — one sentence: short / avoid, and why.
+3. CONCERNS — 3-5 specific negative drivers with quantitative anchors.
+4. KEY DATA — list the metrics you pulled, with values and dates.
+5. WHAT WOULD CHANGE YOUR MIND — be honest about disconfirming signals.
+6. PROPOSED LEVELS — short entry / target / stoploss, OR a clear "avoid"
    recommendation with reasoning.
 
-Stay under 600 words.
+Stay under 600 words (excluding the chart's base64).
 """
 
 
@@ -207,11 +250,18 @@ def bull_agent(now_iso: str, today_str: str) -> Agent:
             # News + sentiment
             fetch_yfinance_news,
             fetch_gdelt_news,
-            # Fundamentals + analyst grounding (Tier-1 additions)
+            # Fundamentals + analyst grounding
             fetch_equity_fundamentals,
             fetch_analyst_consensus,
             fetch_earnings_calendar,
             fetch_returns_stats,
+            # Technical analysis (NEW)
+            compute_trend_indicators,
+            compute_support_resistance,
+            detect_candlestick_patterns,
+            compute_trend_regime,
+            # Inline chart for the user (NEW)
+            plot_ohlc_chart,
             # Long-tail web search fallback
             WebSearchTool(),
         ],
@@ -228,11 +278,18 @@ def bear_agent(now_iso: str, today_str: str) -> Agent:
             # News + sentiment
             fetch_yfinance_news,
             fetch_gdelt_news,
-            # Fundamentals + analyst grounding (Tier-1 additions)
+            # Fundamentals + analyst grounding
             fetch_equity_fundamentals,
             fetch_analyst_consensus,
             fetch_earnings_calendar,
             fetch_returns_stats,
+            # Technical analysis (NEW)
+            compute_trend_indicators,
+            compute_support_resistance,
+            detect_candlestick_patterns,
+            compute_trend_regime,
+            # Inline chart for the user (NEW)
+            plot_ohlc_chart,
             # Long-tail web search fallback
             WebSearchTool(),
         ],
