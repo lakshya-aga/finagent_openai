@@ -18,7 +18,14 @@ from agents import Agent, ModelSettings, WebSearchTool
 from openai.types.shared.reasoning import Reasoning
 from pydantic import BaseModel, Field
 
-from .tools import fetch_gdelt_news, fetch_yfinance_news
+from .tools import (
+    fetch_gdelt_news,
+    fetch_yfinance_news,
+    fetch_equity_fundamentals,
+    fetch_analyst_consensus,
+    fetch_earnings_calendar,
+    fetch_returns_stats,
+)
 
 
 # ─── Verdict schema (moderator structured output) ────────────────────
@@ -195,8 +202,15 @@ def bull_agent(now_iso: str, today_str: str) -> Agent:
         model="gpt-4o",
         model_settings=ModelSettings(parallel_tool_calls=True),
         tools=[
-            fetch_gdelt_news,
+            # News + sentiment
             fetch_yfinance_news,
+            fetch_gdelt_news,
+            # Fundamentals + analyst grounding (Tier-1 additions)
+            fetch_equity_fundamentals,
+            fetch_analyst_consensus,
+            fetch_earnings_calendar,
+            fetch_returns_stats,
+            # Long-tail web search fallback
             WebSearchTool(),
         ],
     )
@@ -209,8 +223,15 @@ def bear_agent(now_iso: str, today_str: str) -> Agent:
         model="gpt-4o",
         model_settings=ModelSettings(parallel_tool_calls=True),
         tools=[
-            fetch_gdelt_news,
+            # News + sentiment
             fetch_yfinance_news,
+            fetch_gdelt_news,
+            # Fundamentals + analyst grounding (Tier-1 additions)
+            fetch_equity_fundamentals,
+            fetch_analyst_consensus,
+            fetch_earnings_calendar,
+            fetch_returns_stats,
+            # Long-tail web search fallback
             WebSearchTool(),
         ],
     )
