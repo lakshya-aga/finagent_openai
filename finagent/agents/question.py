@@ -32,10 +32,13 @@ read-only. Do not write to disk, install packages, or fabricate cell outputs.
 """
 
 
+from finagent.llm import get_model_name
+
+
 question_agent = Agent(
     name="QuestionAgent",
     instructions=QUESTION_INSTRUCTIONS,
-    model="gpt-5",
+    model=get_model_name("chat_question"),
     tools=[read_notebook],
     model_settings=ModelSettings(store=True),
 )

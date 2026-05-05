@@ -181,22 +181,24 @@ def _digest_notebook(notebook_json: dict) -> str:
 # ── LLM call ───────────────────────────────────────────────────────────
 
 
-_AUDIT_MODEL = "gpt-4o-mini"
-
-
 async def _call_llm(
     user_payload: str,
     run_id: Optional[str] = None,
 ) -> BiasAuditVerdict:
-    """Hit gpt-4o-mini with structured-output and parse the result.
+    """Hit the configured bias-audit model and parse the verdict.
+
+    Routes through ``finagent.llm`` so the model + provider are
+    swappable per env without editing this file.
 
     Isolated as a thin function so tests can monkey-patch
-    `_call_llm` directly and exercise `audit_run`'s error handling without
-    needing an API key.
+    ``_call_llm`` directly and exercise ``audit_run``'s error handling
+    without needing an API key.
     """
-    client = AsyncOpenAI()
+    from finagent.llm import get_llm_client, get_model_name
+    client = get_llm_client("bias_auditor")
+    audit_model = get_model_name("bias_auditor")
     resp = await client.chat.completions.create(
-        model=_AUDIT_MODEL,
+        model=audit_model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_payload},
@@ -211,7 +213,7 @@ async def _call_llm(
         record_cost_event(
             response=resp,
             purpose="bias_audit",
-            model=_AUDIT_MODEL,
+            model=audit_model,
             run_id=run_id,
         )
     except Exception:

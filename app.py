@@ -585,6 +585,19 @@ async def admin_metrics(days: int = 7, keys: Optional[str] = None):
     return await asyncio.to_thread(compute_metrics, days=days, keys=selected)
 
 
+@app.get("/admin/llm-config")
+async def admin_llm_config():
+    """Resolved (provider, model) per role — read by /api/admin/diagnostics
+    on synapse so admins can see what model each agent is actually using.
+
+    Surfaced post-L1 (model-swap dispatcher). Override per role via env:
+      <ROLE>_PROVIDER=openai  <ROLE>_MODEL=gpt-5
+      OPENAI_MODEL=gpt-4o     # global default applied when role-specific is unset
+    """
+    from finagent.llm import list_roles
+    return {role: {"provider": p, "model": m} for role, (p, m) in list_roles().items()}
+
+
 @app.get("/api/admin/costs")
 async def admin_costs(days: int = 30):
     """Cost ledger summary — total $ spend + breakdowns by day, purpose,
@@ -792,7 +805,12 @@ async def upload_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=413, detail=f"PDF too large (max {_UPLOAD_MAX_BYTES // (1024*1024)} MB)")
 
     filename = file.filename or "upload.pdf"
-    client = AsyncOpenAI()
+    # PDF upload uses the OpenAI Files + Vector Stores APIs specifically;
+    # they don't have a clean LangChain / Anthropic equivalent, so this
+    # one stays OpenAI-pinned even after the L3 migration. Routing
+    # through the dispatcher anyway for telemetry consistency.
+    from finagent.llm import get_llm_client
+    client = get_llm_client("default")
 
     try:
         uploaded = await client.files.create(

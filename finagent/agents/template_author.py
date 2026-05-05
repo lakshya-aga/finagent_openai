@@ -269,10 +269,13 @@ NO explanation text outside the structured output.
 """
 
 
+from finagent.llm import get_model_name
+
+
 template_author_agent = Agent(
     name="TemplateAuthor",
     instructions=TEMPLATE_AUTHOR_INSTRUCTIONS,
-    model="gpt-5",
+    model=get_model_name("template_author"),
     output_type=TemplateDraft,
     model_settings=ModelSettings(
         store=True,

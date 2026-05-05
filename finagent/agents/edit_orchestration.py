@@ -66,10 +66,13 @@ End with: {"op": "FINAL", "result": "SUCCESS" | "FATAL: <reason>"}
 """
 
 
+from finagent.llm import get_model_name
+
+
 edit_orchestration_agent = Agent(
     name="EditOrchestrationAgent",
     instructions=EDIT_ORCHESTRATION_INSTRUCTIONS,
-    model="gpt-5",
+    model=get_model_name("chat_edit_orchestrator"),
     tools=[read_notebook, replace_cell, insert_cell, delete_cell, add_cell],
     mcp_servers=[make_fruit_thrower(), make_data_mcp()],
     model_settings=ModelSettings(

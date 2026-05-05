@@ -18,6 +18,8 @@ from agents import Agent, ModelSettings, WebSearchTool
 from openai.types.shared.reasoning import Reasoning
 from pydantic import BaseModel, Field
 
+from finagent.llm import get_model_name
+
 from .tools import (
     fetch_gdelt_news,
     fetch_yfinance_news,
@@ -199,7 +201,7 @@ def bull_agent(now_iso: str, today_str: str) -> Agent:
     return Agent(
         name="bull_analyst",
         instructions=_bull_instructions(now_iso, today_str),
-        model="gpt-4o",
+        model=get_model_name("debate_bull"),
         model_settings=ModelSettings(parallel_tool_calls=True),
         tools=[
             # News + sentiment
@@ -220,7 +222,7 @@ def bear_agent(now_iso: str, today_str: str) -> Agent:
     return Agent(
         name="bear_analyst",
         instructions=_bear_instructions(now_iso, today_str),
-        model="gpt-4o",
+        model=get_model_name("debate_bear"),
         model_settings=ModelSettings(parallel_tool_calls=True),
         tools=[
             # News + sentiment
@@ -242,6 +244,6 @@ def moderator_agent(now_iso: str, today_str: str) -> Agent:
     return Agent(
         name="debate_moderator",
         instructions=_moderator_instructions(now_iso, today_str),
-        model="gpt-4o",
+        model=get_model_name("debate_moderator"),
         output_type=DebateVerdict,
     )

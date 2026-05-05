@@ -110,10 +110,13 @@ End with a final object:
 """
 
 
+from finagent.llm import get_model_name
+
+
 validatorandfixingagent = Agent(
     name="ValidatorAndFixingAgent",
     instructions=VALIDATOR_INSTRUCTIONS,
-    model="gpt-5",
+    model=get_model_name("chat_validator"),
     tools=[
         read_notebook,
         validate_run,

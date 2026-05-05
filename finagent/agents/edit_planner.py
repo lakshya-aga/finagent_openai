@@ -42,9 +42,12 @@ RULES
 """
 
 
+from finagent.llm import get_model_name
+
+
 edit_planner = Agent(
     name="EditPlanner",
     instructions=EDIT_PLANNER_INSTRUCTIONS,
-    model="gpt-5",
+    model=get_model_name("chat_edit_planner"),
     model_settings=ModelSettings(store=True, reasoning=Reasoning(effort="low")),
 )

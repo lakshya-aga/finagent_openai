@@ -127,9 +127,10 @@ class WorkflowInput(BaseModel):
 
 async def _classify_intent(message: str, has_notebook: bool) -> str:
     """Return 'question', 'edit', or 'new' based on the user message."""
-    client = AsyncOpenAI()
+    from .llm import get_llm_client, get_model_name
+    client = get_llm_client("intent_classifier")
     resp = await client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=get_model_name("intent_classifier"),
         messages=[
             {
                 "role": "system",

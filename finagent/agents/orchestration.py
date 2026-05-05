@@ -97,10 +97,13 @@ GENERAL RULES
 """
 
 
+from finagent.llm import get_model_name
+
+
 orchestration_agent = Agent(
     name="Orchestration Agent",
     instructions=ORCHESTRATION_INSTRUCTIONS,
-    model="gpt-5",
+    model=get_model_name("chat_orchestrator"),
     tools=[add_cell, create_notebook, file_search],
     mcp_servers=[make_fruit_thrower(), make_data_mcp()],
     model_settings=ModelSettings(

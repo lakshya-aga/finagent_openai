@@ -80,10 +80,13 @@ PLANNING HEURISTICS
 - Prefer daily frequency unless specified otherwise."""
 
 
+from finagent.llm import get_model_name
+
+
 planner = Agent(
     name="Planner",
     instructions=PLANNER_INSTRUCTIONS,
-    model="gpt-5",
+    model=get_model_name("chat_planner"),
     tools=[file_search],
     mcp_servers=[make_fruit_thrower(), make_data_mcp()],
     model_settings=ModelSettings(
