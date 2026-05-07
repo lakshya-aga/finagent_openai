@@ -345,13 +345,20 @@ CREATE TABLE IF NOT EXISTS debates (
 );
 CREATE INDEX IF NOT EXISTS idx_debates_started ON debates(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_debates_ticker  ON debates(ticker);
-CREATE INDEX IF NOT EXISTS idx_debates_source  ON debates(source);
 """
 
 # Indexes that reference columns added by _migrate(). Created after the
 # migration so they don't fail on legacy DBs.
+#
+# idx_debates_source MUST live here, not in _SCHEMA_BASE: legacy DBs that
+# pre-date the daily-Nifty scheduler have a `debates` table without the
+# `source` column. The `CREATE TABLE IF NOT EXISTS` at the top of
+# _SCHEMA_BASE is a no-op on those DBs, so the column never gets added by
+# that path; only `_migrate()` adds it via ALTER TABLE. Creating the
+# index here, after _migrate has run, guarantees the column exists.
 _SCHEMA_POST_MIGRATE = """
-CREATE INDEX IF NOT EXISTS idx_runs_search ON runs(search_id);
+CREATE INDEX IF NOT EXISTS idx_runs_search    ON runs(search_id);
+CREATE INDEX IF NOT EXISTS idx_debates_source ON debates(source);
 """
 
 
