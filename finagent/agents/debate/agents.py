@@ -34,6 +34,7 @@ from .tools import (
     compute_support_resistance,
     compute_trend_indicators,
     compute_trend_regime,
+    arima_forecast,
     plot_ohlc_chart,
 )
 
@@ -102,6 +103,11 @@ PREFERRED TOOLS (call these directly — fast, structured, free):
     compute_support_resistance  — algorithmic S/R levels with touch counts
     detect_candlestick_patterns — hammer / engulfing / doji / etc.
     compute_trend_regime        — Hurst + linear drift; trending vs noisy
+    arima_forecast              — SARIMA grid-search → forward forecast
+                                  with 95% CI + bullish/bearish/neutral
+                                  signal. Use as a quantitative anchor
+                                  in KEY DATA (cite the order, the % CI,
+                                  and the signal).
 
   News:
     fetch_yfinance_news         — US equity company headlines (cheap)
@@ -126,6 +132,12 @@ CHART ETIQUETTE:
   * The plot_ohlc_chart tool returns markdown_image. Paste it verbatim:
         ![title](data:image/png;base64,…)
     Don't paraphrase, don't truncate the base64.
+  * If chart_status is not "ok" (e.g., yfinance rate-limited, ticker
+    delisted, render failure), the markdown_image will be a one-line
+    italic fallback like *Chart unavailable for X: <reason>*. Paste
+    THAT verbatim in the same slot — do NOT invent your own apology
+    sentence — and continue the rest of the analysis using the
+    text-only tools (fundamentals, returns_stats, trend_indicators).
 """
 
 
@@ -260,6 +272,7 @@ def bull_agent(now_iso: str, today_str: str) -> Agent:
             compute_support_resistance,
             detect_candlestick_patterns,
             compute_trend_regime,
+            arima_forecast,
             # Inline chart for the user (NEW)
             plot_ohlc_chart,
             # Long-tail web search fallback
@@ -288,6 +301,7 @@ def bear_agent(now_iso: str, today_str: str) -> Agent:
             compute_support_resistance,
             detect_candlestick_patterns,
             compute_trend_regime,
+            arima_forecast,
             # Inline chart for the user (NEW)
             plot_ohlc_chart,
             # Long-tail web search fallback

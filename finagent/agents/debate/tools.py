@@ -364,6 +364,54 @@ async def compute_trend_regime(ticker: str, window_days: int = 252) -> str:
 
 
 @function_tool
+async def arima_forecast(
+    ticker: str,
+    lookback_days: int = 365,
+    forecast_days: int = 20,
+) -> str:
+    """Fit a SARIMA model and forecast future prices as a quantitative trend signal.
+
+    Internally runs a small grid-search over (p,d,q) ∈ {0,1,2}×{0,1}×{0,1,2}
+    and three seasonal options (none, weekly AR/MA, weekly seasonal-MA),
+    picks the model with the lowest AIC, and emits a forecast for the
+    next ``forecast_days`` trading days with 95% confidence intervals.
+
+    Use this in addition to (not instead of) compute_trend_indicators
+    and plot_ohlc_chart. ARIMA gives you a *number* with a CI ("ARIMA
+    forecasts +2.3% over 20d, 95% CI [-1.1%, +5.7%]"); the chart and
+    indicators give you the visual / level reads. Cite the ARIMA result
+    as one quantitative anchor in your KEY DATA section.
+
+    Args:
+        ticker: Yahoo-format ticker (e.g. "TATATECH.NS", "AAPL").
+        lookback_days: History window for the fit, 90-1825. Default 365.
+        forecast_days: Trading days to project forward, 1-60. Default 20.
+
+    Returns:
+        JSON of {ticker, status, best_order, best_seasonal_order, aic, bic,
+        forecast (list of {date, mean, lower_95, upper_95}), forecast_return_pct,
+        forecast_return_lower_pct, forecast_return_upper_pct, signal, summary}.
+        ``signal`` is "bullish" (CI lower bound > 0), "bearish" (CI upper < 0),
+        or "neutral" (CI straddles zero — the most common case).
+    """
+    try:
+        from findata.arima_forecast import fit_arima_forecast as _fit
+        return json.dumps(
+            _fit(ticker, lookback_days=lookback_days, forecast_days=forecast_days),
+            default=str,
+        )
+    except Exception as exc:
+        logging.exception("arima_forecast failed ticker=%r", ticker)
+        return json.dumps({
+            "ticker": ticker,
+            "status": "wrapper_error",
+            "error": f"{type(exc).__name__}: {exc}",
+            "signal": "neutral",
+            "summary": f"ARIMA unavailable for {ticker}: {exc}",
+        })
+
+
+@function_tool
 async def plot_ohlc_chart(
     ticker: str,
     lookback_days: int = 252,
@@ -416,9 +464,16 @@ async def plot_ohlc_chart(
         return json.dumps(result, default=str)
     except Exception as exc:
         logging.exception("plot_ohlc_chart failed ticker=%r", ticker)
+        msg = f"{type(exc).__name__}: {exc}"
+        # Synthesise a paste-ready italic fallback so the agent can still
+        # follow the "paste markdown_image verbatim" instruction without
+        # improvising an apologetic generic-error sentence.
         return json.dumps({
-            "error": str(exc), "ticker": ticker,
-            "image_base64": "", "markdown_image": "",
+            "ticker": ticker,
+            "error": msg,
+            "image_base64": "",
+            "markdown_image": f"*Chart unavailable for {ticker}: {msg}*",
+            "chart_status": "wrapper_error",
         })
 
 
@@ -437,6 +492,7 @@ __all__ = [
     "detect_candlestick_patterns",
     "compute_support_resistance",
     "compute_trend_indicators",
+    "arima_forecast",
     "compute_trend_regime",
     "plot_ohlc_chart",
 ]
