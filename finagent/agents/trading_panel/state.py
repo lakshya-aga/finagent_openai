@@ -45,6 +45,7 @@ class PanelState(TypedDict, total=False):
     market_report: Optional[str]
     news_report: Optional[str]
     fundamentals_report: Optional[str]
+    macro_report: Optional[str]
 
     # ── Stage 1b: tool-call evidence captured per analyst ──
     # Same shape as the existing finagent.debate evidence trail so the
@@ -89,6 +90,7 @@ def initial_state(
         market_report=None,
         news_report=None,
         fundamentals_report=None,
+        macro_report=None,
         evidence=[],
         investment_debate=InvestDebateState(
             bull_history="",

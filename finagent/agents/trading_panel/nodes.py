@@ -30,6 +30,7 @@ from .prompts import (
     BEAR_RESEARCHER_PROMPT,
     BULL_RESEARCHER_PROMPT,
     FUNDAMENTALS_ANALYST_PROMPT,
+    MACRO_ANALYST_PROMPT,
     MARKET_ANALYST_PROMPT,
     NEWS_ANALYST_PROMPT,
     PORTFOLIO_MANAGER_PROMPT,
@@ -39,7 +40,7 @@ from .prompts import (
 )
 from .schemas import PortfolioDecision, ResearchPlan, TraderProposal
 from .state import InvestDebateState, PanelState
-from .tools import FUNDAMENTALS_TOOLS, MARKET_TOOLS, NEWS_TOOLS
+from .tools import FUNDAMENTALS_TOOLS, MACRO_TOOLS, MARKET_TOOLS, NEWS_TOOLS
 
 
 logger = logging.getLogger(__name__)
@@ -230,6 +231,43 @@ async def fundamentals_analyst_node(state: PanelState) -> dict[str, Any]:
     return {"fundamentals_report": text, "evidence": state.get("evidence", []) + evidence}
 
 
+async def macro_analyst_node(state: PanelState) -> dict[str, Any]:
+    """Macro analyst — runs AFTER the fundamentals analyst so its prompt
+    can reference the company's debt + margin profile when reasoning
+    about rate sensitivity and inflation pass-through."""
+    await _emit({"type": "phase", "phase": "macro_analyst", "state": "start"})
+    llm = make_chat_for_role("panel_analyst")
+    # Hint country from asset_class so the macro tool can do the right
+    # thing for .NS (still pulls US-side macro + USD/INR + a flag note).
+    country_hint = "IN" if state.get("asset_class", "").lower().startswith("indian") else "US"
+    sys_prompt = MACRO_ANALYST_PROMPT.format(
+        ticker=state["ticker"], today_iso=state["today_iso"],
+    )
+    # Pass the fundamentals report through as part of the user prompt so
+    # the macro analyst can connect macro to the company's specific
+    # balance sheet / margin profile rather than writing generic essays.
+    fundamentals_excerpt = state.get("fundamentals_report") or "(not available)"
+    user_prompt = (
+        f"Asset: {state['ticker']} ({state['asset_class']}). "
+        f"Country hint for fetch_macro_snapshot: '{country_hint}'.\n\n"
+        f"For your reasoning about debt-financing cost + margin pressure, "
+        f"the fundamentals analyst's report is:\n\n"
+        f"---\n{fundamentals_excerpt}\n---\n\n"
+        f"Run the macro tool kit and write the report — connect each "
+        f"macro print to the specific company in the fundamentals excerpt."
+    )
+    text, evidence = await _run_tool_loop(
+        llm=llm, tools=MACRO_TOOLS,
+        system_prompt=sys_prompt, user_prompt=user_prompt,
+        speaker="macro_analyst", phase="macro_analyst",
+        panel_state=state,
+    )
+    await _emit({"type": "message", "phase": "macro_analyst",
+                 "speaker": "macro_analyst", "text": text})
+    await _emit({"type": "phase", "phase": "macro_analyst", "state": "end"})
+    return {"macro_report": text, "evidence": state.get("evidence", []) + evidence}
+
+
 # ── Stage 2: bull / bear ────────────────────────────────────────────
 
 
@@ -239,6 +277,7 @@ def _format_analyst_reports(state: PanelState) -> str:
         ("Market analyst", "market_report"),
         ("News analyst", "news_report"),
         ("Fundamentals analyst", "fundamentals_report"),
+        ("Macro analyst", "macro_report"),
     ):
         body = state.get(key) or ""
         if body:

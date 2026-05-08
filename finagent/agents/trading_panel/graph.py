@@ -34,6 +34,7 @@ from .nodes import (
     bear_researcher_node,
     bull_researcher_node,
     fundamentals_analyst_node,
+    macro_analyst_node,
     market_analyst_node,
     news_analyst_node,
     portfolio_manager_node,
@@ -69,6 +70,7 @@ def build_panel_graph() -> "StateGraph":
     g.add_node("market_analyst", market_analyst_node)
     g.add_node("news_analyst", news_analyst_node)
     g.add_node("fundamentals_analyst", fundamentals_analyst_node)
+    g.add_node("macro_analyst", macro_analyst_node)
     g.add_node("bull_researcher", bull_researcher_node)
     g.add_node("bear_researcher", bear_researcher_node)
     g.add_node("research_manager", research_manager_node)
@@ -76,11 +78,15 @@ def build_panel_graph() -> "StateGraph":
     g.add_node("risk_debator", risk_debator_node)
     g.add_node("portfolio_manager", portfolio_manager_node)
 
-    # Edges
+    # Edges. Macro lands AFTER fundamentals so its prompt can read the
+    # company's debt + margin profile while reasoning about rate
+    # sensitivity. Researchers see all four analyst reports before
+    # arguing.
     g.add_edge(START, "market_analyst")
     g.add_edge("market_analyst", "news_analyst")
     g.add_edge("news_analyst", "fundamentals_analyst")
-    g.add_edge("fundamentals_analyst", "bull_researcher")
+    g.add_edge("fundamentals_analyst", "macro_analyst")
+    g.add_edge("macro_analyst", "bull_researcher")
 
     # Bull/bear back-and-forth, controlled by _should_continue_debate.
     g.add_conditional_edges(

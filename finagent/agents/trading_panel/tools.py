@@ -182,6 +182,39 @@ def arima_forecast(
 
 
 @tool
+def fetch_macro_snapshot(country: str = "US") -> str:
+    """Curated macro snapshot — interest rates, inflation, growth, credit
+    spreads, FX, commodities — plus 30/90/365-day changes for each.
+
+    One call, ~25 indicators grouped by theme. Use this to ground claims
+    about debt-financing cost (rates), demand (consumer sentiment / PMI),
+    sector rotation (curve shape), risk appetite (credit spreads + VIX).
+
+    For .NS / Indian tickers pass country='IN' — the snapshot still
+    returns the US-side macro plus USD/INR + dollar index, with a note
+    flagging which Indian-domestic series aren't on FRED.
+
+    Returns JSON with keys: indicators (label → value/unit/changes),
+    groups (theme → [labels]), summary (one-line regime read), as_of.
+    """
+    from findata.macro_indicators import get_macro_snapshot
+    return _safe_call("fetch_macro_snapshot", get_macro_snapshot, country=country)
+
+
+@tool
+def fetch_yield_curve() -> str:
+    """US Treasury yield curve snapshot — every tenor (3M to 30Y), plus the
+    same curve a year ago for shape comparison. Use this to read whether
+    the curve is inverted / flat / steepening, which drives sector rotation
+    (banks ⇄ rates, REITs ⇄ long end, growth ⇄ short end).
+
+    Returns JSON: {today: [{tenor, yield}], one_year_ago: [...], summary}.
+    """
+    from findata.macro_indicators import get_yield_curve
+    return _safe_call("fetch_yield_curve", get_yield_curve)
+
+
+@tool
 def plot_ohlc_chart(
     ticker: str,
     lookback_days: int = 252,
@@ -232,6 +265,11 @@ FUNDAMENTALS_TOOLS = [
     fetch_returns_stats,
 ]
 
+MACRO_TOOLS = [
+    fetch_macro_snapshot,
+    fetch_yield_curve,
+]
+
 
 __all__ = [
     "fetch_yfinance_news", "fetch_gdelt_news",
@@ -240,5 +278,6 @@ __all__ = [
     "compute_trend_indicators", "compute_support_resistance",
     "detect_candlestick_patterns", "compute_trend_regime",
     "arima_forecast", "plot_ohlc_chart",
-    "MARKET_TOOLS", "NEWS_TOOLS", "FUNDAMENTALS_TOOLS",
+    "fetch_macro_snapshot", "fetch_yield_curve",
+    "MARKET_TOOLS", "NEWS_TOOLS", "FUNDAMENTALS_TOOLS", "MACRO_TOOLS",
 ]
