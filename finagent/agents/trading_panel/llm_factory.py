@@ -39,35 +39,39 @@ logger = logging.getLogger(__name__)
 # ── Role defaults ───────────────────────────────────────────────────
 
 
-# Defaults: **OpenAI**. Cheap-and-fast on quick roles, gpt-4o on the two
-# deep-thinking roles (Research Manager + Portfolio Manager) where the
-# structured-output adherence matters most.
+# Defaults: **gpt-5-mini for every role**. Single-model panel keeps
+# cost + observability simple, and gpt-5-mini's structured-output
+# adherence is good enough that we don't need the gpt-4o uplift on
+# the deep-thinking roles.
 #
-# Approximate cost per panel run with these defaults:
-#   3 analysts × ~6 tool calls each   ~$0.03
-#   bull/bear × 2 rounds              ~$0.02
-#   research_mgr + trader + risk + pm ~$0.10
+# Approximate cost per panel run:
+#   3 analysts × ~6 tool calls each   ~$0.05
+#   macro analyst × ~2 tool calls     ~$0.02
+#   bull/bear × 1 round               ~$0.02
+#   research_mgr + trader + risk + pm ~$0.08
 #   ────────────────────────────────────────
-#   ≈ $0.15-0.25 per ticker
+#   ≈ $0.15-0.20 per ticker
 #
-# Daily Nifty 5-stock cron @ ~$1/day ≈ $25-40/month. Within reason.
+# Daily Nifty 5-stock cron @ ~$0.75/day ≈ $25/month. Within reason.
+#
+# To bump deep-thinking roles to full gpt-5 (sharper structured output
+# at ~10× the per-token cost) when output quality matters:
+#   export PANEL_RESEARCH_MANAGER_MODEL=openai:gpt-5
+#   export PANEL_PM_MODEL=openai:gpt-5
 #
 # To flip the panel onto self-hosted Qwen later:
 #   export PANEL_DEFAULT_MODEL=ollama:qwen2.5:14b-instruct
-#   # …or per role:
-#   export PANEL_PM_MODEL=ollama:qwen2.5:32b-instruct
 # (and ensure an Ollama daemon is reachable at OLLAMA_BASE_URL).
 #
 # To swap to Anthropic:
 #   export PANEL_DEFAULT_MODEL=anthropic:claude-haiku-4-5
-#   export PANEL_PM_MODEL=anthropic:claude-sonnet-4-5
 _ROLE_DEFAULTS: dict[str, tuple[str, str]] = {
-    "panel_analyst":          ("openai", "gpt-4o-mini"),
-    "panel_researcher":       ("openai", "gpt-4o-mini"),
-    "panel_research_manager": ("openai", "gpt-4o"),
-    "panel_trader":           ("openai", "gpt-4o-mini"),
-    "panel_risk":             ("openai", "gpt-4o-mini"),
-    "panel_pm":               ("openai", "gpt-4o"),
+    "panel_analyst":          ("openai", "gpt-5-mini"),
+    "panel_researcher":       ("openai", "gpt-5-mini"),
+    "panel_research_manager": ("openai", "gpt-5-mini"),
+    "panel_trader":           ("openai", "gpt-5-mini"),
+    "panel_risk":             ("openai", "gpt-5-mini"),
+    "panel_pm":               ("openai", "gpt-5-mini"),
 }
 
 
