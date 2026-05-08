@@ -17,6 +17,7 @@ existing finagent.debate flow produces.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -185,11 +186,27 @@ async def _run_tool_loop(
             if tool_fn is None:
                 output = json.dumps({"error": f"unknown tool: {tool_name}"})
             else:
+                # 60s per-tool hard timeout. yfinance has no built-in
+                # timeout and can hang indefinitely on a network blip
+                # or rate-limit; without this cap a single bad tool
+                # call freezes the whole panel. 60s is generous for
+                # any of our findata calls (typical: 1-5s).
                 try:
-                    output = await tool_fn.ainvoke(tool_args)
-                except NotImplementedError:
-                    # Tool isn't async-native — call sync.
-                    output = tool_fn.invoke(tool_args)
+                    async def _invoke():
+                        try:
+                            return await tool_fn.ainvoke(tool_args)
+                        except NotImplementedError:
+                            return await asyncio.to_thread(tool_fn.invoke, tool_args)
+                    output = await asyncio.wait_for(_invoke(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "trading_panel: tool %s hung past 60s, killing call",
+                        tool_name,
+                    )
+                    output = json.dumps({
+                        "error": "tool call timed out after 60s (likely yfinance rate-limit or hung network)",
+                        "tool": tool_name,
+                    })
                 except Exception as exc:
                     logger.exception(
                         "trading_panel: tool %s raised", tool_name,
