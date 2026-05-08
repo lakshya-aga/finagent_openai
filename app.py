@@ -38,6 +38,60 @@ async def _startup():
     # Scheduler must start AFTER the FastAPI event loop is running so
     # AsyncIOScheduler hooks the same loop the cron job needs to use.
     start_scheduler()
+    # Chart smoke-test: every container restart fires plot_ohlc_chart
+    # for one US + one Indian ticker. Surfaces tz/dtype/upstream
+    # regressions immediately rather than waiting for a debate to hit
+    # them. Fire-and-forget so a slow upstream doesn't block startup.
+    asyncio.create_task(_chart_smoke_test())
+
+
+async def _chart_smoke_test() -> None:
+    """Run the ohlc_chart diagnostic and log results.
+
+    Mirrors `findata-diagnostics --only ohlc_chart` but fires inside the
+    finagent process, where the chart actually runs at debate time.
+    Catching regressions here instead of in data-mcp's container is
+    important because finagent's pip install of `git+...data-mcp.git`
+    can serve a stale layer if the deploy didn't use --no-cache.
+    """
+    # Tiny grace period — let FastAPI finish bringing the rest of the
+    # app online before we hit yfinance. No correctness reason; just
+    # keeps the startup log readable.
+    await asyncio.sleep(2.0)
+    try:
+        from findata.ohlc_chart import plot_ohlc_chart
+    except ImportError as e:
+        logging.warning("chart_smoke: findata.ohlc_chart unavailable (%s)", e)
+        return
+
+    for ticker in ("AAPL", "RELIANCE.NS"):
+        try:
+            out = await asyncio.to_thread(
+                plot_ohlc_chart, ticker,
+                lookback_days=60, with_sr=False, with_indicators=False,
+            )
+        except Exception as e:
+            logging.error(
+                "chart_smoke: %s raised %s: %s — investigate immediately "
+                "(this means plot_ohlc_chart's own try/except didn't catch a "
+                "code path it should have)",
+                ticker, type(e).__name__, e,
+            )
+            continue
+        status = out.get("chart_status", "?")
+        if status == "ok":
+            logging.info("chart_smoke: %s OK", ticker)
+        elif status == "no_data":
+            logging.warning(
+                "chart_smoke: %s no_data — likely yfinance rate-limit, "
+                "not a code bug", ticker,
+            )
+        else:
+            logging.error(
+                "chart_smoke: %s status=%s summary=%r — REGRESSION, "
+                "investigate before charts ship to users",
+                ticker, status, (out.get("summary") or "")[:160],
+            )
 
 
 @app.on_event("shutdown")
