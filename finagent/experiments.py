@@ -202,6 +202,11 @@ class Debate:
     verdict_json: Optional[str]
     error: Optional[str]
     source: str = "user"  # 'user' (manual) or 'scheduled' (cron)
+    # Tool-call evidence trail captured from each agent's RunResult.
+    # Stored as a JSON-serialised list of {phase, speaker, tool, args,
+    # output, call_id, ts}. Lets the detail page show the user exactly
+    # which articles/fundamentals/forecasts each side cited.
+    evidence_json: str = "[]"
 
     def transcript(self) -> list[dict[str, Any]]:
         try:
@@ -218,12 +223,21 @@ class Debate:
         except Exception:
             return None
 
+    def evidence(self) -> list[dict[str, Any]]:
+        try:
+            raw = json.loads(self.evidence_json) if self.evidence_json else []
+            return raw if isinstance(raw, list) else []
+        except Exception:
+            return []
+
     def as_public_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["transcript"] = self.transcript()
         d["verdict"] = self.verdict()
+        d["evidence"] = self.evidence()
         d.pop("transcript_json", None)
         d.pop("verdict_json", None)
+        d.pop("evidence_json", None)
         return d
 
 
@@ -341,7 +355,10 @@ CREATE TABLE IF NOT EXISTS debates (
     transcript_json TEXT NOT NULL DEFAULT '[]',
     verdict_json    TEXT,
     error           TEXT,
-    source          TEXT NOT NULL DEFAULT 'user'  -- 'user' | 'scheduled'
+    source          TEXT NOT NULL DEFAULT 'user',  -- 'user' | 'scheduled'
+    -- Tool-call evidence trail captured from each agent's RunResult.
+    -- See debate.py::_extract_tool_evidence for the record shape.
+    evidence_json   TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_debates_started ON debates(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_debates_ticker  ON debates(ticker);
@@ -396,6 +413,10 @@ class ExperimentStore:
             existing_dbates = set()
         if existing_dbates and "source" not in existing_dbates:
             conn.execute("ALTER TABLE debates ADD COLUMN source TEXT NOT NULL DEFAULT 'user'")
+        if existing_dbates and "evidence_json" not in existing_dbates:
+            conn.execute(
+                "ALTER TABLE debates ADD COLUMN evidence_json TEXT NOT NULL DEFAULT '[]'"
+            )
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -661,6 +682,7 @@ class ExperimentStore:
         status: Optional[str] = None,
         transcript: Optional[list[dict]] = None,
         verdict: Optional[dict] = None,
+        evidence: Optional[list[dict]] = None,
         error: Optional[str] = None,
         finished: bool = False,
     ) -> None:
@@ -672,6 +694,8 @@ class ExperimentStore:
             sets.append("transcript_json = ?"); args.append(json.dumps(transcript, default=str))
         if verdict is not None:
             sets.append("verdict_json = ?"); args.append(json.dumps(verdict, default=str))
+        if evidence is not None:
+            sets.append("evidence_json = ?"); args.append(json.dumps(evidence, default=str))
         if error is not None:
             sets.append("error = ?"); args.append(error)
         if finished:
@@ -938,6 +962,7 @@ def _row_to_debate(row: sqlite3.Row) -> Debate:
         verdict_json=row["verdict_json"],
         error=row["error"],
         source=(row["source"] if "source" in keys else "user") or "user",
+        evidence_json=(row["evidence_json"] if "evidence_json" in keys else "[]") or "[]",
     )
 
 

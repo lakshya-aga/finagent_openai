@@ -47,6 +47,108 @@ async def _noop_emit(_: dict) -> None:
     return None
 
 
+# Per-tool output cap. We persist the full output so the UI can render
+# real article titles + URLs + values; charts (~50KB base64 per call)
+# are the only outputs that warrant truncation here. The truncated path
+# strips the base64 so we keep title + summary but drop the bytes.
+_OUTPUT_CAP_DEFAULT = 64_000   # ~64 KB per tool output, plenty for news/fundamentals
+_OUTPUT_CAP_CHART = 1_000      # chart base64 stripped — bytes already shown inline
+
+
+def _trim_chart_output(raw: str) -> str:
+    """plot_ohlc_chart returns ~50KB base64 inside its JSON; the chart
+    is already rendered inline in the message text via markdown_image,
+    so for evidence persistence we strip image_base64 to keep payloads
+    small. Keep title / summary / chart_status / params for context."""
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            obj.pop("image_base64", None)
+            # Truncate the markdown_image field too — it embeds the same
+            # base64. The agent's own message text contains the full one.
+            mi = obj.get("markdown_image") or ""
+            if len(mi) > 200:
+                obj["markdown_image"] = mi[:160] + "…(truncated)"
+            return json.dumps(obj, ensure_ascii=False)
+    except Exception:
+        pass
+    return raw[:_OUTPUT_CAP_CHART]
+
+
+def _extract_tool_evidence(
+    result: Any, *, phase: str, speaker: str
+) -> list[dict]:
+    """Walk Runner.run() result.new_items and pair tool-call → tool-output.
+
+    Each pair becomes one evidence record with the tool name, arguments,
+    and the FULL output (subject to per-tool size caps). The UI groups
+    by speaker so the user sees exactly which evidence each side cited.
+
+    Returns a list of:
+        {phase, speaker, tool, args (str), output (str), call_id, ts}
+    """
+    pending: dict[str, dict] = {}
+    out: list[dict] = []
+    now = time.time()
+
+    for item in getattr(result, "new_items", []) or []:
+        cls_name = type(item).__name__
+        ri = getattr(item, "raw_item", None)
+        if ri is None:
+            continue
+        ri_type = getattr(ri, "type", "") or ""
+
+        # Tool call (the model decided to invoke a function tool).
+        if cls_name == "ToolCallItem" or ri_type in ("function_call", "tool_call"):
+            call_id = (
+                getattr(ri, "call_id", None) or getattr(ri, "id", None) or ""
+            )
+            name = getattr(ri, "name", "") or "tool"
+            args = getattr(ri, "arguments", "") or ""
+            if isinstance(args, (dict, list)):
+                try:
+                    args = json.dumps(args, ensure_ascii=False)
+                except Exception:
+                    args = str(args)
+            pending[call_id] = {
+                "phase": phase,
+                "speaker": speaker,
+                "tool": str(name),
+                "args": str(args)[:4_000],   # arg blobs are small; 4K cap is generous
+                "call_id": str(call_id),
+                "ts": now,
+            }
+
+        # Tool output (the function returned).
+        elif cls_name == "ToolCallOutputItem" or ri_type == "function_call_output":
+            call_id = getattr(ri, "call_id", None) or ""
+            base = pending.pop(
+                call_id,
+                {
+                    "phase": phase, "speaker": speaker,
+                    "tool": "unknown", "args": "",
+                    "call_id": str(call_id), "ts": now,
+                },
+            )
+            raw_output = str(getattr(ri, "output", "") or "")
+            tool_name = base.get("tool", "")
+            if tool_name == "plot_ohlc_chart":
+                base["output"] = _trim_chart_output(raw_output)
+            else:
+                base["output"] = raw_output[:_OUTPUT_CAP_DEFAULT]
+            out.append(base)
+
+    # Surface any orphan calls (no matched output — rare, but possible
+    # if the worker timed out mid-call). Keep them so the UI can show
+    # "this tool was attempted" rather than silently swallow.
+    for v in pending.values():
+        v["output"] = ""
+        v.setdefault("orphan", True)
+        out.append(v)
+
+    return out
+
+
 async def run_debate(
     ticker: str,
     asset_class: str = "us_equity",
@@ -109,6 +211,20 @@ async def run_debate(
     today_str = now_dt.strftime("%Y-%m-%d (%A)")
 
     transcript: list[dict] = []
+    # Evidence trail: every tool call from every agent run, grouped by
+    # speaker. Surfaced both via streaming (for live UIs) and persisted
+    # on the debate row so the detail page can show "what the bull
+    # actually read before claiming a +12% target".
+    evidence: list[dict] = []
+
+    async def _emit_evidence_batch(records: list[dict]) -> None:
+        """Stream each tool call as its own event so live UIs can append
+        them under the right speaker without waiting for the turn to end."""
+        for rec in records:
+            await emit({
+                "type": "tool_call",
+                **rec,
+            })
 
     async def _emit_phase(phase: str, speaker: Optional[str] = None) -> None:
         await emit({
@@ -167,6 +283,11 @@ async def run_debate(
                     max_turns=20,
                 )
             last_bull_text = bull_result.final_output_as(str)
+            bull_ev = _extract_tool_evidence(
+                bull_result, phase=phase, speaker="bull_analyst",
+            )
+            evidence.extend(bull_ev)
+            await _emit_evidence_batch(bull_ev)
             await _emit_message("bull_analyst", phase, last_bull_text)
 
             # ─── Bear turn ─────────────────────────────────────────
@@ -189,6 +310,11 @@ async def run_debate(
                     max_turns=20,
                 )
             last_bear_text = bear_result.final_output_as(str)
+            bear_ev = _extract_tool_evidence(
+                bear_result, phase=phase, speaker="bear_analyst",
+            )
+            evidence.extend(bear_ev)
+            await _emit_evidence_batch(bear_ev)
             await _emit_message("bear_analyst", phase, last_bear_text)
 
         # ─── Moderator verdict ──────────────────────────────────────
@@ -209,6 +335,14 @@ async def run_debate(
         )
         verdict_obj: DebateVerdict = mod_result.final_output_as(DebateVerdict)
         verdict_dict = verdict_obj.model_dump()
+        # Moderator typically has no tools (just synthesises), but capture
+        # any anyway — keeps the contract consistent for future variants.
+        mod_ev = _extract_tool_evidence(
+            mod_result, phase="verdict", speaker="moderator",
+        )
+        if mod_ev:
+            evidence.extend(mod_ev)
+            await _emit_evidence_batch(mod_ev)
         await emit({
             "type": "verdict",
             "phase": "verdict",
@@ -226,6 +360,7 @@ async def run_debate(
                     status="completed",
                     transcript=transcript,
                     verdict=verdict_dict,
+                    evidence=evidence,
                     finished=True,
                 )
             except Exception:
@@ -246,6 +381,7 @@ async def run_debate(
                     debate_id,
                     status="failed",
                     transcript=transcript,
+                    evidence=evidence,
                     error=str(exc),
                     finished=True,
                 )
@@ -260,6 +396,7 @@ async def run_debate(
         "asset_class": asset_class,
         "rounds": rounds,
         "transcript": transcript,
+        "evidence": evidence,
         "verdict": verdict_dict,
         "started_at": started_at,
         "finished_at": finished_at,
