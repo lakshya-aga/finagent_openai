@@ -50,7 +50,7 @@ def _safe_call(fn_name: str, fn, **kwargs) -> str:
 
 
 @tool
-def fetch_yfinance_news(ticker: str, max_articles: int = 15) -> str:
+def fetch_yfinance_news(ticker: str, max_records: int = 15) -> str:
     """Fetch recent yfinance news headlines for a ticker.
 
     Returns JSON: {ticker, articles: [{title, publisher, link, ts, ...}]}.
@@ -58,28 +58,37 @@ def fetch_yfinance_news(ticker: str, max_articles: int = 15) -> str:
     """
     from findata.news_yfinance import get_yfinance_news
     return _safe_call("fetch_yfinance_news", get_yfinance_news,
-                      ticker=ticker, max_articles=max_articles)
+                      ticker=ticker, max_records=max_records)
 
 
 @tool
 def fetch_gdelt_news(
-    ticker: str,
     company_query: str,
     sector_query: str = "",
-    days_back: int = 7,
+    days: int = 7,
     max_records: int = 25,
 ) -> str:
-    """Fetch GDELT news with tone scores for a company + its sector.
+    """Fetch GDELT news with tone scores for a company AND its sector.
 
-    Two parallel queries: one for the company name, one for the sector.
+    Two parallel GDELT queries:
+      - ``company_query`` (required, e.g. "Apple Inc iPhone Services" or
+        "Reliance Industries petrochemicals")
+      - ``sector_query`` (optional, e.g. "consumer electronics" or
+        "Indian conglomerates")
+
     Returns JSON with both result lists, each article carrying
     {title, source, url, ts, tone}. Tone ∈ [-10, 10]; positive = upbeat.
     Use the tone column to weight headlines (don't just count them).
+
+    Note: NO ``ticker`` parameter — GDELT is keyword-based, not symbol-
+    based. Pass a natural-language company name as company_query.
     """
     from findata.news_gdelt import get_gdelt_news
+    sector = sector_query if sector_query else None
     return _safe_call("fetch_gdelt_news", get_gdelt_news,
-                      ticker=ticker, company_query=company_query,
-                      sector_query=sector_query, days_back=days_back,
+                      company_query=company_query,
+                      sector_query=sector,
+                      days=days,
                       max_records=max_records)
 
 
@@ -88,38 +97,61 @@ def fetch_gdelt_news(
 
 @tool
 def fetch_equity_fundamentals(ticker: str) -> str:
-    """30 fundamentals fields for an equity (P/E, P/B, ROE, op margin, FCF,
-    balance sheet ratios, etc.). One yfinance Ticker.info call. JSON."""
+    """30 fundamentals fields via yfinance: name / sector / industry,
+    market_cap, P/E (trailing + forward), PEG, P/B, P/S, EV/EBITDA,
+    EV/revenue, profit_margin, operating_margin, gross_margin, ROE, ROA,
+    revenue_growth, earnings_growth, total_cash, total_debt,
+    free_cash_flow, operating_cash, dividend_yield, payout_ratio, beta,
+    current_price, 52w high/low. JSON."""
     from findata.fundamentals import get_equity_fundamentals
-    return _safe_call("fetch_equity_fundamentals", get_equity_fundamentals,
-                      ticker=ticker)
+    # findata.get_equity_fundamentals takes a LIST of tickers and returns
+    # a DataFrame; one row per ticker. Wrap the singular @tool param into
+    # a list and convert the row-frame to a dict for the agent.
+    return _safe_call(
+        "fetch_equity_fundamentals",
+        lambda **kw: get_equity_fundamentals(tickers=[kw["ticker"]]).to_dict(orient="index"),
+        ticker=ticker,
+    )
 
 
 @tool
 def fetch_analyst_consensus(ticker: str) -> str:
-    """Sell-side consensus: target high/mean/low, recommendation, # analysts,
-    upside_pct vs current. JSON."""
+    """Wall-Street consensus: target_mean/high/low/median, current_price,
+    implied upside %, recommendation key (strong_buy/buy/hold/.../sell),
+    recommendation mean (1=strong_buy, 5=sell), # analysts. JSON."""
     from findata.analyst_consensus import get_analyst_consensus
-    return _safe_call("fetch_analyst_consensus", get_analyst_consensus,
-                      ticker=ticker)
+    return _safe_call(
+        "fetch_analyst_consensus",
+        lambda **kw: get_analyst_consensus(tickers=[kw["ticker"]]).to_dict(orient="index"),
+        ticker=ticker,
+    )
 
 
 @tool
 def fetch_earnings_calendar(ticker: str) -> str:
-    """Past earnings (date, EPS estimate, EPS actual, surprise %) +
-    upcoming earnings dates. JSON."""
+    """Past + upcoming earnings rows. Each row: date, EPS estimate,
+    EPS actual, surprise %, is_past flag. JSON."""
     from findata.earnings_calendar import get_earnings_calendar
-    return _safe_call("fetch_earnings_calendar", get_earnings_calendar,
-                      ticker=ticker)
+    return _safe_call(
+        "fetch_earnings_calendar",
+        lambda **kw: get_earnings_calendar(ticker=kw["ticker"]).reset_index().to_dict(orient="records"),
+        ticker=ticker,
+    )
 
 
 @tool
-def fetch_returns_stats(ticker: str, lookback_days: int = 504) -> str:
-    """Risk + return metrics: annual return, vol, sharpe, max DD, beta vs
-    SPY, alpha. lookback_days default 504 (~2y trading days). JSON."""
+def fetch_returns_stats(ticker: str, window_days: int = 252) -> str:
+    """Annualised vol / Sharpe / max DD / beta vs SPY / alpha over a
+    rolling window. window_days default 252 (~1y trading days). JSON.
+    Note: parameter is ``window_days`` (matches findata signature)."""
     from findata.returns_stats import compute_returns_stats
-    return _safe_call("fetch_returns_stats", compute_returns_stats,
-                      ticker=ticker, lookback_days=lookback_days)
+    return _safe_call(
+        "fetch_returns_stats",
+        lambda **kw: compute_returns_stats(
+            ticker=kw["ticker"], window_days=kw["window_days"],
+        ).to_dict(),
+        ticker=ticker, window_days=window_days,
+    )
 
 
 # ── Technical analysis ──────────────────────────────────────────────
