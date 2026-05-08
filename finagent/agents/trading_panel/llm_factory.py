@@ -197,16 +197,22 @@ def make_chat(spec: str, **kw: Any):
             f"unknown provider {provider!r}. Available: "
             f"{sorted(_PROVIDER_FACTORIES.keys())}"
         )
-    # Default temperature: low — every panel role benefits from
-    # consistency more than from creativity. Override per call site
-    # if needed (e.g. researchers might want 0.5 for argument variety).
-    kw.setdefault("temperature", 0.3)
-    # Default per-request timeout: 120s. Without this, a hung OpenAI
-    # request (silent timeout on gpt-5 family, 429 retry-loop, etc.)
+
+    # gpt-5 family quirks: temperature is locked to 1.0 server-side
+    # (any other value silently destabilises the request — observed as
+    # an indefinite hang in the panel before timeouts were added).
+    # Skip the default-temperature setdefault for gpt-5*.
+    is_gpt5 = provider == "openai" and model.lower().startswith("gpt-5")
+    if not is_gpt5:
+        # Default temperature: low — every panel role benefits from
+        # consistency more than creativity. gpt-5 ignores this.
+        kw.setdefault("temperature", 0.3)
+
+    # Default per-request timeout: 120s. Without this, a hung request
     # blocks the panel forever — the python process appears %CPU=0,
     # STATE=sleeping, and the user thinks the panel crashed silently.
-    # 120s is generous for a single chat completion; the panel runs
-    # ≥10 of these so cumulative budget stays sane.
+    # 120s is generous for a single chat completion; panel has ≥10
+    # calls so cumulative budget stays sane.
     kw.setdefault("timeout", 120)
     # Cap retries low so a model-tier issue surfaces fast instead of
     # hiding behind exponential backoff.
