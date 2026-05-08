@@ -39,30 +39,35 @@ logger = logging.getLogger(__name__)
 # ── Role defaults ───────────────────────────────────────────────────
 
 
-# Defaults: **Qwen via Ollama**. The whole panel runs against the
-# self-hosted ollama service so a full 8-agent run is essentially
-# free (compute time only). Two model sizes:
+# Defaults: **OpenAI**. Cheap-and-fast on quick roles, gpt-4o on the two
+# deep-thinking roles (Research Manager + Portfolio Manager) where the
+# structured-output adherence matters most.
 #
-#   qwen2.5:14b-instruct  — quick-thinking roles (analysts, researchers,
-#                           trader, risk debator). Tool-calling capable.
-#   qwen2.5:32b-instruct  — deep-thinking roles (research manager, PM).
-#                           Better structured-output adherence on the
-#                           ResearchPlan / PortfolioDecision schemas.
+# Approximate cost per panel run with these defaults:
+#   3 analysts × ~6 tool calls each   ~$0.03
+#   bull/bear × 2 rounds              ~$0.02
+#   research_mgr + trader + risk + pm ~$0.10
+#   ────────────────────────────────────────
+#   ≈ $0.15-0.25 per ticker
 #
-# Override per role via env: PANEL_ANALYST_MODEL=openai:gpt-4o-mini, etc.
-# Override the whole panel at once via PANEL_DEFAULT_MODEL.
+# Daily Nifty 5-stock cron @ ~$1/day ≈ $25-40/month. Within reason.
 #
-# To run on commercial models instead (cloud deploys without GPU):
-#   export PANEL_DEFAULT_MODEL=openai:gpt-4o-mini
-#   # …or per-role:
+# To flip the panel onto self-hosted Qwen later:
+#   export PANEL_DEFAULT_MODEL=ollama:qwen2.5:14b-instruct
+#   # …or per role:
+#   export PANEL_PM_MODEL=ollama:qwen2.5:32b-instruct
+# (and ensure an Ollama daemon is reachable at OLLAMA_BASE_URL).
+#
+# To swap to Anthropic:
+#   export PANEL_DEFAULT_MODEL=anthropic:claude-haiku-4-5
 #   export PANEL_PM_MODEL=anthropic:claude-sonnet-4-5
 _ROLE_DEFAULTS: dict[str, tuple[str, str]] = {
-    "panel_analyst":          ("ollama", "qwen2.5:14b-instruct"),
-    "panel_researcher":       ("ollama", "qwen2.5:14b-instruct"),
-    "panel_research_manager": ("ollama", "qwen2.5:32b-instruct"),
-    "panel_trader":           ("ollama", "qwen2.5:14b-instruct"),
-    "panel_risk":             ("ollama", "qwen2.5:14b-instruct"),
-    "panel_pm":               ("ollama", "qwen2.5:32b-instruct"),
+    "panel_analyst":          ("openai", "gpt-4o-mini"),
+    "panel_researcher":       ("openai", "gpt-4o-mini"),
+    "panel_research_manager": ("openai", "gpt-4o"),
+    "panel_trader":           ("openai", "gpt-4o-mini"),
+    "panel_risk":             ("openai", "gpt-4o-mini"),
+    "panel_pm":               ("openai", "gpt-4o"),
 }
 
 
