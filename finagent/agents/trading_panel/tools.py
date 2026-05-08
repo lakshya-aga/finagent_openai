@@ -53,11 +53,27 @@ def _safe_call(fn_name: str, fn, **kwargs) -> str:
 def fetch_yfinance_news(ticker: str, max_records: int = 15) -> str:
     """Fetch recent yfinance news headlines for a ticker.
 
-    Returns JSON: {ticker, articles: [{title, publisher, link, ts, ...}]}.
+    Returns JSON: {ticker, articles: [{ts, title, publisher, link,
+    summary}, ...]}. Real article URLs in the ``link`` field — paste
+    them as-is into reports, do NOT replace with placeholders.
     Best for US-listed equities; sparse coverage for .NS tickers.
     """
     from findata.news_yfinance import get_yfinance_news
-    return _safe_call("fetch_yfinance_news", get_yfinance_news,
+
+    def _call(**kw):
+        df = get_yfinance_news(**kw)
+        # Convert DataFrame → list of dicts with full URLs preserved.
+        # Plain str() / __repr__ truncates the 'link' column (pandas
+        # default max_colwidth=50), which causes the LLM to hallucinate
+        # placeholder URLs like example.com.
+        if df is None or df.empty:
+            return {"ticker": kw.get("ticker"), "articles": []}
+        return {
+            "ticker": kw.get("ticker"),
+            "articles": df.reset_index().to_dict(orient="records"),
+        }
+
+    return _safe_call("fetch_yfinance_news", _call,
                       ticker=ticker, max_records=max_records)
 
 
@@ -76,16 +92,30 @@ def fetch_gdelt_news(
       - ``sector_query`` (optional, e.g. "consumer electronics" or
         "Indian conglomerates")
 
-    Returns JSON with both result lists, each article carrying
-    {title, source, url, ts, tone}. Tone ∈ [-10, 10]; positive = upbeat.
-    Use the tone column to weight headlines (don't just count them).
+    Returns JSON with two arrays (``company`` + ``sector``), each article
+    carrying {title, source, url, ts, tone}. Tone ∈ [-10, 10]; positive
+    = upbeat. The ``url`` field carries the real GDELT article link —
+    paste verbatim, never substitute a placeholder.
 
     Note: NO ``ticker`` parameter — GDELT is keyword-based, not symbol-
     based. Pass a natural-language company name as company_query.
     """
     from findata.news_gdelt import get_gdelt_news
+
+    def _call(**kw):
+        result = get_gdelt_news(**kw)
+        # get_gdelt_news returns dict[str, DataFrame]. Convert each frame
+        # to records so URLs survive the json.dumps round-trip intact.
+        out = {}
+        for key, df in (result or {}).items():
+            if df is None or df.empty:
+                out[key] = []
+            else:
+                out[key] = df.reset_index().to_dict(orient="records")
+        return out
+
     sector = sector_query if sector_query else None
-    return _safe_call("fetch_gdelt_news", get_gdelt_news,
+    return _safe_call("fetch_gdelt_news", _call,
                       company_query=company_query,
                       sector_query=sector,
                       days=days,

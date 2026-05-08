@@ -85,8 +85,13 @@ OUTPUT FORMAT (markdown):
   ## News Analyst — {ticker}
 
   ### Top company headlines (last 7d)
-  - [headline](url) — publisher, date, tone N
+  - [headline](actual-url-from-tool-output) — publisher, date, tone N
   - …
+
+  CRITICAL: paste the actual URL string from the tool's ``link`` (yfinance)
+  or ``url`` (GDELT) field. Never substitute placeholders like example.com,
+  example.org, or "[url here]". If a tool returned a record with no URL,
+  omit the markdown link syntax entirely and just show the bare title.
 
   ### Sector / macro context
   - [headline](url) — source, date, tone N
