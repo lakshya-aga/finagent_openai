@@ -71,6 +71,70 @@ async def _emit(event: dict[str, Any]) -> None:
 # ── Tool-call evidence capture ──────────────────────────────────────
 
 
+def _summarise_tool_outcome(tool_name: str, output_str: str) -> str:
+    """One-line summary of a tool's outcome for the user-visible heartbeat.
+
+    Best-effort: parses output as JSON and picks fields that matter for
+    each known tool family. Falls back to a generic 'ok' / 'error' read.
+    Kept short (≤80 chars) so the streaming card stays compact.
+    """
+    if not output_str:
+        return "ok"
+    try:
+        obj = json.loads(output_str)
+    except Exception:
+        # Non-JSON output (rare) — return a clipped raw preview.
+        snippet = output_str.replace("\n", " ")[:60]
+        return snippet or "ok"
+
+    if not isinstance(obj, dict):
+        return f"{type(obj).__name__} returned"
+
+    # Error envelope (every wrapper produces this on failure).
+    if "error" in obj and obj.get("error"):
+        return f"error: {str(obj['error'])[:60]}"
+
+    # Per-tool natural summaries.
+    if "chart_status" in obj:
+        return f"chart {obj['chart_status']}"
+    if "articles" in obj:
+        return f"{len(obj.get('articles') or [])} article(s)"
+    if "company" in obj and "sector" in obj:  # GDELT shape
+        c = len(obj.get("company") or [])
+        s = len(obj.get("sector") or [])
+        return f"GDELT: {c} company + {s} sector article(s)"
+    if "best_order" in obj:
+        sig = obj.get("signal", "?")
+        ret = obj.get("forecast_return_pct")
+        bits = [f"ARIMA, {sig}"]
+        if isinstance(ret, (int, float)):
+            bits.append(f"{ret:+.2f}%")
+        return " · ".join(bits)
+    if "indicators" in obj:
+        return f"{len(obj.get('indicators') or {})} macro indicators"
+    if "today" in obj and "one_year_ago" in obj:
+        return f"yield curve: {obj.get('summary', 'ok')[:60]}"
+    if "patterns" in obj:
+        n = len(obj.get("patterns") or [])
+        return f"{n} candlestick pattern(s)"
+    if "levels" in obj:
+        n = len(obj.get("levels") or [])
+        return f"{n} S/R level(s)"
+    if "hurst_exponent" in obj or "hurst" in obj:
+        h = obj.get("hurst_exponent") or obj.get("hurst")
+        regime = obj.get("regime", "")
+        return f"Hurst {h:.2f}, {regime}" if isinstance(h, (int, float)) else (regime or "ok")
+    if "rsi_14" in obj or "sma_50" in obj:
+        rsi = obj.get("rsi_14") or obj.get("rsi")
+        return f"RSI {rsi:.0f}, indicators ok" if isinstance(rsi, (int, float)) else "indicators ok"
+    if "n_observations" in obj:
+        return f"{obj.get('n_observations')} obs"
+
+    # Generic dict — first 3 keys, value-clipped.
+    keys = list(obj.keys())[:3]
+    return ", ".join(f"{k}={str(obj[k])[:18]}" for k in keys) or "ok"
+
+
 async def _invoke_structured_with_retry(
     *,
     llm,
@@ -232,6 +296,21 @@ async def _run_tool_loop(
             evidence.append(ev)
             await _emit({"type": "tool_call", **ev})
 
+            # ALSO emit a brief, user-visible status message so the UI
+            # (which only renders type='message' / 'phase' / 'verdict' /
+            # 'error') sees activity during long tool loops. Without
+            # this, the analyst's 3-minute gathering phase looks blank
+            # in the browser and users assume the panel is hung.
+            outcome = _summarise_tool_outcome(tool_name or "unknown", output_str)
+            await _emit({
+                "type": "message",
+                "phase": phase,
+                "speaker": speaker,
+                "text": f"`→ {tool_name}` — {outcome}",
+                "ts": time.time(),
+                "interim": True,
+            })
+
     # Hit iteration cap — return whatever the last AI message had.
     last_ai = next(
         (m for m in reversed(messages) if isinstance(m, AIMessage)),
@@ -250,6 +329,14 @@ async def _run_tool_loop(
 
 async def market_analyst_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "market_analyst", "state": "start"})
+    await _emit({
+        "type": "message",
+        "phase": "market_analyst",
+        "speaker": "market_analyst",
+        "text": "*Gathering technical signals — chart, indicators, S/R, ARIMA, regime, patterns.*",
+        "ts": time.time(),
+        "interim": True,
+    })
     llm = make_chat_for_role("panel_analyst")
     sys_prompt = MARKET_ANALYST_PROMPT.format(
         ticker=state["ticker"], today_iso=state["today_iso"],
@@ -272,6 +359,14 @@ async def market_analyst_node(state: PanelState) -> dict[str, Any]:
 
 async def news_analyst_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "news_analyst", "state": "start"})
+    await _emit({
+        "type": "message",
+        "phase": "news_analyst",
+        "speaker": "news_analyst",
+        "text": "*Pulling recent headlines — yfinance + GDELT (with tone scoring).*",
+        "ts": time.time(),
+        "interim": True,
+    })
     llm = make_chat_for_role("panel_analyst")
     sys_prompt = NEWS_ANALYST_PROMPT.format(
         ticker=state["ticker"], today_iso=state["today_iso"],
@@ -296,6 +391,14 @@ async def news_analyst_node(state: PanelState) -> dict[str, Any]:
 
 async def fundamentals_analyst_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "fundamentals_analyst", "state": "start"})
+    await _emit({
+        "type": "message",
+        "phase": "fundamentals_analyst",
+        "speaker": "fundamentals_analyst",
+        "text": "*Pulling 30 fundamentals fields, analyst consensus, earnings calendar, returns stats.*",
+        "ts": time.time(),
+        "interim": True,
+    })
     llm = make_chat_for_role("panel_analyst")
     sys_prompt = FUNDAMENTALS_ANALYST_PROMPT.format(
         ticker=state["ticker"], today_iso=state["today_iso"],
@@ -321,6 +424,14 @@ async def macro_analyst_node(state: PanelState) -> dict[str, Any]:
     can reference the company's debt + margin profile when reasoning
     about rate sensitivity and inflation pass-through."""
     await _emit({"type": "phase", "phase": "macro_analyst", "state": "start"})
+    await _emit({
+        "type": "message",
+        "phase": "macro_analyst",
+        "speaker": "macro_analyst",
+        "text": "*Reading the macro tape — rates, inflation, credit spreads, FX, commodities, yield curve.*",
+        "ts": time.time(),
+        "interim": True,
+    })
     llm = make_chat_for_role("panel_analyst")
     # Hint country from asset_class so the macro tool can do the right
     # thing for .NS (still pulls US-side macro + USD/INR + a flag note).
@@ -461,6 +572,14 @@ def _format_debate_transcript(deb: Optional[InvestDebateState]) -> str:
 
 async def research_manager_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "research_manager", "state": "start"})
+    await _emit({
+        "type": "message",
+        "phase": "research_manager",
+        "speaker": "research_manager",
+        "text": "*Synthesising the bull/bear debate into a recommendation…*",
+        "ts": time.time(),
+        "interim": True,
+    })
     llm = make_chat_for_role("panel_research_manager")
     sys_prompt = RESEARCH_MANAGER_PROMPT.format(
         analyst_reports=_format_analyst_reports(state),
@@ -484,6 +603,14 @@ async def research_manager_node(state: PanelState) -> dict[str, Any]:
 
 async def trader_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "trader", "state": "start"})
+    await _emit({
+        "type": "message",
+        "phase": "trader",
+        "speaker": "trader",
+        "text": "*Translating the research plan into entry / target / stop levels…*",
+        "ts": time.time(),
+        "interim": True,
+    })
     llm = make_chat_for_role("panel_trader")
     sys_prompt = TRADER_PROMPT.format(
         research_plan=json.dumps(state.get("research_plan") or {}, indent=2),
@@ -507,6 +634,14 @@ async def trader_node(state: PanelState) -> dict[str, Any]:
 
 async def risk_debator_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "risk_review", "state": "start"})
+    await _emit({
+        "type": "message",
+        "phase": "risk_review",
+        "speaker": "risk_debator",
+        "text": "*Stress-testing the proposal — aggressive / conservative / neutral lenses…*",
+        "ts": time.time(),
+        "interim": True,
+    })
     llm = make_chat_for_role("panel_risk")
     sys_prompt = RISK_DEBATOR_PROMPT.format(
         trader_proposal=json.dumps(state.get("trader_proposal") or {}, indent=2),
@@ -528,6 +663,14 @@ async def risk_debator_node(state: PanelState) -> dict[str, Any]:
 
 async def portfolio_manager_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "portfolio_manager", "state": "start"})
+    await _emit({
+        "type": "message",
+        "phase": "portfolio_manager",
+        "speaker": "portfolio_manager",
+        "text": "*Issuing the final verdict — rating, target, stop, time horizon, key risks…*",
+        "ts": time.time(),
+        "interim": True,
+    })
     llm = make_chat_for_role("panel_pm")
     sys_prompt = PORTFOLIO_MANAGER_PROMPT.format(
         analyst_reports=_format_analyst_reports(state),
