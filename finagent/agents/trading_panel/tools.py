@@ -277,6 +277,64 @@ def fetch_yield_curve() -> str:
 
 
 @tool
+def fetch_sector_exposure(ticker: str) -> str:
+    """Curated sector-exposure profile for a ticker.
+
+    Returns the sector classification, named macro/geopolitical
+    sensitivities, named relationships explaining how each driver
+    propagates to the company's revenue / costs / margin / valuation,
+    suggested GDELT queries to drill into specific narratives, and
+    cited sources (RBI bulletins, IMF working papers, FDA databases,
+    Goldman/JPM sector primers, etc.).
+
+    This is editorial / curated knowledge — a hand-built mapping with
+    a versioned ``table_version`` and a ``disclaimer`` field. Use it
+    as a structural prior for sector analysis, not as a real-time
+    signal. Cite the listed ``sources`` to anchor claims.
+
+    Returns JSON: {ticker, sector_slug, sector_label, geographic_focus,
+    macro_sensitivities, key_relationships, gdelt_query_suggestions,
+    example_tickers, sources, table_version, disclaimer}.
+    """
+    from findata.sector_exposure import get_sector_exposure
+    return _safe_call("fetch_sector_exposure", get_sector_exposure, ticker=ticker)
+
+
+@tool
+def fetch_world_themes(themes: list[str] | None = None, days: int = 7) -> str:
+    """Snapshot the major macro / geopolitical narratives in the news right now.
+
+    Calls the GDELT v2.0 doc API once per requested theme code and
+    returns the most-recent articles tagged with each. Default queries
+    a curated 12-theme set covering: interest rates, inflation, recession,
+    QE/QT, sovereign debt, oil, gas, armed conflict, sanctions, trade
+    disputes, bilateral trade, climate physical risk.
+
+    Each article carries GDELT's ``tone`` score (-10 strongly negative
+    to +10 strongly positive). Use the tone to weight headlines, not
+    just count them. Tone < -2 across multiple articles in a theme =
+    stressed narrative.
+
+    Pass ``themes=['ENV_OIL', 'MILITARY_USE_OF_WEAPONS']`` to drill into
+    specific GDELT theme codes — see findata.world_themes._CURATED_THEMES
+    for the supported list.
+
+    Every article URL is a real publisher (Reuters / FT / Bloomberg /
+    Indian dailies / etc.) — paste verbatim, the user can click to
+    verify. Never substitute placeholders.
+
+    Returns JSON: {as_of, days_back, themes: [{theme_code, theme_label,
+    tone_avg/min/max, top_articles: [{title, url, source, ts, tone}]}],
+    summary, errors}.
+    """
+    from findata.world_themes import get_world_themes
+    return _safe_call(
+        "fetch_world_themes", get_world_themes,
+        themes=themes, days=days,
+    )
+
+
+@tool
 def plot_ohlc_chart(
     ticker: str,
     lookback_days: int = 252,
@@ -330,6 +388,8 @@ FUNDAMENTALS_TOOLS = [
 MACRO_TOOLS = [
     fetch_macro_snapshot,
     fetch_yield_curve,
+    fetch_sector_exposure,
+    fetch_world_themes,
 ]
 
 
