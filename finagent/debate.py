@@ -123,9 +123,29 @@ async def run_debate(
     evidence: list[dict[str, Any]] = []
     final_verdict: Optional[dict[str, Any]] = None
 
+    # ── Incremental persist helper ────────────────────────────────
+    # Without this, the /app/debate/<id> detail page (which polls the
+    # persisted row every 4s) shows an empty transcript for the entire
+    # 5-10 minute panel run. Persisting after every message + every
+    # tool_call is cheap (one SQLite UPDATE) and gives the user live
+    # progress visibility on both the streaming hub AND the detail page.
+
+    def _persist_progress() -> None:
+        if not debate_id:
+            return
+        try:
+            from .experiments import get_store
+            get_store().update_debate(
+                debate_id,
+                transcript=transcript,
+                evidence=evidence,
+            )
+        except Exception:
+            logging.exception("run_debate: incremental persist failed (non-fatal)")
+
     # ── Adapter emit hook ─────────────────────────────────────────
     # Forward panel events to the caller's emit, also accumulate
-    # transcript + evidence for end-of-run persistence.
+    # transcript + evidence + persist incrementally.
 
     async def _adapter_emit(ev: dict) -> None:
         nonlocal final_verdict
@@ -142,8 +162,13 @@ async def run_debate(
                 "text": ev.get("text", ""),
                 "ts": ev.get("ts", time.time()),
             }
+            # Forward interim-flag through so the UI's compact-rendering
+            # logic kicks in for status messages.
+            if ev.get("interim"):
+                msg["interim"] = True
             transcript.append(msg)
             await emit(msg)
+            _persist_progress()
             return
 
         if typ == "tool_call":
@@ -157,11 +182,28 @@ async def run_debate(
                 "ts": ev.get("ts", time.time()),
             })
             await emit(ev)
+            # Persist evidence so the detail page's EvidenceList stays
+            # current. Tool calls fire 4-8 times per analyst, ~30 times
+            # total — still cheap as long as each is a single UPDATE.
+            _persist_progress()
             return
 
         if typ == "verdict":
             final_verdict = ev.get("data", {})
             await emit(ev)
+            # Persist verdict immediately so a page-reload during the
+            # final stages still sees the moderator's call.
+            if debate_id:
+                try:
+                    from .experiments import get_store
+                    get_store().update_debate(
+                        debate_id,
+                        verdict=final_verdict,
+                        transcript=transcript,
+                        evidence=evidence,
+                    )
+                except Exception:
+                    logging.exception("run_debate: verdict persist failed")
             return
 
         if typ in ("phase", "started", "done", "error",
