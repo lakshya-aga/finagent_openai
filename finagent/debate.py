@@ -1,43 +1,49 @@
-"""Debate orchestrator — bull vs bear with moderator verdict.
+"""Debate orchestrator — public API contract preserved, internals delegated to the trading panel.
 
 Public entrypoint:
     run_debate(ticker, asset_class, *, rounds, emit) -> {transcript, verdict}
 
-Streams events through the optional ``emit`` callable so the frontend
-can render the debate live (turn-by-turn). Persists the final transcript
-+ verdict on the ``debates`` table for the project-history view.
+This module USED to drive a linear bull→bear→moderator debate via the
+OpenAI Agents SDK. As of 2026-05, it's a thin adapter that delegates
+to ``finagent.agents.trading_panel.run_panel`` (TradingAgents-style
+8-agent panel on LangGraph + LangChain) and reshapes the panel's
+output into the existing ``debates``-table schema + SSE event shape.
 
-Event shape (each call to ``emit``):
-    {
-        "type": "phase" | "message" | "verdict" | "error",
-        "phase": "bull_round_N" | "bear_round_N" | "verdict" | ...,
-        "speaker": "bull_analyst" | "bear_analyst" | "moderator" | None,
-        "text": "...",          # speaker's full message (final, not delta)
-        "data": {...},          # only on type="verdict": parsed DebateVerdict
-        "ts": <unix>
-    }
+Why a wrapper instead of a clean rename: every caller in the stack
+(``app.py`` chat endpoint, ``finagent.scheduler``, the synapse UI's
+SSE consumer + debate detail page + calendar + performance panel)
+already speaks the legacy contract. Reshaping at this seam means
+zero changes anywhere else; the panel's richer reasoning ships
+under the existing UI without a frontend redesign.
+
+Event mapping (panel → debate-shape):
+  panel "phase" / "message" / "tool_call" / "verdict" / "error"
+                            ↓ (mostly identity)
+  debate "phase" / "message" / "tool_call" / "verdict" / "error"
+
+Speaker mapping (panel → debate-shape):
+  market_analyst / news_analyst / fundamentals_analyst / macro_analyst
+  bull_researcher (was bull_analyst) / bear_researcher (was bear_analyst)
+  research_manager / trader / risk_debator / portfolio_manager (was moderator)
+
+Frontend: ``synapse/src/components/debate-views.tsx`` colour-codes
+bull_analyst (emerald) and bear_analyst (rose); other speakers fall
+through to a neutral grey panel — works fine for the new agents.
+
+Kill-switch: set ``DEBATE_LEGACY=1`` to force the old SDK-based path
+(only useful if the panel has a regression and you need to ship a
+hotfix without rolling the panel back; the legacy code lives in
+``finagent.debate_legacy``).
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
-
-from agents import Agent, Runner, RunConfig
-from agents.mcp import MCPServerManager
-
-from .agents.debate.agents import (
-    DebateVerdict,
-    bear_agent,
-    bull_agent,
-    moderator_agent,
-)
-from .mcp_connections import make_data_mcp
 
 
 EmitFn = Callable[[dict], Awaitable[None]]
@@ -47,106 +53,13 @@ async def _noop_emit(_: dict) -> None:
     return None
 
 
-# Per-tool output cap. We persist the full output so the UI can render
-# real article titles + URLs + values; charts (~50KB base64 per call)
-# are the only outputs that warrant truncation here. The truncated path
-# strips the base64 so we keep title + summary but drop the bytes.
-_OUTPUT_CAP_DEFAULT = 64_000   # ~64 KB per tool output, plenty for news/fundamentals
-_OUTPUT_CAP_CHART = 1_000      # chart base64 stripped — bytes already shown inline
+def _legacy_mode() -> bool:
+    """Allow flipping back to the OpenAI-Agents-SDK debate via env.
 
-
-def _trim_chart_output(raw: str) -> str:
-    """plot_ohlc_chart returns ~50KB base64 inside its JSON; the chart
-    is already rendered inline in the message text via markdown_image,
-    so for evidence persistence we strip image_base64 to keep payloads
-    small. Keep title / summary / chart_status / params for context."""
-    try:
-        obj = json.loads(raw)
-        if isinstance(obj, dict):
-            obj.pop("image_base64", None)
-            # Truncate the markdown_image field too — it embeds the same
-            # base64. The agent's own message text contains the full one.
-            mi = obj.get("markdown_image") or ""
-            if len(mi) > 200:
-                obj["markdown_image"] = mi[:160] + "…(truncated)"
-            return json.dumps(obj, ensure_ascii=False)
-    except Exception:
-        pass
-    return raw[:_OUTPUT_CAP_CHART]
-
-
-def _extract_tool_evidence(
-    result: Any, *, phase: str, speaker: str
-) -> list[dict]:
-    """Walk Runner.run() result.new_items and pair tool-call → tool-output.
-
-    Each pair becomes one evidence record with the tool name, arguments,
-    and the FULL output (subject to per-tool size caps). The UI groups
-    by speaker so the user sees exactly which evidence each side cited.
-
-    Returns a list of:
-        {phase, speaker, tool, args (str), output (str), call_id, ts}
+    DEBATE_LEGACY=1 only — every other value (including unset) routes
+    through the panel.
     """
-    pending: dict[str, dict] = {}
-    out: list[dict] = []
-    now = time.time()
-
-    for item in getattr(result, "new_items", []) or []:
-        cls_name = type(item).__name__
-        ri = getattr(item, "raw_item", None)
-        if ri is None:
-            continue
-        ri_type = getattr(ri, "type", "") or ""
-
-        # Tool call (the model decided to invoke a function tool).
-        if cls_name == "ToolCallItem" or ri_type in ("function_call", "tool_call"):
-            call_id = (
-                getattr(ri, "call_id", None) or getattr(ri, "id", None) or ""
-            )
-            name = getattr(ri, "name", "") or "tool"
-            args = getattr(ri, "arguments", "") or ""
-            if isinstance(args, (dict, list)):
-                try:
-                    args = json.dumps(args, ensure_ascii=False)
-                except Exception:
-                    args = str(args)
-            pending[call_id] = {
-                "phase": phase,
-                "speaker": speaker,
-                "tool": str(name),
-                "args": str(args)[:4_000],   # arg blobs are small; 4K cap is generous
-                "call_id": str(call_id),
-                "ts": now,
-            }
-
-        # Tool output (the function returned).
-        elif cls_name == "ToolCallOutputItem" or ri_type == "function_call_output":
-            call_id = getattr(ri, "call_id", None) or ""
-            base = pending.pop(
-                call_id,
-                {
-                    "phase": phase, "speaker": speaker,
-                    "tool": "unknown", "args": "",
-                    "call_id": str(call_id), "ts": now,
-                },
-            )
-            raw_output = str(getattr(ri, "output", "") or "")
-            tool_name = base.get("tool", "")
-            if tool_name == "plot_ohlc_chart":
-                base["output"] = _trim_chart_output(raw_output)
-            else:
-                base["output"] = raw_output[:_OUTPUT_CAP_DEFAULT]
-            out.append(base)
-
-    # Surface any orphan calls (no matched output — rare, but possible
-    # if the worker timed out mid-call). Keep them so the UI can show
-    # "this tool was attempted" rather than silently swallow.
-    for v in pending.values():
-        v["output"] = ""
-        v.setdefault("orphan", True)
-        out.append(v)
-
-    return out
+    return os.environ.get("DEBATE_LEGACY", "").strip() in {"1", "true", "yes"}
 
 
 async def run_debate(
@@ -158,246 +71,174 @@ async def run_debate(
     debate_id: Optional[str] = None,
     source: str = "user",
 ) -> dict[str, Any]:
-    """Run a bull/bear/moderator debate.
+    """Run a multi-agent investment-thesis debate on a single ticker.
 
     Args:
         ticker: e.g. "AAPL", "BTC-USD", "RELIANCE.NS".
         asset_class: free-form hint passed to the agents
-            ("us_equity" / "crypto" / "indian_equity"). Used in the
-            opening prompt so agents pick the right data fetchers.
-        rounds: How many bull→bear exchange rounds before the moderator
-            verdicts. Default 2 (bull opens, bear rebuts, bull counters,
-            bear closes).
-        emit: async callback for streaming events. Pass None for
-            non-streaming use (tests, scheduled jobs).
-        debate_id: pre-generated id to attach to events. If None, the
-            orchestrator generates one — and we persist the row inline
-            so the calendar / detail pages can pick it up after the
-            stream ends.
-        source: 'user' for manual submissions, 'scheduled' for the
-            cron-driven Nifty 50 sweep. Persisted on the debate row;
-            the calendar page filters on this.
+            ("us_equity" / "crypto" / "indian_equity").
+        rounds: How many bull→bear rounds before the moderator verdicts.
+        emit: async callback for streaming events.
+        debate_id: pre-generated id; if None, generated.
+        source: 'user' for manual submissions, 'scheduled' for the cron.
 
     Returns:
-        {debate_id, ticker, asset_class, rounds, transcript: [...],
-         verdict: dict, started_at, finished_at}
+        Same shape as the legacy debate:
+        {debate_id, ticker, asset_class, rounds, transcript, verdict,
+         started_at, finished_at}.
+
+    Implementation: forwards to trading_panel.run_panel, reshapes its
+    multi-stage output into a flat transcript + projected verdict.
     """
+    if _legacy_mode():
+        # Hatch back to the old SDK-based debate. Kept only as a hot-
+        # patch escape route; not the default path.
+        from .debate_legacy import run_debate as _legacy
+        return await _legacy(
+            ticker, asset_class, rounds=rounds, emit=emit,
+            debate_id=debate_id, source=source,
+        )
+
     emit = emit or _noop_emit
-    # If the caller didn't pre-create a debate row (typical of the
-    # scheduled / non-streaming path), create one now so the row exists
-    # in the store from the moment the work starts.
+
+    # Persist the row up front so the calendar / detail page see a
+    # 'queued' entry the moment the request lands. Same lifecycle as
+    # the legacy debate.
     own_row = debate_id is None
     if own_row:
         from .experiments import get_store
-        _store = get_store()
-        _row = _store.create_debate(
+        try:
+            _row = get_store().create_debate(
+                ticker=ticker, asset_class=asset_class,
+                rounds=rounds, source=source,
+            )
+            debate_id = _row.id
+            get_store().update_debate(debate_id, status="running")
+        except Exception:
+            logging.exception("run_debate: pre-run persistence failed")
+            debate_id = uuid.uuid4().hex[:16]
+
+    started_at = time.time()
+    transcript: list[dict[str, Any]] = []
+    evidence: list[dict[str, Any]] = []
+    final_verdict: Optional[dict[str, Any]] = None
+
+    # ── Adapter emit hook ─────────────────────────────────────────
+    # Forward panel events to the caller's emit, also accumulate
+    # transcript + evidence for end-of-run persistence.
+
+    async def _adapter_emit(ev: dict) -> None:
+        nonlocal final_verdict
+        typ = ev.get("type")
+
+        if typ == "message":
+            # Panel emits one "message" per analyst report + each
+            # bull/bear turn + the risk review. Same shape the legacy
+            # debate produced; just pass through with debate_id stamp.
+            msg = {
+                "type": "message",
+                "phase": ev.get("phase", ""),
+                "speaker": ev.get("speaker", ""),
+                "text": ev.get("text", ""),
+                "ts": ev.get("ts", time.time()),
+            }
+            transcript.append(msg)
+            await emit(msg)
+            return
+
+        if typ == "tool_call":
+            evidence.append({
+                "phase": ev.get("phase", ""),
+                "speaker": ev.get("speaker", ""),
+                "tool": ev.get("tool", ""),
+                "args": ev.get("args", ""),
+                "output": ev.get("output", ""),
+                "call_id": ev.get("call_id", ""),
+                "ts": ev.get("ts", time.time()),
+            })
+            await emit(ev)
+            return
+
+        if typ == "verdict":
+            final_verdict = ev.get("data", {})
+            await emit(ev)
+            return
+
+        if typ in ("phase", "started", "done", "error",
+                   "structured_retry", "research_plan",
+                   "trader_proposal", "portfolio_decision"):
+            # Pass through — UI either displays them or ignores.
+            await emit(ev)
+            return
+
+        # Unknown event types — forward anyway so future panel events
+        # don't get silently swallowed.
+        await emit(ev)
+
+    # ── Run the panel ─────────────────────────────────────────────
+
+    try:
+        from .agents.trading_panel import run_panel
+        result = await run_panel(
             ticker=ticker,
             asset_class=asset_class,
             rounds=rounds,
+            emit=_adapter_emit,
+            panel_id=debate_id,
+            persist=False,    # we own the persistence here, not the panel
             source=source,
         )
-        debate_id = _row.id
-        try:
-            _store.update_debate(debate_id, status="running")
-        except Exception:
-            logging.exception("run_debate: could not flip status to running")
-    started_at = time.time()
-
-    # Stamp the agents with a fresh "now" — anchors any date-relative
-    # reasoning ("the last earnings call was 3 weeks ago"). UTC keeps the
-    # comparison portable across the deploy region and the user's tz.
-    now_dt = datetime.now(timezone.utc)
-    now_iso = now_dt.isoformat(timespec="seconds")
-    today_str = now_dt.strftime("%Y-%m-%d (%A)")
-
-    transcript: list[dict] = []
-    # Evidence trail: every tool call from every agent run, grouped by
-    # speaker. Surfaced both via streaming (for live UIs) and persisted
-    # on the debate row so the detail page can show "what the bull
-    # actually read before claiming a +12% target".
-    evidence: list[dict] = []
-
-    async def _emit_evidence_batch(records: list[dict]) -> None:
-        """Stream each tool call as its own event so live UIs can append
-        them under the right speaker without waiting for the turn to end."""
-        for rec in records:
-            await emit({
-                "type": "tool_call",
-                **rec,
-            })
-
-    async def _emit_phase(phase: str, speaker: Optional[str] = None) -> None:
-        await emit({
-            "type": "phase",
-            "phase": phase,
-            "speaker": speaker,
-            "ts": time.time(),
-        })
-
-    async def _emit_message(speaker: str, phase: str, text: str) -> None:
-        msg = {
-            "type": "message",
-            "phase": phase,
-            "speaker": speaker,
-            "text": text,
-            "ts": time.time(),
-        }
-        transcript.append(msg)
-        await emit(msg)
-
-    # Opening user message — what the debate is about.
-    opening = (
-        f"Asset under debate: {ticker} ({asset_class}).\n"
-        f"As of {today_str}, build your case. Use tools to ground your claims."
-    )
-
-    # Bull and bear share the data-mcp connection so they can both
-    # discover findata fetchers. Each agent gets its own MCPServerManager
-    # because Agents SDK currently expects one server-set per Runner.run.
-    # (We could share with care — but the SDK's lifecycle on streamable
-    # HTTP is flaky enough that one-per-call is the safer default.)
-
-    last_bull_text: Optional[str] = None
-    last_bear_text: Optional[str] = None
-
-    try:
-        for round_i in range(1, rounds + 1):
-            # ─── Bull turn ─────────────────────────────────────────
-            phase = f"bull_round_{round_i}"
-            await _emit_phase(phase, "bull_analyst")
-            bull_input = opening if round_i == 1 else (
-                f"{opening}\n\n"
-                f"Round {round_i}. Your previous opening was:\n\n{last_bull_text}\n\n"
-                f"The bear's reply was:\n\n{last_bear_text}\n\n"
-                f"Now respond — engage with the bear's specific points, sharpen "
-                f"your thesis, refine the levels."
-            )
-            async with MCPServerManager([make_data_mcp()]) as mgr:
-                _bull = bull_agent(now_iso, today_str).clone(
-                    mcp_servers=mgr.active_servers,
-                )
-                bull_result = await Runner.run(
-                    _bull,
-                    input=bull_input,
-                    run_config=RunConfig(),
-                    max_turns=20,
-                )
-            last_bull_text = bull_result.final_output_as(str)
-            bull_ev = _extract_tool_evidence(
-                bull_result, phase=phase, speaker="bull_analyst",
-            )
-            evidence.extend(bull_ev)
-            await _emit_evidence_batch(bull_ev)
-            await _emit_message("bull_analyst", phase, last_bull_text)
-
-            # ─── Bear turn ─────────────────────────────────────────
-            phase = f"bear_round_{round_i}"
-            await _emit_phase(phase, "bear_analyst")
-            bear_input = (
-                f"{opening}\n\n"
-                f"The bull's argument so far:\n\n{last_bull_text}\n\n"
-                f"Now respond — engage with the bull's specific points, raise "
-                f"the strongest counter-evidence, propose your own levels."
-            )
-            async with MCPServerManager([make_data_mcp()]) as mgr:
-                _bear = bear_agent(now_iso, today_str).clone(
-                    mcp_servers=mgr.active_servers,
-                )
-                bear_result = await Runner.run(
-                    _bear,
-                    input=bear_input,
-                    run_config=RunConfig(),
-                    max_turns=20,
-                )
-            last_bear_text = bear_result.final_output_as(str)
-            bear_ev = _extract_tool_evidence(
-                bear_result, phase=phase, speaker="bear_analyst",
-            )
-            evidence.extend(bear_ev)
-            await _emit_evidence_batch(bear_ev)
-            await _emit_message("bear_analyst", phase, last_bear_text)
-
-        # ─── Moderator verdict ──────────────────────────────────────
-        await _emit_phase("verdict", "moderator")
-        # Reconstruct the full transcript as plain text for the moderator.
-        debate_text = "\n\n".join(
-            f"## {m['speaker']} ({m['phase']})\n{m['text']}" for m in transcript
-        )
-        mod_input = (
-            f"Asset: {ticker} ({asset_class}). Today: {today_str}.\n\n"
-            f"Below is the full bull/bear debate transcript. Read it carefully, "
-            f"then issue your structured verdict.\n\n"
-            f"{debate_text}"
-        )
-        _mod = moderator_agent(now_iso, today_str)
-        mod_result = await Runner.run(
-            _mod, input=mod_input, run_config=RunConfig(), max_turns=4,
-        )
-        verdict_obj: DebateVerdict = mod_result.final_output_as(DebateVerdict)
-        verdict_dict = verdict_obj.model_dump()
-        # Moderator typically has no tools (just synthesises), but capture
-        # any anyway — keeps the contract consistent for future variants.
-        mod_ev = _extract_tool_evidence(
-            mod_result, phase="verdict", speaker="moderator",
-        )
-        if mod_ev:
-            evidence.extend(mod_ev)
-            await _emit_evidence_batch(mod_ev)
-        await emit({
-            "type": "verdict",
-            "phase": "verdict",
-            "speaker": "moderator",
-            "data": verdict_dict,
-            "ts": time.time(),
-        })
-        # Persist completion when we own the row (no streaming caller is
-        # already doing so).
-        if own_row:
-            try:
-                from .experiments import get_store
-                get_store().update_debate(
-                    debate_id,
-                    status="completed",
-                    transcript=transcript,
-                    verdict=verdict_dict,
-                    evidence=evidence,
-                    finished=True,
-                )
-            except Exception:
-                logging.exception("run_debate: failed to persist completion")
-
     except Exception as exc:
-        logging.exception("debate %s failed (ticker=%s)", debate_id, ticker)
-        await emit({
-            "type": "error",
-            "phase": "error",
-            "text": f"{type(exc).__name__}: {exc}",
-            "ts": time.time(),
-        })
+        logging.exception("run_debate: panel raised for %s", ticker)
         if own_row:
             try:
                 from .experiments import get_store
                 get_store().update_debate(
-                    debate_id,
-                    status="failed",
-                    transcript=transcript,
-                    evidence=evidence,
-                    error=str(exc),
-                    finished=True,
+                    debate_id, status="failed",
+                    transcript=transcript, evidence=evidence,
+                    error=str(exc), finished=True,
                 )
             except Exception:
                 logging.exception("run_debate: failed to persist failure")
+        await emit({"type": "error", "phase": "error",
+                    "text": f"{type(exc).__name__}: {exc}",
+                    "ts": time.time()})
         raise
 
     finished_at = time.time()
+    verdict = final_verdict or result.get("verdict") or {}
+
+    # ── Persist completion ────────────────────────────────────────
+    if own_row:
+        try:
+            from .experiments import get_store
+            get_store().update_debate(
+                debate_id,
+                status="completed",
+                transcript=transcript,
+                verdict=verdict,
+                evidence=evidence,
+                finished=True,
+            )
+        except Exception:
+            logging.exception("run_debate: failed to persist completion")
+
     return {
         "debate_id": debate_id,
         "ticker": ticker,
         "asset_class": asset_class,
         "rounds": rounds,
         "transcript": transcript,
-        "evidence": evidence,
-        "verdict": verdict_dict,
+        "verdict": verdict,
         "started_at": started_at,
         "finished_at": finished_at,
+        # Panel-specific extras for callers that want them. Existing
+        # callers don't read these; new UI sections can.
+        "panel": {
+            "analyst_reports": result.get("analyst_reports"),
+            "research_plan": result.get("research_plan"),
+            "trader_proposal": result.get("trader_proposal"),
+            "risk_review": result.get("risk_review"),
+            "portfolio_decision": result.get("portfolio_decision"),
+        },
     }
