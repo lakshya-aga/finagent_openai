@@ -70,6 +70,74 @@ async def _emit(event: dict[str, Any]) -> None:
 # ── Tool-call evidence capture ──────────────────────────────────────
 
 
+async def _invoke_structured_with_retry(
+    *,
+    llm,
+    schema,
+    system_prompt: str,
+    user_prompt: str,
+    speaker: str,
+    max_retries: int = 2,
+):
+    """Invoke ``llm.with_structured_output(schema)`` with retry on
+    validation failure.
+
+    Smaller local models (Qwen 7b, Phi, etc.) emit malformed JSON often
+    enough that one-shot structured output fails ~30-40% of the time.
+    Retrying with the validation error fed back as feedback usually
+    fixes it on the second attempt; total attempts capped at
+    ``max_retries + 1`` to avoid runaway loops.
+
+    On final failure, raises the last exception so the caller (and
+    ultimately run_panel) can decide how to surface the error.
+    """
+    structured = llm.with_structured_output(schema)
+    last_error: Optional[Exception] = None
+
+    base_messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
+
+    for attempt in range(max_retries + 1):
+        try:
+            return await structured.ainvoke(base_messages)
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "trading_panel: structured output failed for %s (attempt %d/%d): %s",
+                speaker, attempt + 1, max_retries + 1, exc,
+            )
+            if attempt >= max_retries:
+                break
+
+            await _emit({
+                "type": "structured_retry",
+                "speaker": speaker,
+                "attempt": attempt + 1,
+                "error": str(exc)[:200],
+            })
+
+            # Re-prompt with the actual error so the model can correct.
+            error_summary = str(exc)[:600]
+            base_messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt),
+                HumanMessage(content=(
+                    f"Your previous attempt failed schema validation:\n\n"
+                    f"{error_summary}\n\n"
+                    f"Re-emit the response. Match the schema EXACTLY: every "
+                    f"required field present, enum values lowercase, numbers "
+                    f"as numbers (not strings), no commentary outside the JSON."
+                )),
+            ]
+
+    raise RuntimeError(
+        f"structured output failed for {speaker} after {max_retries + 1} attempts; "
+        f"last error: {last_error}"
+    ) from last_error
+
+
 async def _run_tool_loop(
     *,
     llm,
@@ -377,15 +445,16 @@ def _format_debate_transcript(deb: Optional[InvestDebateState]) -> str:
 async def research_manager_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "research_manager", "state": "start"})
     llm = make_chat_for_role("panel_research_manager")
-    structured = llm.with_structured_output(ResearchPlan)
     sys_prompt = RESEARCH_MANAGER_PROMPT.format(
         analyst_reports=_format_analyst_reports(state),
         debate_transcript=_format_debate_transcript(state.get("investment_debate")),
     )
-    plan: ResearchPlan = await structured.ainvoke([
-        SystemMessage(content=sys_prompt),
-        HumanMessage(content="Emit the ResearchPlan now."),
-    ])
+    plan: ResearchPlan = await _invoke_structured_with_retry(
+        llm=llm, schema=ResearchPlan,
+        system_prompt=sys_prompt,
+        user_prompt="Emit the ResearchPlan now.",
+        speaker="research_manager",
+    )
     plan_dict = plan.model_dump()
     await _emit({"type": "research_plan", "phase": "research_manager",
                  "speaker": "research_manager", "data": plan_dict})
@@ -399,15 +468,16 @@ async def research_manager_node(state: PanelState) -> dict[str, Any]:
 async def trader_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "trader", "state": "start"})
     llm = make_chat_for_role("panel_trader")
-    structured = llm.with_structured_output(TraderProposal)
     sys_prompt = TRADER_PROMPT.format(
         research_plan=json.dumps(state.get("research_plan") or {}, indent=2),
         analyst_reports=_format_analyst_reports(state),
     )
-    proposal: TraderProposal = await structured.ainvoke([
-        SystemMessage(content=sys_prompt),
-        HumanMessage(content="Emit the TraderProposal now."),
-    ])
+    proposal: TraderProposal = await _invoke_structured_with_retry(
+        llm=llm, schema=TraderProposal,
+        system_prompt=sys_prompt,
+        user_prompt="Emit the TraderProposal now.",
+        speaker="trader",
+    )
     prop_dict = proposal.model_dump()
     await _emit({"type": "trader_proposal", "phase": "trader",
                  "speaker": "trader", "data": prop_dict})
@@ -442,17 +512,18 @@ async def risk_debator_node(state: PanelState) -> dict[str, Any]:
 async def portfolio_manager_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "portfolio_manager", "state": "start"})
     llm = make_chat_for_role("panel_pm")
-    structured = llm.with_structured_output(PortfolioDecision)
     sys_prompt = PORTFOLIO_MANAGER_PROMPT.format(
         analyst_reports=_format_analyst_reports(state),
         research_plan=json.dumps(state.get("research_plan") or {}, indent=2),
         trader_proposal=json.dumps(state.get("trader_proposal") or {}, indent=2),
         risk_review=state.get("risk_review") or "",
     )
-    decision: PortfolioDecision = await structured.ainvoke([
-        SystemMessage(content=sys_prompt),
-        HumanMessage(content="Emit the PortfolioDecision now."),
-    ])
+    decision: PortfolioDecision = await _invoke_structured_with_retry(
+        llm=llm, schema=PortfolioDecision,
+        system_prompt=sys_prompt,
+        user_prompt="Emit the PortfolioDecision now.",
+        speaker="portfolio_manager",
+    )
     dec_dict = decision.model_dump()
     await _emit({"type": "portfolio_decision", "phase": "portfolio_manager",
                  "speaker": "portfolio_manager", "data": dec_dict})
