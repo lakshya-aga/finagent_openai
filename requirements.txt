@@ -59,6 +59,19 @@ apscheduler>=3.10,<4.0
 arize-phoenix-otel>=0.10
 opentelemetry-instrumentation-openai>=0.1.0
 
+# LangChain + LangGraph stack — used by the trading_panel module
+# (TradingAgents-style multi-stage debate). Provider sub-packages are
+# loaded lazily inside llm_factory.py so an unused provider doesn't
+# error on import; we only pin the ones that are *active by default*.
+# Default panel models route to Ollama (Qwen) for ~zero LLM cost.
+langchain>=0.3
+langchain-core>=0.3
+langgraph>=0.2
+langchain-openai>=0.2          # always installed — OpenAI is the fallback
+langchain-anthropic>=0.2        # for users who flip the panel to Claude
+langchain-ollama>=0.2           # for the default Qwen-via-Ollama path
+# langchain-google-genai is optional — install separately if needed.
+
 # Internal libraries the generated notebooks call.
 # fin-kit is installed separately in the Dockerfile with
 # --ignore-requires-python --no-deps because its setup.cfg still pins
