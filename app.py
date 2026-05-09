@@ -1,6 +1,19 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+# Configure logging at INFO so logger.info() calls reach docker logs.
+# Python's root logger defaults to WARNING — without this, the
+# scheduler-startup banner, chart_smoke results, and the panel's
+# tool-loop diagnostics all silently disappear and `docker logs
+# synapse-finagent-1 | grep …` returns empty. Done at import time
+# so it covers every module imported below.
+import logging as _logging_setup
+_logging_setup.basicConfig(
+    level=_logging_setup.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    force=True,   # override uvicorn's logger config which kicks in later
+)
+
 # Phoenix tracing — auto-instruments openai / httpx / langchain calls
 # when PHOENIX_COLLECTOR_ENDPOINT is set in the env. No-op locally.
 # Must run before any LLM client is constructed so the instrumentation
