@@ -369,7 +369,14 @@ MARKET_TOOLS = [
     compute_support_resistance,
     detect_candlestick_patterns,
     compute_trend_regime,
-    arima_forecast,
+    # arima_forecast — TEMPORARILY DISABLED 2026-05-09. Empirically the
+    # market analyst's tool loop times out shortly after ARIMA returns
+    # (visible in the AAPL detail page: 6 tool calls complete, then
+    # ~3 min silence, then synapse cuts the connection at the
+    # ~7-minute mark). Hypothesis: ARIMA's structured output triggers
+    # a long subsequent LLM inference. arima_forecast() still exists
+    # as an importable tool — re-add to this list once we've found a
+    # safer integration pattern (smaller output, async caching, etc.).
     plot_ohlc_chart,            # our visual layer — TradingAgents doesn't have this
 ]
 

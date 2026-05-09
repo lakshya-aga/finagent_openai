@@ -230,13 +230,48 @@ async def _run_tool_loop(
     ]
     evidence: list[dict[str, Any]] = []
 
+    # Log the initial prompt sizes — the user can grep
+    # `docker logs synapse-finagent-1 | grep "panel/tool_loop"` to see
+    # exactly what each analyst started with.
+    logger.info(
+        "panel/tool_loop START speaker=%s phase=%s sys_prompt=%d chars user_prompt=%d chars tools=%d (%s)",
+        speaker, phase,
+        len(system_prompt or ""), len(user_prompt or ""),
+        len(tools), [t.name for t in tools],
+    )
+
     for iteration in range(max_iterations):
+        # Log the message-context size going INTO each LLM call.
+        # If this grows unboundedly, that's the cause of slow inference.
+        ctx_chars = sum(
+            len(str(getattr(m, "content", ""))) for m in messages
+        )
+        logger.info(
+            "panel/tool_loop INFER speaker=%s iter=%d/%d msgs=%d ctx_chars=%d",
+            speaker, iteration + 1, max_iterations, len(messages), ctx_chars,
+        )
+
+        infer_start = time.time()
         ai_msg = await bound.ainvoke(messages)
+        infer_dt = time.time() - infer_start
+
+        n_tool_calls = len(getattr(ai_msg, "tool_calls", None) or [])
+        ai_text_len = len(str(getattr(ai_msg, "content", "") or ""))
+        logger.info(
+            "panel/tool_loop AI_RESP speaker=%s iter=%d took=%.1fs tool_calls=%d text_len=%d",
+            speaker, iteration + 1, infer_dt, n_tool_calls, ai_text_len,
+        )
+
         messages.append(ai_msg)
 
         tool_calls = getattr(ai_msg, "tool_calls", None) or []
         if not tool_calls:
             # Final answer — done.
+            logger.info(
+                "panel/tool_loop DONE speaker=%s phase=%s iters=%d total_evidence=%d final_text_len=%d",
+                speaker, phase, iteration + 1,
+                len(evidence), ai_text_len,
+            )
             return (ai_msg.content or "", evidence)
 
         # Execute every tool call the LLM requested. Order doesn't matter
@@ -245,6 +280,12 @@ async def _run_tool_loop(
             tool_name = call.get("name") or call.get("tool")
             tool_args = call.get("args") or {}
             call_id = call.get("id") or str(uuid.uuid4())[:12]
+
+            logger.info(
+                "panel/tool_loop CALL speaker=%s tool=%s args=%s",
+                speaker, tool_name,
+                json.dumps(tool_args, default=str)[:300],
+            )
 
             tool_fn = tool_index.get(tool_name)
             if tool_fn is None:
@@ -281,6 +322,12 @@ async def _run_tool_loop(
                     })
 
             output_str = output if isinstance(output, str) else json.dumps(output, default=str)
+
+            logger.info(
+                "panel/tool_loop RESP speaker=%s tool=%s output_len=%d preview=%r",
+                speaker, tool_name, len(output_str),
+                output_str[:200].replace("\n", " "),
+            )
 
             messages.append(ToolMessage(content=output_str, tool_call_id=call_id))
 
