@@ -188,12 +188,13 @@ def fetch_returns_stats(ticker: str, window_days: int = 252) -> str:
 
 
 @tool
-def compute_trend_indicators(ticker: str, lookback_days: int = 252) -> str:
+def compute_trend_indicators(ticker: str, window_days: int = 252) -> str:
     """SMA(50/200) + EMA(20/50) + RSI(14) + MACD + ADX + Bollinger snapshot.
-    Includes semantic flags (golden_cross, oversold, etc.). JSON."""
+    Includes semantic flags (golden_cross, oversold, etc.). JSON.
+    Note: parameter is ``window_days`` (matches findata signature)."""
     from findata.trend_indicators import compute_trend_indicators as _ti
     return _safe_call("compute_trend_indicators", _ti,
-                      ticker=ticker, lookback_days=lookback_days)
+                      ticker=ticker, window_days=window_days)
 
 
 @tool

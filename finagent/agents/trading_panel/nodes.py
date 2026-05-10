@@ -473,7 +473,7 @@ async def market_analyst_node(state: PanelState) -> dict[str, Any]:
         "type": "message",
         "phase": "market_analyst",
         "speaker": "market_analyst",
-        "text": "*Gathering technical signals — chart, indicators, S/R, ARIMA, regime, patterns.*",
+        "text": "*Gathering technical signals — chart, indicators, S/R, regime, patterns.*",
         "ts": time.time(),
         "interim": True,
     })
@@ -491,10 +491,47 @@ async def market_analyst_node(state: PanelState) -> dict[str, Any]:
         speaker="market_analyst", phase="market_analyst",
         panel_state=state,
     )
+
+    # Inject the chart from the evidence trail back into the analyst's
+    # report. The LLM only saw a stripped placeholder for the chart
+    # (to avoid blowing the context cap), so the model could not paste
+    # the markdown_image itself. Pull the FULL chart out of the
+    # evidence record and prepend it so the user sees the chart with
+    # SMA + RSI overlays + S/R lines inline above the analyst's prose.
+    chart_md = _extract_chart_from_evidence(evidence)
+    if chart_md:
+        text = chart_md + "\n\n" + text
+
     await _emit({"type": "message", "phase": "market_analyst",
                  "speaker": "market_analyst", "text": text})
     await _emit({"type": "phase", "phase": "market_analyst", "state": "end"})
     return {"market_report": text, "evidence": state.get("evidence", []) + evidence}
+
+
+def _extract_chart_from_evidence(evidence: list[dict[str, Any]]) -> str:
+    """Pull the first successful plot_ohlc_chart's markdown_image string
+    out of the evidence list. Returns empty string if no chart succeeded.
+
+    The evidence record has the FULL tool output (pre-shrink), so the
+    base64-embedded image is intact here — only the LLM-facing
+    ToolMessage was stripped down to placeholder."""
+    for ev in evidence:
+        if ev.get("tool") != "plot_ohlc_chart":
+            continue
+        raw = ev.get("output") or ""
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        md = obj.get("markdown_image") or ""
+        # Only inject if it's a real chart, not the italic fallback.
+        if md.startswith("![") and "data:image" in md:
+            return md
+    return ""
 
 
 async def news_analyst_node(state: PanelState) -> dict[str, Any]:
