@@ -63,21 +63,20 @@ METADATA = {
             "max_drawdown", "calmar", "turnover", "hit_rate", "exposure",
         ],
     },
-    # Plausibility bands consumed by ``finagent.recipes.plausibility.flag``
-    # at API-serialization time. Values outside these ranges produce an
-    # amber warning on the project page rather than silently rendering as
-    # green. Bounds are inclusive. Defaults are correct for an equity-
-    # regime strategy at daily frequency; future templates (crypto,
-    # high-turnover intraday, etc.) can override with their own ranges.
-    "plausibility": {
-        "sharpe": (-3, 3),
-        "annual_return": (-1, 1),
-        "total_return": (-10, 50),
-        "calmar": (-50, 50),
-        "max_drawdown": (-1, 0),
-        "turnover": (0, 5),
-        "sortino": (-5, 5),
-    },
+    # Plausibility band OVERRIDES for this template. Merged on top of
+    # ``finagent.recipes.plausibility.DEFAULT_BANDS`` at API-serialize
+    # time — values outside the resolved band produce an amber warning
+    # on the project page rather than silently rendering as green.
+    #
+    # Empty for regime_modeling: every metric this template emits
+    # (sharpe / sortino / annual_return / total_return / max_drawdown /
+    # calmar / turnover) is an equity-daily quantity well-served by
+    # the default bands. ``hit_rate`` and ``exposure`` are not in the
+    # default band table, so they never flag — which is intentional
+    # (their valid range is so wide that flagging is uninformative).
+    # Future templates (crypto, high-turnover intraday, etc.) override
+    # individual entries here without restating the rest.
+    "plausibility": {},
     "presets": [
         {
             "key": "hmm_3state",

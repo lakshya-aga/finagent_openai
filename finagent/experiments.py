@@ -346,6 +346,47 @@ CREATE TABLE IF NOT EXISTS debates (
 CREATE INDEX IF NOT EXISTS idx_debates_started ON debates(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_debates_ticker  ON debates(ticker);
 CREATE INDEX IF NOT EXISTS idx_debates_source  ON debates(source);
+
+-- Signal registry — populated by panel.export_signal() from inside
+-- notebook kernels. Mirrored here so the agent stack can list /
+-- promote signals without going through the SDK side-channel. The
+-- panel SDK creates the same schema with CREATE TABLE IF NOT EXISTS
+-- so a notebook that exports a signal before the agent stack ever
+-- runs still produces a valid table.
+CREATE TABLE IF NOT EXISTS signals (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL UNIQUE,
+    project             TEXT,
+    run_id              TEXT,
+    recipe_fingerprint  TEXT,
+    template            TEXT,
+    frequency           TEXT NOT NULL DEFAULT 'unknown',
+    universe_json       TEXT NOT NULL DEFAULT '[]',
+    description         TEXT NOT NULL DEFAULT '',
+    created_at          REAL NOT NULL,
+    updated_at          REAL NOT NULL,
+    last_value          REAL,
+    last_value_at       TEXT,
+    n_observations      INTEGER NOT NULL DEFAULT 0,
+    status              TEXT NOT NULL DEFAULT 'active',
+    metadata_json       TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_signals_project   ON signals(project);
+CREATE INDEX IF NOT EXISTS idx_signals_template  ON signals(template);
+CREATE INDEX IF NOT EXISTS idx_signals_updated   ON signals(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS signal_versions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id       TEXT NOT NULL,
+    run_id          TEXT,
+    inserted_at     REAL NOT NULL,
+    n_observations  INTEGER,
+    last_value      REAL,
+    last_value_at   TEXT,
+    notes           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_signal_versions_signal   ON signal_versions(signal_id);
+CREATE INDEX IF NOT EXISTS idx_signal_versions_inserted ON signal_versions(inserted_at DESC);
 """
 
 # Indexes that reference columns added by _migrate(). Created after the
@@ -860,9 +901,18 @@ _BANDS_CACHE: dict[Optional[str], dict[str, tuple[float, float]]] = {}
 
 
 def _resolve_bands(template_name: Optional[str]) -> dict[str, tuple[float, float]]:
+    """Merge template-declared band overrides over ``DEFAULT_BANDS``.
+
+    A template's ``METADATA["plausibility"]`` block only needs to list
+    metrics whose plausible range *differs* from the equity-daily default.
+    Anything it omits inherits the default band — so a crypto template
+    can widen the ``sharpe`` band without restating ``annual_return``,
+    ``calmar``, etc. Cached per template so repeated serialization in a
+    list endpoint doesn't re-import the registry on every Run.
+    """
     if template_name in _BANDS_CACHE:
         return _BANDS_CACHE[template_name]
-    bands = plausibility.DEFAULT_BANDS
+    bands = dict(plausibility.DEFAULT_BANDS)
     if template_name:
         try:
             from .recipes.templates import REGISTRY  # local import: avoid cycle at module load
@@ -870,7 +920,13 @@ def _resolve_bands(template_name: Optional[str]) -> dict[str, tuple[float, float
             metadata = getattr(module, "METADATA", None) if module else None
             declared = metadata.get("plausibility") if isinstance(metadata, dict) else None
             if isinstance(declared, dict):
-                bands = declared
+                for k, v in declared.items():
+                    try:
+                        bands[k] = (float(v[0]), float(v[1]))
+                    except (TypeError, ValueError, IndexError):
+                        # Malformed band entry — skip it rather than
+                        # poisoning the resolved table for this template.
+                        continue
         except Exception:
             logging.getLogger(__name__).exception(
                 "failed to resolve plausibility bands for template %s", template_name,
@@ -961,3 +1017,129 @@ def get_store() -> ExperimentStore:
     if _store is None:
         _store = ExperimentStore()
     return _store
+
+
+# ── Signals registry — read-side helpers for the dashboard endpoints ──
+#
+# Writes go through ``panel.signals.register_signal`` (called from
+# ``panel.export_signal`` inside notebook kernels). The agent stack only
+# READs from this table — listing for the dashboard, fetching one
+# signal's manifest, marking a signal as paused / archived. Keeping the
+# write path inside the SDK lets a notebook export a signal without
+# importing any of the agent stack.
+
+@dataclass
+class Signal:
+    id: str
+    name: str
+    project: Optional[str]
+    run_id: Optional[str]
+    recipe_fingerprint: Optional[str]
+    template: Optional[str]
+    frequency: str
+    universe: list[str]
+    description: str
+    created_at: float
+    updated_at: float
+    last_value: Optional[float]
+    last_value_at: Optional[str]
+    n_observations: int
+    status: str
+    metadata: dict[str, Any]
+
+    def as_public_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "project": self.project,
+            "run_id": self.run_id,
+            "recipe_fingerprint": self.recipe_fingerprint,
+            "template": self.template,
+            "frequency": self.frequency,
+            "universe": self.universe,
+            "description": self.description,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "last_value": self.last_value,
+            "last_value_at": self.last_value_at,
+            "n_observations": self.n_observations,
+            "status": self.status,
+            "metadata": self.metadata,
+        }
+
+
+def _row_to_signal(row: sqlite3.Row) -> Signal:
+    return Signal(
+        id=row["id"],
+        name=row["name"],
+        project=row["project"],
+        run_id=row["run_id"],
+        recipe_fingerprint=row["recipe_fingerprint"],
+        template=row["template"],
+        frequency=row["frequency"],
+        universe=json.loads(row["universe_json"] or "[]"),
+        description=row["description"] or "",
+        created_at=float(row["created_at"]),
+        updated_at=float(row["updated_at"]),
+        last_value=row["last_value"],
+        last_value_at=row["last_value_at"],
+        n_observations=int(row["n_observations"]),
+        status=row["status"],
+        metadata=json.loads(row["metadata_json"] or "{}"),
+    )
+
+
+def list_signals_db(*, project: Optional[str] = None, status: Optional[str] = None) -> list[Signal]:
+    """Read all signals from the registry, optionally filtered.
+
+    The dashboard endpoint hits this once per page-load. Sort: most
+    recently updated first so a freshly-exported signal floats up.
+    """
+    store = get_store()
+    sql = "SELECT * FROM signals"
+    args: list[Any] = []
+    where: list[str] = []
+    if project is not None:
+        where.append("project = ?")
+        args.append(project)
+    if status is not None:
+        where.append("status = ?")
+        args.append(status)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY updated_at DESC"
+    with store._conn() as conn:
+        return [_row_to_signal(r) for r in conn.execute(sql, args)]
+
+
+def get_signal_db(name: str) -> Optional[Signal]:
+    store = get_store()
+    with store._conn() as conn:
+        row = conn.execute("SELECT * FROM signals WHERE name = ?", (name,)).fetchone()
+        return _row_to_signal(row) if row else None
+
+
+def list_signal_versions_db(signal_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    store = get_store()
+    with store._conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM signal_versions WHERE signal_id = ? "
+            "ORDER BY inserted_at DESC LIMIT ?",
+            (signal_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_signal_status_db(name: str, status: str) -> bool:
+    """Set status to 'active' | 'paused' | 'archived'. Used by the
+    'Add to dashboard' / 'Pause' / 'Archive' buttons. Returns True if
+    a row was updated."""
+    if status not in {"active", "paused", "archived"}:
+        raise ValueError(f"invalid status: {status!r}")
+    store = get_store()
+    with store._conn() as conn:
+        cur = conn.execute(
+            "UPDATE signals SET status = ?, updated_at = ? WHERE name = ?",
+            (status, time.time(), name),
+        )
+        return cur.rowcount > 0

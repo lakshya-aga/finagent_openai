@@ -135,10 +135,23 @@ def run_recipe(
         # methodology to evaluate when the kernel crashed before producing
         # results. We deliberately do NOT await this: the user-visible run
         # finishes the moment status flips to "completed"; the audit
-        # populates `bias_audit_json` whenever it lands. The frontend
-        # exposes that as `bias_audit: null` until the verdict arrives.
+        # populates `bias_audit_json` whenever it lands.
+        #
+        # Stamp PENDING synchronously *before* the task fires so the very
+        # next /api/projects/.../runs poll sees a grey "audit in progress"
+        # pill rather than ``bias_audit: null`` (which the frontend renders
+        # as "no audit was ever attempted").
         if status == "completed":
-            _spawn_bias_audit(run.id, notebook_path, recipe_yaml, metrics)
+            try:
+                pending = {
+                    "verdict": "PENDING",
+                    "reasons": [],
+                    "summary": "audit in progress...",
+                }
+                store.update_run_bias_audit(run.id, json.dumps(pending))
+            except Exception:
+                logging.exception("could not stamp PENDING audit run_id=%s", run.id)
+            _spawn_bias_audit(run.id, notebook_path, recipe, metrics)
 
         return {
             "run_id": run.id,
@@ -429,7 +442,7 @@ def _evaluate_hypothesis(hypothesis, metrics: dict) -> dict:
 def _spawn_bias_audit(
     run_id: str,
     notebook_path: Path,
-    recipe_yaml: str,
+    recipe: Recipe,
     metrics: dict,
 ) -> None:
     """Kick the bias audit off the run's critical path.
@@ -450,13 +463,13 @@ def _spawn_bias_audit(
         loop = None
 
     if loop is not None:
-        loop.create_task(_run_bias_audit(run_id, notebook_path, recipe_yaml, metrics))
+        loop.create_task(_run_bias_audit_for(run_id, notebook_path, recipe, metrics))
         return
 
     def _thread_target() -> None:
         try:
             asyncio.run(
-                _run_bias_audit(run_id, notebook_path, recipe_yaml, metrics)
+                _run_bias_audit_for(run_id, notebook_path, recipe, metrics)
             )
         except Exception:
             logging.exception("bias audit thread crashed run_id=%s", run_id)
@@ -468,13 +481,19 @@ def _spawn_bias_audit(
     ).start()
 
 
-async def _run_bias_audit(
+async def _run_bias_audit_for(
     run_id: str,
     notebook_path: Path,
-    recipe_yaml: str,
+    recipe: Recipe,
     metrics: dict,
 ) -> None:
-    """Read the executed notebook, call the auditor, persist the verdict."""
+    """Read the executed notebook, call the auditor, persist the verdict.
+
+    Failure mode: if the audit task crashes outright (auditor module
+    raises before returning a ``BiasAudit``, JSON serialisation fails,
+    DB write fails), persist a PENDING-with-error so the UI shows a
+    grey pill rather than the "audit in progress…" string forever.
+    """
     try:
         from .agents.bias_auditor import audit_run  # local import: optional dep
 
@@ -485,12 +504,34 @@ async def _run_bias_audit(
             logging.exception("could not read notebook for audit run_id=%s", run_id)
             notebook_json = {"cells": []}
 
-        verdict = await audit_run(notebook_json, recipe_yaml, metrics, run_id=run_id)
+        try:
+            recipe_dict: dict | None = recipe.model_dump(mode="json")
+        except Exception:
+            recipe_dict = None
+        template_name = getattr(recipe, "template", None)
+
+        verdict = await audit_run(
+            notebook_json=notebook_json,
+            recipe=recipe_dict,
+            metrics=metrics or {},
+            template_name=template_name,
+        )
         get_store().update_run_bias_audit(
             run_id, json.dumps(verdict.model_dump())
         )
         logging.info(
             "bias audit complete run_id=%s verdict=%s", run_id, verdict.verdict
         )
-    except Exception:
-        logging.exception("bias audit failed run_id=%s", run_id)
+    except Exception as exc:
+        logging.exception("bias audit task failed run_id=%s", run_id)
+        try:
+            fallback = {
+                "verdict": "PENDING",
+                "reasons": [],
+                "summary": f"auditor task failed: {exc}",
+            }
+            get_store().update_run_bias_audit(run_id, json.dumps(fallback))
+        except Exception:
+            logging.exception(
+                "could not persist PENDING fallback for run_id=%s", run_id,
+            )
