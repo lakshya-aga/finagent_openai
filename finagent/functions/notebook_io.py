@@ -19,13 +19,61 @@ from nbformat.v4 import new_code_cell, new_markdown_cell
 _OUTPUTS_DIR = Path(__file__).resolve().parents[2] / "outputs"
 
 
-def _get_latest_path() -> Path:
-    """Return the next unused notebook_N.ipynb path in outputs/.
+# Per-process "next-notebook-name" hint set by the workflow before it
+# invokes the orchestration agent. When the chat-intent classifier flags
+# a request as a fresh notebook build, finagent.workflow runs the
+# name_suggester agent → calls set_next_notebook_name(slug) → the next
+# create_notebook() tool call picks up that slug + appends a datetime
+# suffix. Cleared after one read so a subsequent run uses fresh state.
+_NEXT_NOTEBOOK_BASE: str | None = None
 
-    Used as a fallback for free-form chat-agent runs that don't carry a
-    recipe identity. Recipe runs go through `_path_for_recipe` instead so
-    the file name carries the recipe name + fingerprint + timestamp.
+
+def set_next_notebook_name(base_name: str | None) -> None:
+    """Workflow-level hint for the next ``create_notebook`` call. Pass a
+    kebab-case base (e.g. ``cross-sector-momentum-v1``); the path helper
+    appends ``__YYYYMMDD-HHMMSS`` automatically. Pass ``None`` to clear."""
+    global _NEXT_NOTEBOOK_BASE
+    _NEXT_NOTEBOOK_BASE = base_name
+
+
+def _path_for_named(base_name: str, when: datetime | None = None) -> Path:
+    """Build a notebook path from a user/LLM-suggested base name.
+
+    Format: ``<slug>__<YYYYMMDD-HHMMSS>.ipynb``. The datetime suffix
+    guarantees uniqueness without scanning the directory; collisions on
+    the same second are disambiguated with a ``__2``, ``__3``... counter.
     """
+    when = when or datetime.utcnow()
+    slug = _slugify(base_name)
+    stamp = when.strftime("%Y%m%d-%H%M%S")
+    base = f"{slug}__{stamp}"
+    candidate = _OUTPUTS_DIR / f"{base}.ipynb"
+    if not candidate.exists():
+        return candidate
+    i = 2
+    while True:
+        candidate = _OUTPUTS_DIR / f"{base}__{i}.ipynb"
+        if not candidate.exists():
+            return candidate
+        i += 1
+
+
+def _get_latest_path() -> Path:
+    """Return the next path for a freshly-created notebook.
+
+    Two paths:
+      - If the workflow set a name hint via ``set_next_notebook_name``,
+        consume it and produce ``<slug>__<datetime>.ipynb``. The hint is
+        cleared after one read so subsequent builds don't reuse it.
+      - Otherwise fall back to the legacy ``notebook_N.ipynb`` counter
+        (manual runs that bypass the chat-intent classifier).
+    """
+    global _NEXT_NOTEBOOK_BASE
+    if _NEXT_NOTEBOOK_BASE:
+        base = _NEXT_NOTEBOOK_BASE
+        _NEXT_NOTEBOOK_BASE = None     # consume; don't reuse
+        return _path_for_named(base)
+
     i = 1
     while True:
         path = _OUTPUTS_DIR / f"notebook_{i}.ipynb"
