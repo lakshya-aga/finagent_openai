@@ -71,6 +71,45 @@ async def _emit(event: dict[str, Any]) -> None:
 # ── Tool-call evidence capture ──────────────────────────────────────
 
 
+def _shrink_for_llm_context(tool_name: str, output_str: str) -> str:
+    """Strip heavyweight payloads (chart base64) before the tool output
+    reaches the LLM's context window.
+
+    The chart tool's full output is ~64KB — fine to capture once for
+    the evidence trail, but catastrophic when it ends up embedded in
+    every analyst report → every researcher / manager prompt. After
+    one panel run with bull / bear / research_mgr / trader / risk /
+    PM stages each carrying the chart through, the cumulative context
+    exceeded gpt-5-mini's 272K-token limit and the request was
+    rejected.
+
+    The wrapped tool still returns its full output to the evidence
+    layer (where the EvidenceList renders the actual chart for the
+    user). For the LLM message context, we replace the heavy fields
+    with terse placeholders so the model knows the chart was rendered
+    + what its summary was, but doesn't carry the bytes around.
+    """
+    if tool_name != "plot_ohlc_chart" or not output_str:
+        return output_str
+    try:
+        obj = json.loads(output_str)
+    except Exception:
+        return output_str
+    if not isinstance(obj, dict):
+        return output_str
+
+    # Replace heavy fields with a status note. summary + chart_status
+    # + ticker stay so the agent can talk about the chart in prose.
+    md = obj.get("markdown_image", "") or ""
+    if md and md.startswith("![") and "data:image" in md:
+        obj["markdown_image"] = (
+            "[chart rendered — full image is in the evidence panel; do NOT "
+            "paste a markdown image link, the frontend handles inline display]"
+        )
+    obj["image_base64"] = "[stripped from LLM context to save tokens]"
+    return json.dumps(obj, default=str)
+
+
 def _summarise_tool_outcome(tool_name: str, output_str: str) -> str:
     """One-line summary of a tool's outcome for the user-visible heartbeat.
 
@@ -212,7 +251,7 @@ async def _run_tool_loop(
     speaker: str,
     phase: str,
     panel_state: PanelState,
-    max_iterations: int = 10,
+    max_iterations: int = 5,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Drive an analyst tool-call loop until the LLM produces a final
     text-only reply, or we hit max_iterations.
@@ -229,6 +268,19 @@ async def _run_tool_loop(
         HumanMessage(content=user_prompt),
     ]
     evidence: list[dict[str, Any]] = []
+
+    # Per-phase tool-call cache. The model often re-calls the same tool
+    # with identical args (4× chart calls observed in the AXISBANK
+    # panel). Each redundant call: re-runs the tool (yfinance hit),
+    # re-bloats the LLM context with the same output, and blows past
+    # gpt-5-mini's 272K context cap. Cache by (tool, args-json) — if
+    # we see a repeat, return the prior output INSTEAD of re-running.
+    call_cache: dict[tuple[str, str], str] = {}
+    # Hard cap on calls per tool name regardless of args. Belt-and-
+    # braces in case the model nudges arg values to dodge the cache
+    # (different lookback_days etc.).
+    per_tool_limit = 1
+    per_tool_count: dict[str, int] = {}
 
     # Log the initial prompt sizes — the user can grep
     # `docker logs synapse-finagent-1 | grep "panel/tool_loop"` to see
@@ -288,7 +340,37 @@ async def _run_tool_loop(
             )
 
             tool_fn = tool_index.get(tool_name)
-            if tool_fn is None:
+
+            # ── Deduplication / call-count guards ─────────────────
+            # Refuse repeated calls (same tool + same args) and any call
+            # past the per-tool hard cap. Returns a synthesized error
+            # envelope so the model sees "you already called this" and
+            # writes the report instead of looping.
+            args_key = json.dumps(tool_args, sort_keys=True, default=str)
+            cache_key = (tool_name or "", args_key)
+            n_prior = per_tool_count.get(tool_name or "", 0)
+
+            if cache_key in call_cache:
+                output = call_cache[cache_key]
+                logger.warning(
+                    "panel/tool_loop CACHE_HIT speaker=%s tool=%s args=%s — returning cached result",
+                    speaker, tool_name, args_key[:100],
+                )
+            elif n_prior >= per_tool_limit:
+                output = json.dumps({
+                    "error": (
+                        f"You have already called {tool_name} {n_prior} time(s) "
+                        f"this turn. Each tool may be called at most "
+                        f"{per_tool_limit} time(s) per analyst phase. Please "
+                        f"refer to the prior result and write your final report."
+                    ),
+                    "tool": tool_name,
+                })
+                logger.warning(
+                    "panel/tool_loop CALL_LIMIT speaker=%s tool=%s n_prior=%d — refusing",
+                    speaker, tool_name, n_prior,
+                )
+            elif tool_fn is None:
                 output = json.dumps({"error": f"unknown tool: {tool_name}"})
             else:
                 # 60s per-tool hard timeout. yfinance has no built-in
@@ -303,6 +385,8 @@ async def _run_tool_loop(
                         except NotImplementedError:
                             return await asyncio.to_thread(tool_fn.invoke, tool_args)
                     output = await asyncio.wait_for(_invoke(), timeout=60.0)
+                    # Record successful invocation for dedup + cap.
+                    per_tool_count[tool_name or ""] = n_prior + 1
                 except asyncio.TimeoutError:
                     logger.warning(
                         "trading_panel: tool %s hung past 60s, killing call",
@@ -323,13 +407,22 @@ async def _run_tool_loop(
 
             output_str = output if isinstance(output, str) else json.dumps(output, default=str)
 
+            # Shrink the LLM-visible payload (strip chart base64). The
+            # full output is still captured in the evidence trail
+            # below, so the user sees the actual chart in the UI.
+            llm_visible = _shrink_for_llm_context(tool_name or "", output_str)
+
+            # Populate the dedup cache with the SHRUNK output so a
+            # repeated call returns the placeholder, not the 64KB blob.
+            call_cache[cache_key] = llm_visible
+
             logger.info(
-                "panel/tool_loop RESP speaker=%s tool=%s output_len=%d preview=%r",
-                speaker, tool_name, len(output_str),
-                output_str[:200].replace("\n", " "),
+                "panel/tool_loop RESP speaker=%s tool=%s output_len=%d (shrunk=%d) preview=%r",
+                speaker, tool_name, len(output_str), len(llm_visible),
+                llm_visible[:200].replace("\n", " "),
             )
 
-            messages.append(ToolMessage(content=output_str, tool_call_id=call_id))
+            messages.append(ToolMessage(content=llm_visible, tool_call_id=call_id))
 
             ev = {
                 "phase": phase,
