@@ -184,6 +184,52 @@ def fetch_returns_stats(ticker: str, window_days: int = 252) -> str:
     )
 
 
+@tool
+def fetch_factor_loadings(
+    ticker: str,
+    factor_model: str = "5",
+    window_days: int = 504,
+) -> str:
+    """Fama-French factor regression for a single ticker.
+
+    Returns the ticker's factor profile: loadings + alpha + R² over a
+    rolling window. Auto-selects the appropriate Ken-French regional
+    factor basket from the ticker suffix:
+
+      US tickers           → US factors (direct fit)
+      .NS / .BO  (India)   → AsiaPacificExJapan basket
+      .T / .JP   (Japan)   → Japan factors
+      .L / .PA / .DE / .AS (Europe) → Europe factors
+      .SS / .SZ  (China)   → EmergingMarkets
+      .TO        (Canada)  → NorthAmerica
+      (etc.)
+
+    factor_model = "3" (Mkt/SMB/HML) or "5" (+RMW + CMA). Default 5.
+    window_days = 504 (~2y trading days) by default.
+
+    Each loading carries: factor code, human label (Market beta /
+    Size / Value vs growth / Profitability / Investment), beta,
+    t_stat, plain-English interpretation (e.g. "growth tilt", "quality
+    tilt", "small-cap tilt"). Alpha is annualised and t-tested at
+    |t|>2 for the "statistically significant" callout.
+
+    Output includes a ``disclaimer`` field that names the regional
+    basket and what it actually contains — important for non-US tickers
+    where the basket is a multi-country aggregate, not a pure local
+    factor model.
+
+    Returns JSON: {ticker, factor_model, region, window_days,
+    n_observations, alpha_annual_pct, alpha_t_stat, loadings:
+    [{factor, label, beta, t_stat, interpretation}], r_squared,
+    summary, disclaimer, status}.
+    """
+    from findata.factor_loadings import get_factor_loadings
+    return _safe_call(
+        "fetch_factor_loadings", get_factor_loadings,
+        ticker=ticker, factor_model=factor_model, window_days=window_days,
+    )
+
+
 # ── Technical analysis ──────────────────────────────────────────────
 
 
@@ -391,6 +437,7 @@ FUNDAMENTALS_TOOLS = [
     fetch_analyst_consensus,
     fetch_earnings_calendar,
     fetch_returns_stats,
+    fetch_factor_loadings,
 ]
 
 MACRO_TOOLS = [

@@ -258,7 +258,12 @@ CALL TOOLS:
   1. fetch_equity_fundamentals(ticker)
   2. fetch_analyst_consensus(ticker)
   3. fetch_earnings_calendar(ticker)
-  4. fetch_returns_stats(ticker, lookback_days=504)
+  4. fetch_returns_stats(ticker, window_days=504)
+  5. fetch_factor_loadings(ticker, factor_model="5")
+       — Fama-French regression. Auto-picks regional basket from the
+         ticker suffix (.NS → AsiaPacificExJapan, .T → Japan, etc.).
+         Output names which region was used + a disclaimer about what
+         that basket contains.
 
 OUTPUT FORMAT — markdown tables, terse, numbers-first.
 
@@ -317,6 +322,28 @@ OUTPUT FORMAT — markdown tables, terse, numbers-first.
   | Max drawdown | -X.X% |
   | Beta vs SPY | X.XX |
   | Annual alpha | +/-X.X% |
+
+  ### Factor exposures (FF5 regression)
+
+  Use the ``fetch_factor_loadings`` output's ``loadings`` array
+  verbatim. Quote the ``region`` field (e.g. "FF5 — US" or
+  "FF5 — AsiaPacificExJapan") in the section header. The
+  ``disclaimer`` field tells you what the regional basket actually
+  contains — surface it in one line under the table for non-US
+  tickers so the reader knows what they're looking at.
+
+  | Factor | Beta | t-stat | Read |
+  |---|---|---|---|
+  | Market beta (Mkt-RF) | X.XX | X.X | (interpretation field) |
+  | Size (SMB)           | X.XX | X.X | small-cap / large-cap / neutral |
+  | Value vs growth (HML)| X.XX | X.X | value / growth / neutral |
+  | Profitability (RMW)  | X.XX | X.X | quality / low-quality / neutral |
+  | Investment (CMA)     | X.XX | X.X | conservative / aggressive / neutral |
+
+  **Alpha (annualised):** +/-X.X% (t = X.X — significant if |t|>2)
+  **R²:** 0.XX
+  **Read:** one sentence summarising the style.
+  **Region note:** (only for non-US tickers — paste disclaimer field)
 
   ### Bottom line
 
