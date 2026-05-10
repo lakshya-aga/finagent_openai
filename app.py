@@ -213,85 +213,90 @@ _OUTPUTS_DIR = (Path(__file__).parent / "outputs").resolve()
 
 
 # Cache parsed notebook metadata so repeated /api/notebooks calls don't re-read
-# every .ipynb. Key: absolute path string. Value: (mtime, parsed_dict). When the
-# file's mtime changes we re-parse — no disk cache, plain in-memory dict.
-_NOTEBOOK_META_CACHE: dict[str, tuple[float, dict]] = {}
-
-# Marker the templated final cell prints; same regex as recipe_workflow but we
-# duplicate it here to avoid importing the heavy workflow module on the request
-# path.
-_RUN_SUMMARY_RE = re.compile(r"^FINAGENT_RUN_SUMMARY\s+(\{.*\})\s*$", re.MULTILINE)
+# every .ipynb. Key: (filename, mtime). Value: parsed summary dict. When the
+# file's mtime changes the old key won't match and we re-parse — no disk cache,
+# plain in-memory dict.
+_notebook_summary_cache: dict[tuple[str, float], dict] = {}
 
 
-def _extract_notebook_metadata(path: Path) -> dict:
+def _extract_notebook_summary(path: Path) -> dict:
     """Parse a notebook and pull out recipe identity + headline metrics.
 
-    Returns the extra fields to merge into the listing entry. If the file is
-    malformed or carries no recipe metadata, returns an empty dict so the
-    caller still gets {name, size, mtime}.
+    Returns a dict with the spec-defined shape (recipe_name, project, template,
+    fingerprint, run_id, headline_metrics). On parse failure or missing
+    metadata, fields default to None and headline_metrics is an empty dict —
+    never raises, just logs a warning.
+
+    Uses ``json.load`` (not ``nbformat.read``) since we only need the top-level
+    metadata dict and don't want to pay validation cost for every cell.
     """
+    blank = {
+        "recipe_name": None,
+        "project": None,
+        "template": None,
+        "fingerprint": None,
+        "run_id": None,
+        "headline_metrics": {},
+    }
     try:
         with open(path, "r", encoding="utf-8") as f:
             nb = json.load(f)
-    except (OSError, ValueError):
-        return {}
+    except (OSError, ValueError) as e:
+        logging.warning("notebook %s: could not parse JSON (%s)", path.name, e)
+        return blank
 
-    nb_meta = nb.get("metadata") or {}
-    recipe_meta = nb_meta.get("finagent_recipe") or {}
-    if not recipe_meta:
-        return {}
+    nb_meta = nb.get("metadata") if isinstance(nb, dict) else None
+    if not isinstance(nb_meta, dict):
+        return blank
 
-    # Tail the code cells for the FINAGENT_RUN_SUMMARY stream output. The
-    # template prints it from the last code cell, so iterate in reverse for
-    # cheaper hits on the common case.
-    summary: dict | None = None
-    for cell in reversed(nb.get("cells") or []):
-        if cell.get("cell_type") != "code":
-            continue
-        for out in cell.get("outputs") or []:
-            if out.get("output_type") != "stream":
-                continue
-            text = out.get("text", "")
-            if isinstance(text, list):
-                text = "".join(text)
-            m = _RUN_SUMMARY_RE.search(text)
-            if m:
-                try:
-                    summary = json.loads(m.group(1))
-                except ValueError:
-                    summary = None
-                break
-        if summary is not None:
-            break
+    run_summary = nb_meta.get("finagent_run_summary")
+    if not isinstance(run_summary, dict):
+        run_summary = {}
 
-    metrics = (summary or {}).get("metrics") or {}
+    raw_metrics = run_summary.get("headline_metrics")
+    if not isinstance(raw_metrics, dict):
+        raw_metrics = {}
+
     # NaN passes isinstance(_, float) and so would land in the response
     # payload — Starlette's JSONResponse uses allow_nan=False (strict JSON
     # spec) and 502s the whole notebooks endpoint when it encounters one.
-    # Same scrub pattern as Run.metrics() in finagent/experiments.py.
-    def _finite(v: object) -> bool:
-        return isinstance(v, (int, float)) and not (
+    def _finite_or_none(v: object) -> float | int | None:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)) and not (
             isinstance(v, float) and not math.isfinite(v)
-        )
+        ):
+            return v
+        return None
 
-    headline = {
-        k: metrics[k]
-        for k in ("sharpe", "annual_return")
-        if _finite(metrics.get(k))
+    headline_metrics = {
+        "sharpe": _finite_or_none(raw_metrics.get("sharpe")),
+        "annual_return": _finite_or_none(raw_metrics.get("annual_return")),
+        "max_drawdown": _finite_or_none(raw_metrics.get("max_drawdown")),
     }
 
-    fingerprint = recipe_meta.get("fingerprint")
+    def _str_or_none(v: object) -> str | None:
+        return v if isinstance(v, str) else None
+
     return {
-        "recipe_name": recipe_meta.get("name"),
-        "project": recipe_meta.get("project"),
-        "template": recipe_meta.get("template"),
-        "fingerprint": fingerprint,
-        # run_id isn't part of the stamped metadata today, but the spec asks
-        # us to surface it if present — fall back to the fingerprint, which is
-        # what the workflow uses to key runs.
-        "run_id": nb_meta.get("finagent_run_id") or fingerprint,
-        "headline_metrics": headline,
+        "recipe_name": _str_or_none(nb_meta.get("recipe_name")),
+        "project": _str_or_none(run_summary.get("project")),
+        "template": _str_or_none(run_summary.get("template")),
+        "fingerprint": _str_or_none(nb_meta.get("recipe_fingerprint")),
+        "run_id": _str_or_none(run_summary.get("run_id")),
+        "headline_metrics": headline_metrics,
     }
+
+
+def _notebook_summary_cached(path: Path, mtime: float) -> dict:
+    """Memoized wrapper around ``_extract_notebook_summary`` keyed by (name, mtime)."""
+    key = (path.name, mtime)
+    cached = _notebook_summary_cache.get(key)
+    if cached is not None:
+        return cached
+    summary = _extract_notebook_summary(path)
+    _notebook_summary_cache[key] = summary
+    return summary
 
 
 def _safe_notebook_path(name: str) -> Path:
@@ -344,27 +349,20 @@ async def list_notebooks():
         logging.exception("could not load runs index for notebooks list")
 
     items = []
-    seen: set[str] = set()
+    seen_keys: set[tuple[str, float]] = set()
     for p in _OUTPUTS_DIR.glob("*.ipynb"):
         try:
             st = p.stat()
         except OSError:
             continue
+        summary = _notebook_summary_cached(p, st.st_mtime)
+        seen_keys.add((p.name, st.st_mtime))
         entry: dict = {
             "name": p.name,
             "size": st.st_size,
             "mtime": st.st_mtime,
+            **summary,
         }
-        cache_key = str(p)
-        seen.add(cache_key)
-        cached = _NOTEBOOK_META_CACHE.get(cache_key)
-        if cached is not None and cached[0] == st.st_mtime:
-            extra = cached[1]
-        else:
-            extra = _extract_notebook_metadata(p)
-            _NOTEBOOK_META_CACHE[cache_key] = (st.st_mtime, extra)
-        if extra:
-            entry.update(extra)
         # Join with the runs table to surface audit verdict + run status.
         # Frontend uses these to render the Quarantined / Flagged tabs and
         # to decide whether a notebook is eligible for comparison/export.
@@ -382,10 +380,11 @@ async def list_notebooks():
             # key on plausibility flags, not just audit verdict.
             entry["flag_count"] = len(run.get("metrics_flags") or {})
         items.append(entry)
-    # Drop cache entries for notebooks that no longer exist on disk so the
-    # cache tracks the directory rather than growing forever.
-    for stale in _NOTEBOOK_META_CACHE.keys() - seen:
-        _NOTEBOOK_META_CACHE.pop(stale, None)
+    # Drop cache entries for notebooks that no longer exist on disk (or whose
+    # mtime moved) so the cache tracks the directory rather than growing
+    # forever.
+    for stale in _notebook_summary_cache.keys() - seen_keys:
+        _notebook_summary_cache.pop(stale, None)
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return {"notebooks": items}
 
@@ -503,6 +502,89 @@ class _DebateSubmission(BaseModel):
     ticker: str
     asset_class: str = "us_equity"
     rounds: int = 2
+
+
+# ── Signals (Phase 4 dashboard) ────────────────────────────────────────
+#
+# Notebooks publish signals via ``panel.export_signal(...)`` (writes
+# parquet + manifest + DB row). The endpoints below are read-side
+# helpers for the dashboard — list signals, fetch one signal's series
+# for plotting, mark active/paused/archived. The "Add to dashboard"
+# button is just status='paused' → status='active' once the user has
+# eyeballed the signal.
+
+@app.get("/api/signals")
+async def list_signals_route(
+    project: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    """List all registered signals, optionally filtered by project /
+    status. Sort: most recently updated first."""
+    from finagent.experiments import list_signals_db
+
+    signals = [s.as_public_dict() for s in list_signals_db(project=project, status=status)]
+    return {"signals": signals}
+
+
+@app.get("/api/signals/{name}")
+async def get_signal_route(name: str, versions: int = 0):
+    """Fetch one signal's manifest + (optionally) its retraining
+    history. ``versions=N`` returns the most recent N retrain events."""
+    from finagent.experiments import get_signal_db, list_signal_versions_db
+
+    sig = get_signal_db(name)
+    if not sig:
+        raise HTTPException(status_code=404, detail="signal not found")
+    out = sig.as_public_dict()
+    if versions > 0:
+        out["versions"] = list_signal_versions_db(sig.id, limit=int(versions))
+    return out
+
+
+@app.get("/api/signals/{name}/series")
+async def get_signal_series_route(name: str, tail: int = 0):
+    """Return the signal's parquet contents as JSON-serializable rows.
+    ``tail=N`` returns only the last N points; default returns all.
+
+    The dashboard chart renderer hits this endpoint on every page-load,
+    so callers should pass ``tail`` (~252 for one year of daily) when
+    they don't need the full history.
+    """
+    try:
+        import pandas as pd  # noqa: WPS433
+        from panel import load_signal
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"panel unavailable: {e}")
+    try:
+        series = load_signal(name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="signal series not found on disk")
+    if tail > 0:
+        series = series.tail(int(tail))
+    points = [
+        {"ts": ts.isoformat(), "value": float(v) if pd.notna(v) else None}
+        for ts, v in series.items()
+    ]
+    return {"name": name, "n_points": len(points), "points": points}
+
+
+class _SignalStatusBody(BaseModel):
+    status: str  # 'active' | 'paused' | 'archived'
+
+
+@app.patch("/api/signals/{name}/status")
+async def patch_signal_status_route(name: str, body: _SignalStatusBody):
+    """Update a signal's status. Used by the 'Add to dashboard'
+    button (paused → active), 'Pause', and 'Archive' actions."""
+    from finagent.experiments import update_signal_status_db
+
+    try:
+        ok = update_signal_status_db(name, body.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not ok:
+        raise HTTPException(status_code=404, detail="signal not found")
+    return {"ok": True, "name": name, "status": body.status}
 
 
 @app.post("/api/debates")
@@ -1183,21 +1265,22 @@ def _hint_for(e: Exception) -> Optional[str]:
 
     if cls in ("ImportError", "ModuleNotFoundError"):
         return (
-            "The agent tried to import a module that isn't pinned in the "
-            "environment. Try a recipe template instead."
+            "A required module is missing from the pinned environment. "
+            "Try a recipe instead, or contact ops."
         )
     if cls == "TimeoutError" or isinstance(e, asyncio.TimeoutError):
         return (
-            "The agent took too long. Try simplifying your prompt or using a "
-            "recipe template."
+            "The agent took too long. Try a recipe build (faster, "
+            "deterministic) instead of free-form chat."
         )
-    if cls in ("KeyError", "AttributeError") and "pandas" in msg:
+    if cls in ("KeyError", "AttributeError"):
         return (
-            "Likely a column or attribute name mismatch in the generated "
-            "code. Try rephrasing your prompt."
+            "The agent referenced something that doesn't exist. This is "
+            "usually a prompt-vs-tool mismatch — please screenshot the "
+            "request and report it."
         )
-    if cls == "RateLimitError":
-        return "API rate limit hit. Wait 30 seconds and retry."
+    if cls == "RuntimeError" and ("rate limit" in msg or "quota" in msg):
+        return "LLM provider rate-limited the request. Wait 30s and retry."
     return None
 
 
@@ -1215,11 +1298,12 @@ def _client_error_payload(e: Exception) -> dict:
     Tracebacks are deliberately *not* included — they are a security boundary.
     Full tracebacks are still emitted to server logs via logging.exception.
     """
-    first_line = str(e).split("\n", 1)[0][:200]
+    raw = str(e)
+    message = raw.splitlines()[0][:200] if raw else "(no message)"
     return {
         "type": "error",
         "error_class": e.__class__.__name__,
-        "message": first_line,
+        "message": message,
         "hint": _hint_for(e),
     }
 

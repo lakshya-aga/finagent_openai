@@ -25,24 +25,29 @@ Design notes:
   * NaN / Infinity / None are skipped — those are already scrubbed to None
     by ``experiments._finite_or_none`` and "no value" is not implausible,
     just absent.
+  * Pure module: only stdlib + typing imports. No agents/tools dependency,
+    so it is safe to call from the experiment serializer hot path without
+    pulling in the heavy SDK side of the codebase.
 """
 
 from __future__ import annotations
 
 import math
+from typing import Mapping, Optional
 
 
 # Default plausibility bands for an equity strategy at daily frequency.
 # Each entry is (low_inclusive, high_inclusive). Anything outside the band
 # is suspicious enough that a human should look before trusting the run.
 DEFAULT_BANDS: dict[str, tuple[float, float]] = {
-    "sharpe": (-3, 3),
-    "annual_return": (-1, 1),
-    "total_return": (-10, 50),
-    "calmar": (-50, 50),
-    "max_drawdown": (-1, 0),
-    "turnover": (0, 5),
-    "sortino": (-5, 5),
+    "sharpe": (-3.0, 3.0),
+    "sortino": (-5.0, 5.0),
+    "calmar": (-50.0, 50.0),
+    "annual_return": (-1.0, 1.0),         # -100% to +100% per year
+    "total_return": (-10.0, 50.0),        # -1000% to +5000% cumulative
+    "max_drawdown": (-1.0, 0.0),          # always non-positive, > -100%
+    "turnover": (0.0, 5.0),               # daily turnover; 5 = 500%/day
+    "win_rate": (0.0, 1.0),
 }
 
 
@@ -64,21 +69,43 @@ def _strip_book_prefix(key: str) -> str:
 
 
 def flag(
-    metrics: dict[str, float | None],
-    bands: dict[str, tuple[float, float]] = DEFAULT_BANDS,
+    metrics: Mapping[str, float | int | None],
+    bands: Optional[Mapping[str, tuple[float, float]]] = None,
 ) -> dict[str, str]:
     """Return ``{metric_key: warning_message}`` for each out-of-band value.
 
-    None and non-finite values (NaN, ±Infinity) are skipped — those mean
-    "no value", which is not implausible. Keys without a band entry (after
-    stripping book prefixes) are also skipped, so adding new metric names
-    upstream never causes spurious flags.
+    Parameters
+    ----------
+    metrics
+        Mapping of metric key to numeric value (or None / NaN, which are
+        skipped — "no value" is absent, not implausible).
+    bands
+        Optional override of the per-metric band table. When None, falls
+        back to ``DEFAULT_BANDS``. Metrics not in the band table are
+        skipped silently, so adding new metric names upstream never
+        causes spurious flags.
+
+    Returns
+    -------
+    dict[str, str]
+        Empty when every metric is in-band. Otherwise the warning string
+        is specific enough to read in isolation, e.g.
+        ``"sharpe 8.42 is outside plausibility band (-3.0, 3.0); "
+        "likely lookahead or look-back-too-short"``.
     """
+    if bands is None:
+        bands = DEFAULT_BANDS
     flags: dict[str, str] = {}
     for key, value in metrics.items():
         if value is None:
             continue
+        if isinstance(value, bool):
+            # bools are an int subclass — exclude explicitly so a
+            # stray True/False can't slip through the comparison.
+            continue
         if isinstance(value, float) and not math.isfinite(value):
+            continue
+        if not isinstance(value, (int, float)):
             continue
         band = bands.get(_strip_book_prefix(key))
         if band is None:
@@ -86,10 +113,33 @@ def flag(
         lo, hi = band
         if value < lo or value > hi:
             flags[key] = (
-                f"{value:.2f} outside expected range ({lo}, {hi}) "
-                "— likely look-ahead, leakage, or unit mismatch"
+                f"{key} {float(value):.2f} is outside plausibility band "
+                f"({float(lo)}, {float(hi)}); "
+                "likely lookahead or look-back-too-short"
             )
     return flags
 
 
-__all__ = ["DEFAULT_BANDS", "flag"]
+def flags_for_template(
+    template_name: Optional[str],
+    metrics: Mapping[str, float | int | None],
+    template_bands_override: Optional[Mapping[str, tuple[float, float]]] = None,
+) -> dict[str, str]:
+    """Resolve template-specific bands and return flagged metrics.
+
+    Merges ``template_bands_override`` over ``DEFAULT_BANDS`` so a
+    template can widen one metric's band (e.g. crypto template loosening
+    the Sharpe band) without restating the rest. ``template_name`` is
+    accepted for symmetry with the caller's API but doesn't drive
+    lookup here — band resolution from the template registry happens
+    in ``finagent.experiments._resolve_bands`` to keep this module
+    free of agents/tools imports.
+    """
+    bands: dict[str, tuple[float, float]] = dict(DEFAULT_BANDS)
+    if template_bands_override:
+        for k, v in template_bands_override.items():
+            bands[k] = (float(v[0]), float(v[1]))
+    return flag(metrics, bands)
+
+
+__all__ = ["DEFAULT_BANDS", "flag", "flags_for_template"]

@@ -90,6 +90,39 @@ That makes missing-dependency failures show up before any analysis cell
 runs and gives the user a single place to inspect.
 
 ────────────────────────────────────────
+ONE ROLE PER CODE CELL (production-readiness rule)
+
+Every code cell must do exactly ONE of these jobs:
+
+  (a) imports        — only import statements, nothing else
+  (b) data_load      — fetch raw data (yfinance, findata, parquet, SQL, ...)
+  (c) preprocess     — dataframe transforms (dropna/fillna/shift/rolling/
+                       resample/merge/scale). data_load + preprocess in
+                       the same cell is acceptable when it's a single
+                       fetch-then-clean unit.
+  (d) train          — model fitting (.fit, OLS, GBM, KMeans, curve_fit, ...).
+                       NEVER mix train with chart, eval, or signal_export.
+  (e) eval           — predict/score/metric computation. eval + chart is OK
+                       (a metrics chart). eval + train is NOT OK.
+  (f) chart          — matplotlib / mpf / plt.* / fig.* only.
+  (g) signal_export  — `panel.export_signal(...)` or `panel.save_model(...)`.
+                       Always its own cell — single side-effect per cell.
+  (h) summary        — the final FINAGENT_RUN_SUMMARY print.
+
+Reason: the train/infer splitter (`finagent.cells.split_notebook`)
+extracts production scripts from your notebook by role. A cell that
+mixes train + chart can't be cleanly partitioned and forces the
+inference job to re-train on every cron tick. A post-execution lint
+will surface any cell that mixes incompatible roles — keep cells
+single-purpose so the lint stays quiet.
+
+When you save a model, the immediately-following cell that USES the
+model (predict / metrics) should `panel.load_model("...")` to recreate
+it, even if the variable is still in scope. That convention lets the
+splitter put the train cell only in `train.py` and the predict cell
+only in `infer.py`.
+
+────────────────────────────────────────
 GENERAL RULES
 - Keep reasoning compact in the markdown header. Do not narrate tool actions in prose.
 - Use tools to act. Use markdown cells only to label what each code cell does.

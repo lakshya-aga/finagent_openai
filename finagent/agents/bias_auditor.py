@@ -1,269 +1,302 @@
 """LLM-judge bias audit producer.
 
-Every completed run is post-processed by this module: an OpenAI structured-
-output call inspects the executed notebook + recipe + harvested metrics and
-emits a verdict (PASS / FLAGGED / FAILED) with a per-check reason list. The
-audit runs *after* the run is reported as ``completed`` to the user — see
-``finagent/recipe_workflow.py`` — so the user-visible critical path is not
-slowed by the extra round-trip.
+A tiny one-shot LLM call that audits a completed run for the common
+research-bias mistakes a senior quant would catch on a code-review:
 
-Cost profile: one ``gpt-4o-mini`` call per completed run, capped at 2000
-output tokens. The prompt is ~600 tokens of system instructions plus a
-truncated notebook digest (code cells + first 20 lines of stdout per output)
-so we stay well inside the model's context window even on long notebooks.
+  * lookahead bias (`.shift(-N)`, future-dated joins, normalising on
+    full-period statistics)
+  * train/test leakage (fitting scalers/PCA on combined train+test,
+    row-shuffled CV on time-series)
+  * in-sample evaluation (reporting Sharpe on the training slice)
+  * sample-size adequacy (Sharpe on 6 months of daily data is noise)
+  * metric pickiness / p-hacking (tuning a threshold then reporting the
+    best, hidden ``for x in ...`` then ``max()`` patterns)
+  * survivorship bias (universe is "currently listed" only)
 
-The audit looks at *intent*, not raw output dumps — that's why we strip
-images / large dataframes from outputs before sending. Catching bias
-patterns is mostly about reading the code; the metrics dict is included
-to flag implausible Sharpes and tiny OOS samples.
+Modeled on ``finagent/agents/name_suggester.py`` — the cleanest "tiny
+one-shot LLM call with Pydantic structured output" pattern in the repo.
+The agents SDK is lazy-imported so this module stays loadable even in
+environments where the SDK isn't installed (CI, alt runtimes); on any
+failure (missing API key, network error, malformed response) we return
+``BiasAudit(verdict="PENDING", ...)`` so the run is never blocked and
+the frontend can render a grey "pending" pill.
+
+Wired post-completion by ``finagent.recipe_workflow._spawn_bias_audit``
+— the audit runs as a background task so the user-visible ``completed``
+status fires the moment the kernel finishes.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
-from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── Schema ─────────────────────────────────────────────────────────────
 
 
-class AuditReason(BaseModel):
+class BiasReason(BaseModel):
+    """One finding from the audit checklist. Multiple per audit are fine."""
+
     check_name: str = Field(
         description=(
-            "Stable identifier for the check, e.g. 'lookahead_bias', "
-            "'train_test_leakage', 'in_sample_evaluation', 'sample_size', "
-            "'implausible_metrics', 'survivorship_bias', 'selection_bias'."
+            "One of: lookahead, train_test_leakage, in_sample_eval, "
+            "sample_size, metric_pickiness, survivorship, other"
         )
     )
-    severity: Literal["info", "warning", "critical"]
+    severity: str = Field(
+        description="One of: info, warn, fail",
+    )
     evidence: str = Field(
         description=(
-            "1-3 sentence explanation citing specific cells, variable names, "
-            "or metric values that motivated this finding."
-        )
+            "<=200 chars; cite the specific cell/metric/code that triggered "
+            "the flag (e.g. 'cell 7: df[\"y\"].shift(-1)', "
+            "'metrics.sharpe=4.2 implausible', 'no train/test split visible')."
+        ),
     )
 
 
-class BiasAuditVerdict(BaseModel):
-    verdict: Literal["PASS", "FLAGGED", "FAILED"]
-    summary: str = Field(description="One paragraph plain-English overall assessment.")
-    reasons: list[AuditReason] = Field(default_factory=list)
+class BiasAudit(BaseModel):
+    """Structured verdict the UI can render directly."""
 
-
-# JSON schema fed to OpenAI structured-output. Keep in sync with the
-# Pydantic models above; we hand-roll it because OpenAI's `response_format`
-# requires `additionalProperties: false` everywhere and an explicit
-# `required` list for every object — both stricter than Pydantic's default
-# `model_json_schema()` output.
-_VERDICT_JSON_SCHEMA = {
-    "name": "BiasAuditVerdict",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["verdict", "summary", "reasons"],
-        "properties": {
-            "verdict": {"type": "string", "enum": ["PASS", "FLAGGED", "FAILED"]},
-            "summary": {"type": "string"},
-            "reasons": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["check_name", "severity", "evidence"],
-                    "properties": {
-                        "check_name": {"type": "string"},
-                        "severity": {
-                            "type": "string",
-                            "enum": ["info", "warning", "critical"],
-                        },
-                        "evidence": {"type": "string"},
-                    },
-                },
-            },
-        },
-    },
-}
+    verdict: str = Field(
+        description="One of: PASS, FLAGGED, FAILED, PENDING",
+    )
+    reasons: list[BiasReason] = Field(
+        default_factory=list,
+        description="Empty for clean PASS",
+    )
+    summary: str = Field(
+        description="<=300 chars; plain-English overall assessment",
+    )
 
 
 # ── Prompt ─────────────────────────────────────────────────────────────
 
 
-SYSTEM_PROMPT = """You are a senior quantitative researcher auditing a backtest \
-notebook for methodological flaws. You are skeptical by default — your job is \
-to catch the kinds of mistakes that make a strategy look great in-sample and \
-fall apart in production.
+_BIAS_AUDITOR_INSTRUCTIONS = """You are a senior quant reviewing a trading-research notebook for common biases.
+Read the cells, recipe, and computed metrics. Score each of these checks (skip
+any that don't apply):
 
-Run through this checklist on every notebook:
+1. Lookahead: does any code use `.shift(-N)`, future-dated joins, or compute
+   features after the label window? Normalising by full-period statistics
+   counts here too.
+2. Train/test leakage: are train and test sets disjoint in time? Any `fit()`
+   on combined train+test? Cross-validation that splits by row instead of by
+   time?
+3. In-sample evaluation: are reported metrics (Sharpe, accuracy, PnL) computed
+   on the *same* data the model was fit on?
+4. Sample size: are reported metrics from <100 trades, <2 years of daily data,
+   or <30 events? Sharpe on 6 months of data is unreliable.
+5. Metric pickiness / p-hacking: are multiple thresholds / parameters tested
+   with only the best reported? Any `for threshold in ...` followed by
+   selecting the max? Any sweep that reports just the winner?
+6. Survivorship: does the universe contain only currently-listed tickers (no
+   delistings)?
 
-1. Look-ahead bias: features computed using values from time t+k where k>=0 \
-   (e.g. `.shift(-1)`, using `df['close']` as both feature and target without \
-   a lag, normalising by full-period statistics).
-2. Train/test leakage: target derived from the same window used for feature \
-   fitting; scalers / PCA / feature selectors fit on the full dataset before \
-   the split.
-3. In-sample evaluation: Sharpe / accuracy / pnl computed on the training \
-   slice rather than held-out data.
-4. Sample size adequacy: fewer than ~200 out-of-sample observations is \
-   suspect for any claim about a Sharpe.
-5. Implausible metrics: Sharpe > 3, annual_return > 100%, max_drawdown < 5% \
-   — flag for human review even if you cannot prove the cause.
-6. Survivorship bias: universe is "current S&P 500 members", "currently \
-   listed", or similar — historical results are inflated by dropped names.
-7. Selection bias in metric reporting: only the best fold / parameter / \
-   asset is reported; metrics differ wildly across runs but only one is shown.
-
-For each finding emit ONE entry in `reasons` with:
-- `check_name`: one of the seven check ids above (snake_case)
-- `severity`: `critical` if it invalidates the result, `warning` if it \
-  materially weakens it, `info` for best-practice notes
-- `evidence`: cite the specific cell, variable, or metric value
+For each finding, emit ONE entry in `reasons`:
+  - `check_name`: one of {lookahead, train_test_leakage, in_sample_eval,
+    sample_size, metric_pickiness, survivorship, other}
+  - `severity`:
+      * `info`  — best-practice nudge, doesn't invalidate the result
+      * `warn`  — materially weakens the result, human should review
+      * `fail`  — invalidates the result entirely
+  - `evidence`: <=200 chars; cite a specific cell index, metric name, or code
+    snippet so the user can jump straight to it
 
 Verdict rules:
-- PASS: no warnings or criticals
-- FLAGGED: at least one warning, no criticals
-- FAILED: at least one critical
+  * PASS    — no `warn` or `fail` reasons (info-only is still PASS)
+  * FLAGGED — at least one `warn`, no `fail`
+  * FAILED  — at least one `fail`
 
-If the notebook is empty or unreadable, return FLAGGED with a single \
-`audit_error` reason. Be concise — the summary is one paragraph, evidence \
-is 1-3 sentences."""
+`summary` is <=300 chars of plain-English overall assessment for the badge
+tooltip. If the notebook is empty or unreadable, return FLAGGED with a single
+`other` reason explaining why. Never emit PENDING — that's reserved for the
+caller's error path.
+"""
 
 
 # ── Notebook digest ────────────────────────────────────────────────────
 
 
-_MAX_OUTPUT_LINES = 20
-_MAX_CELL_SOURCE_CHARS = 4000
+# Keep input under the model's effective context. 30K chars ≈ 7-8K tokens for
+# code, well within gpt-4o-mini's 128K window after the system prompt + the
+# recipe + metrics serialisation.
+_MAX_PAYLOAD_CHARS = 30_000
 
 
-def _digest_notebook(notebook_json: dict) -> str:
-    """Compress a notebook JSON down to code + truncated stdout per cell.
+def _digest_notebook(notebook_json: dict) -> list[dict[str, str]]:
+    """Strip a notebook down to ``[{cell_type, source}, ...]``.
 
-    We keep code cells verbatim (capped per cell) and append at most
-    `_MAX_OUTPUT_LINES` lines of stream output. Markdown cells are skipped
-    — the audit is about code, not narration. Images / dataframe HTML are
-    dropped entirely.
+    We deliberately drop ``outputs`` entirely — base64 PNG charts and large
+    dataframe HTML reps would blow the context budget for zero added signal
+    on the bias question, which is mostly about reading the code. Markdown
+    cells are kept (they often narrate the methodology and let the model
+    catch "we report the best fold" style claims).
     """
-    cells = notebook_json.get("cells", []) if isinstance(notebook_json, dict) else []
-    chunks: list[str] = []
-    for idx, cell in enumerate(cells):
-        if cell.get("cell_type") != "code":
+    if not isinstance(notebook_json, dict):
+        return []
+    cells = notebook_json.get("cells")
+    if not isinstance(cells, list):
+        return []
+    digest: list[dict[str, str]] = []
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        cell_type = cell.get("cell_type")
+        if cell_type not in ("code", "markdown"):
             continue
         source = cell.get("source", "")
         if isinstance(source, list):
             source = "".join(source)
-        if len(source) > _MAX_CELL_SOURCE_CHARS:
-            source = source[:_MAX_CELL_SOURCE_CHARS] + "\n# ...truncated..."
-        out_lines: list[str] = []
-        for out in cell.get("outputs", []) or []:
-            if out.get("output_type") != "stream":
-                continue
-            text = out.get("text", "")
-            if isinstance(text, list):
-                text = "".join(text)
-            for line in text.splitlines():
-                out_lines.append(line)
-                if len(out_lines) >= _MAX_OUTPUT_LINES:
-                    break
-            if len(out_lines) >= _MAX_OUTPUT_LINES:
-                break
-        chunk = f"# --- Cell {idx} ---\n{source}"
-        if out_lines:
-            chunk += "\n# stdout:\n" + "\n".join(f"# {l}" for l in out_lines)
-        chunks.append(chunk)
-    return "\n\n".join(chunks)
+        if not isinstance(source, str):
+            source = str(source)
+        digest.append({"cell_type": cell_type, "source": source})
+    return digest
 
 
-# ── LLM call ───────────────────────────────────────────────────────────
+def _build_user_payload(
+    notebook_json: dict,
+    recipe: dict | None,
+    metrics: dict | None,
+    template_name: str | None,
+) -> str:
+    """Pack the audit input into a single user message, capped at 30K chars.
 
-
-async def _call_llm(
-    user_payload: str,
-    run_id: Optional[str] = None,
-) -> BiasAuditVerdict:
-    """Hit the configured bias-audit model and parse the verdict.
-
-    Routes through ``finagent.llm`` so the model + provider are
-    swappable per env without editing this file.
-
-    Isolated as a thin function so tests can monkey-patch
-    ``_call_llm`` directly and exercise ``audit_run``'s error handling
-    without needing an API key.
+    Order matters: recipe + metrics + template come first because they're
+    the cheapest signals (always small, always relevant). Notebook cells
+    come last so truncation, when it bites, drops the lowest-signal tail
+    of the notebook rather than the recipe header.
     """
-    from finagent.llm import get_llm_client, get_model_name
-    client = get_llm_client("bias_auditor")
-    audit_model = get_model_name("bias_auditor")
-    resp = await client.chat.completions.create(
-        model=audit_model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_payload},
-        ],
-        response_format={"type": "json_schema", "json_schema": _VERDICT_JSON_SCHEMA},
-        max_tokens=2000,
-        temperature=0,
-    )
-    # Cost ledger — recorded best-effort; never fails the call.
+    import json as _json
+
     try:
-        from finagent.cost_tracking import record_cost_event
-        record_cost_event(
-            response=resp,
-            purpose="bias_audit",
-            model=audit_model,
-            run_id=run_id,
-        )
+        recipe_str = _json.dumps(recipe or {}, default=str, indent=2)
     except Exception:
-        pass
-    raw = resp.choices[0].message.content or "{}"
-    return BiasAuditVerdict.model_validate_json(raw)
+        recipe_str = "{}"
+    try:
+        metrics_str = _json.dumps(metrics or {}, default=str, indent=2)
+    except Exception:
+        metrics_str = "{}"
+    template_str = template_name or "(none)"
+
+    header = (
+        f"TEMPLATE: {template_str}\n\n"
+        f"RECIPE:\n{recipe_str}\n\n"
+        f"METRICS:\n{metrics_str}\n\n"
+        f"NOTEBOOK CELLS (cell_type + source only — outputs stripped):\n"
+    )
+
+    cells = _digest_notebook(notebook_json)
+    cell_chunks: list[str] = []
+    used = len(header)
+    truncated_at: Optional[int] = None
+    for idx, cell in enumerate(cells):
+        chunk = f"# --- Cell {idx} ({cell['cell_type']}) ---\n{cell['source']}\n"
+        if used + len(chunk) > _MAX_PAYLOAD_CHARS:
+            truncated_at = idx
+            break
+        cell_chunks.append(chunk)
+        used += len(chunk)
+
+    body = "\n".join(cell_chunks) if cell_chunks else "(no cells)"
+    if truncated_at is not None:
+        body += (
+            f"\n\n# ... {len(cells) - truncated_at} more cells truncated to "
+            f"fit context ..."
+        )
+
+    return header + body
+
+
+# ── Public API ─────────────────────────────────────────────────────────
 
 
 async def audit_run(
+    *,
     notebook_json: dict,
-    recipe_yaml: str,
-    metrics: dict[str, Any],
-    run_id: Optional[str] = None,
-) -> BiasAuditVerdict:
-    """Audit a completed run and return a structured verdict.
+    recipe: dict | None,
+    metrics: dict | None,
+    template_name: str | None,
+) -> BiasAudit:
+    """Audit a completed run and return a structured ``BiasAudit``.
 
-    Always returns a `BiasAuditVerdict` — on any error (missing API key,
-    timeout, malformed JSON), returns FLAGGED with a single `audit_error`
-    reason so callers don't have to reason about exceptions.
+    Always returns a ``BiasAudit`` — on any error (missing API key, missing
+    SDK, network timeout, malformed response) returns
+    ``BiasAudit(verdict="PENDING", reasons=[], summary="auditor unavailable: <reason>")``
+    so the run completion path is never blocked.
     """
+    # Lazy imports — keep this module loadable in environments where the
+    # Agents SDK isn't installed (tests, alternative runtimes, ops scripts
+    # that just want to deserialize a stored audit).
     try:
-        digest = _digest_notebook(notebook_json or {})
-        if not digest:
-            digest = "# (notebook is empty)"
-        try:
-            metrics_str = json.dumps(metrics or {}, default=str, indent=2)
-        except Exception:
-            metrics_str = "{}"
-        user_payload = (
-            "RECIPE YAML:\n"
-            f"{recipe_yaml or '# (no recipe)'}\n\n"
-            "METRICS:\n"
-            f"{metrics_str}\n\n"
-            "NOTEBOOK DIGEST (code cells + first lines of stdout):\n"
-            f"{digest}"
+        from agents import Agent, Runner, ModelSettings
+    except ImportError as exc:
+        logger.warning("bias_auditor: agents SDK unavailable (%s)", exc)
+        return BiasAudit(
+            verdict="PENDING",
+            reasons=[],
+            summary=f"auditor unavailable: agents SDK not installed ({exc})",
         )
-        return await _call_llm(user_payload, run_id=run_id)
+
+    try:
+        from finagent.llm import get_model_name
+        model_name = get_model_name("bias_auditor")
     except Exception as exc:
-        logging.exception("bias audit failed")
-        return BiasAuditVerdict(
-            verdict="FLAGGED",
-            summary=(
-                "Audit could not complete; treating run as flagged for human "
-                "review until the auditor can be re-run."
-            ),
-            reasons=[
-                AuditReason(
-                    check_name="audit_error",
-                    severity="warning",
-                    evidence=str(exc),
-                )
-            ],
+        logger.warning("bias_auditor: model resolution failed, falling back (%s)", exc)
+        model_name = "gpt-4o-mini"
+
+    try:
+        user_payload = _build_user_payload(
+            notebook_json or {}, recipe, metrics, template_name,
         )
+    except Exception as exc:
+        logger.exception("bias_auditor: payload build failed")
+        return BiasAudit(
+            verdict="PENDING",
+            reasons=[],
+            summary=f"auditor unavailable: payload build failed ({exc})",
+        )
+
+    try:
+        agent = Agent(
+            name="BiasAuditor",
+            instructions=_BIAS_AUDITOR_INSTRUCTIONS,
+            model=model_name,
+            model_settings=ModelSettings(),
+            output_type=BiasAudit,
+        )
+        result = await Runner.run(
+            agent,
+            input=user_payload,
+            max_turns=1,
+        )
+        verdict = result.final_output_as(BiasAudit)
+    except Exception as exc:
+        logger.warning("bias_auditor: LLM call failed (%s)", exc)
+        return BiasAudit(
+            verdict="PENDING",
+            reasons=[],
+            summary=f"auditor unavailable: {exc}",
+        )
+
+    # Normalise the verdict in case the model emits a near-miss like "Pass".
+    # Defence-in-depth: even with structured output, a stale model can drift
+    # off-grid — recompute deterministically from the severities so the badge
+    # never goes blank.
+    v = (verdict.verdict or "").strip().upper()
+    if v not in {"PASS", "FLAGGED", "FAILED"}:
+        sevs = {(r.severity or "").strip().lower() for r in verdict.reasons}
+        if "fail" in sevs:
+            v = "FAILED"
+        elif "warn" in sevs:
+            v = "FLAGGED"
+        else:
+            v = "PASS"
+    verdict.verdict = v
+    return verdict
