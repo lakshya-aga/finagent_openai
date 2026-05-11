@@ -77,4 +77,14 @@ langchain-ollama>=0.2           # for the default Qwen-via-Ollama path
 # --ignore-requires-python --no-deps because its setup.cfg still pins
 # python_requires <3.9 (upstream mlfinlab heritage) and its install_requires
 # pulls in tensorflow / networkx<2.6 / dash / etc. which bust the resolver.
-git+https://github.com/lakshya-aga/data-mcp.git
+# Pin to a SHA so docker's pip-install layer cache invalidates when
+# data-mcp ships a fix. With the unpinned `git+...data-mcp.git` form,
+# warm builds reuse the cached layer and serve a stale findata even
+# though main has the fix. The dtype regression in candlestick_patterns
+# resurfaces in production every time docker reuses the cached layer.
+# Bump this SHA whenever you push a data-mcp fix that needs to land
+# in the next deploy.
+#
+# Current: fc17c7b — news_gdelt ToneChart enrichment + ohlc_chart SMA
+# all-NaN guard + candlestick_patterns dtype helper.
+git+https://github.com/lakshya-aga/data-mcp.git@fc17c7baa8977a2377780a0509cc5dcbc6ff3838

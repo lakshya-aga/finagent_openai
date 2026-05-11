@@ -78,7 +78,19 @@ def test_findata_candlestick_patterns_runs_clean():
     classifier rolled into ``_datetime_utils``. If the installed
     package gets stale (no ``normalise_dtindex`` import), this test
     is what surfaces it."""
+    import inspect
+
     from findata.candlestick_patterns import detect_candlestick_patterns
+
+    # Defence-in-depth: if the installed package version doesn't have
+    # the dtype helper imported, fail loud here BEFORE the actual call.
+    # Otherwise a TypeError silently masquerades as 'no patterns found'.
+    src = inspect.getsource(detect_candlestick_patterns)
+    assert "normalise_dtindex" in src, (
+        "Stale findata install: detect_candlestick_patterns lacks the "
+        "normalise_dtindex fix. Reinstall: pip install -e /path/to/data-mcp"
+    )
+
     out = detect_candlestick_patterns("AAPL", lookback_days=60)
     assert isinstance(out, dict)
     assert "n_patterns_found" in out
@@ -88,6 +100,81 @@ def test_findata_candlestick_patterns_runs_clean():
     # ~50 pattern recognisers. If 0 it usually means the index-cutoff
     # comparison silently dropped everything.
     assert out["n_patterns_found"] >= 1, f"zero patterns suspicious: {out['summary']}"
+
+
+@needs_findata
+@pytest.mark.needs_yfinance
+def test_aapl_candlestick_full_yfinance_to_patterns_path():
+    """End-to-end smoke for the dtype regression that keeps re-surfacing
+    in production. Real path, no mocks:
+
+        yfinance.download(AAPL) → findata.candlestick_patterns(AAPL) →
+        non-empty pattern list
+
+    Asserts:
+      * yfinance returned a non-empty OHLC frame (sanity-check upstream)
+      * The actual function call doesn't raise
+        TypeError("Invalid comparison between dtype=datetime64[s] and
+        Timestamp") at the index-cutoff slice
+      * pandas-ta returns at least one pattern event
+      * Each event has the canonical record shape
+        (date, pattern, signal, close_at_pattern)
+
+    When this fails with the dtype TypeError, it means the deployed
+    findata package is stale (the docker layer cache served the old
+    version). Fix is to bump the data-mcp pin in requirements.txt
+    so docker invalidates the layer.
+    """
+    import yfinance as yf
+
+    from findata.candlestick_patterns import detect_candlestick_patterns
+
+    # 1. Direct yfinance fetch — sanity-check the upstream so a
+    #    yfinance-side regression doesn't masquerade as a candlestick bug.
+    raw = yf.download(
+        "AAPL", period="3mo", progress=False, auto_adjust=False,
+    )
+    assert raw is not None and not raw.empty, "yfinance returned empty for AAPL"
+    cols_lower = {
+        (c.lower() if not isinstance(c, tuple) else c[0].lower())
+        for c in raw.columns
+    }
+    assert {"open", "high", "low", "close"} & cols_lower, (
+        f"missing OHLC columns from yfinance: got {cols_lower}"
+    )
+
+    # 2. The actual function under test. Catch + re-raise the dtype
+    #    TypeError with diagnostic context so the failure mode is
+    #    obvious in the test report.
+    try:
+        out = detect_candlestick_patterns("AAPL", lookback_days=60)
+    except TypeError as e:
+        if "Invalid comparison" in str(e) and "datetime64" in str(e):
+            raise AssertionError(
+                "The datetime64[s] dtype regression IS BACK. "
+                f"findata.candlestick_patterns hit `{e}` on AAPL. "
+                "Check that `normalise_dtindex(ohlc.index)` and "
+                "`normalise_timestamp(cutoff)` are both being called "
+                "before the `ohlc.index >= cutoff` comparison."
+            ) from e
+        raise  # any other TypeError is a real bug — surface raw
+
+    # 3. Shape assertions
+    assert out["ticker"] == "AAPL"
+    assert out["lookback_days"] == 60
+    assert isinstance(out["patterns"], list)
+    assert out["n_patterns_found"] == len(out["patterns"])
+    assert out["n_patterns_found"] >= 1, (
+        f"Zero patterns is the silent symptom of the dtype bug. "
+        f"Summary: {out['summary']}"
+    )
+    # 4. Each event must carry the contract fields
+    sample = out["patterns"][0]
+    assert {"date", "pattern", "signal", "close_at_pattern"}.issubset(sample), (
+        f"event missing required fields: {sample}"
+    )
+    assert sample["signal"] in {"bullish", "bearish"}
+    assert isinstance(sample["close_at_pattern"], (int, float))
 
 
 @needs_findata
