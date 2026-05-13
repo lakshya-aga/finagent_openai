@@ -449,6 +449,17 @@ async def _run_tool_loop(
                 "text": f"`→ {tool_name}` — {outcome}",
                 "ts": time.time(),
                 "interim": True,
+                # Tag the message with the tool + ticker so the frontend can
+                # offer an "expand" chevron that fetches the OHLC chart for
+                # that asset on demand. The ticker is the panel's subject
+                # ticker (state["ticker"]); tool name lets the UI decide
+                # whether to expose the expand affordance (chart-relevant
+                # tools only) without re-parsing the text.
+                "data": {
+                    "tool": tool_name,
+                    "ticker": panel_state.get("ticker"),
+                    "asset_class": panel_state.get("asset_class"),
+                },
             })
 
     # Hit iteration cap — return whatever the last AI message had.

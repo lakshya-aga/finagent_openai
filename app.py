@@ -1039,6 +1039,61 @@ async def reject_template_draft(slug: str):
     return reject_draft(slug)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# On-demand OHLC chart endpoint. Powers the debate-transcript "expand" feature:
+# clicking the chevron on a tool-call line fetches the chart for that asset.
+# Thin wrapper around findata.ohlc_chart.plot_ohlc_chart — keeps the chart
+# generation in one place (data-mcp) and just exposes it over HTTP for the UI.
+# Cheap to cache by (ticker, lookback_days) since the underlying yfinance
+# call is the bottleneck.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/charts/ohlc")
+async def get_ohlc_chart(
+    ticker: str,
+    lookback_days: int = 90,
+    with_indicators: bool = True,
+    with_sr: bool = False,
+):
+    """Render an OHLC candlestick chart with SMA + RSI overlays and return
+    the base64-encoded PNG. Used by the live debate transcript to surface
+    a chart on demand when the user expands a tool-call line.
+
+    Args:
+        ticker: Yahoo Finance ticker (e.g. ``AAPL``, ``RELIANCE.NS``).
+        lookback_days: Visible window in days (capped at 1825 inside findata).
+        with_indicators: Draw 50/200 SMA + RSI(14) panel.
+        with_sr: Overlay support/resistance horizontal lines.
+
+    Returns:
+        ``{ticker, lookback_days, image_base64, markdown_image, summary,
+        chart_status, title}``. ``chart_status`` is ``"ok"`` on success,
+        ``"no_data"`` when yfinance returned nothing, or ``"render_error"``
+        when mplfinance failed.
+    """
+    if not isinstance(ticker, str) or not ticker.strip():
+        raise HTTPException(status_code=400, detail="ticker must be a non-empty string")
+    try:
+        from findata.ohlc_chart import plot_ohlc_chart
+    except ImportError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"findata not available: {e}",
+        )
+
+    # The plot routine is CPU-bound (mplfinance render) + network (yfinance);
+    # offload so the FastAPI worker stays responsive.
+    out = await asyncio.to_thread(
+        plot_ohlc_chart,
+        ticker.strip().upper(),
+        lookback_days=int(lookback_days),
+        with_sr=bool(with_sr),
+        with_indicators=bool(with_indicators),
+    )
+    return out
+
+
 @app.get("/api/recipes/templates")
 async def list_recipe_templates():
     """Return every registered template with its rich metadata.
