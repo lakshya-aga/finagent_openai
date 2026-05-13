@@ -43,7 +43,59 @@ from pydantic import BaseModel
 
 from agent_workflow import run_workflow, WorkflowInput
 
+# ── Rate Limiting ────────────────────────────────────────────────────────
+# Simple in-memory sliding-window rate limiter. Tracks timestamps per key
+# (session_id or IP). Configurable via RATE_LIMIT_RPM (default 10).
+# Only applied to expensive endpoints: /api/chat, /api/debates, /api/recipes.
+
+import time as _time
+from collections import defaultdict as _defaultdict
+
+_RATE_LIMIT_RPM = int(os.environ.get("RATE_LIMIT_RPM", "10"))
+_RATE_WINDOW = 60  # seconds
+_rate_buckets: dict[str, list[float]] = _defaultdict(list)
+
+
+def _check_rate_limit(key: str) -> bool:
+    """Return True if the request should be allowed, False if rate-limited."""
+    if _RATE_LIMIT_RPM <= 0:
+        return True  # disabled
+    now = _time.monotonic()
+    bucket = _rate_buckets[key]
+    # Prune old entries
+    cutoff = now - _RATE_WINDOW
+    _rate_buckets[key] = bucket = [t for t in bucket if t > cutoff]
+    if len(bucket) >= _RATE_LIMIT_RPM:
+        return False
+    bucket.append(now)
+    return True
+
+
+_RATE_LIMITED_PATHS = {"/api/chat", "/api/debates", "/api/recipes"}
+
 app = FastAPI()
+
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import Response as StarletteResponse
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: StarletteRequest, call_next):
+        if request.method in ("POST",) and request.url.path in _RATE_LIMITED_PATHS:
+            # Key by session_id from JSON body if available, else by client IP
+            key = request.client.host if request.client else "unknown"
+            if not _check_rate_limit(key):
+                return StarletteResponse(
+                    content="Rate limit exceeded. Try again shortly.",
+                    status_code=429,
+                    headers={"Retry-After": str(_RATE_WINDOW)},
+                )
+        return await call_next(request)
+
+
+app.add_middleware(RateLimitMiddleware)
 
 
 @app.on_event("startup")
@@ -51,6 +103,13 @@ async def _startup():
     # Scheduler must start AFTER the FastAPI event loop is running so
     # AsyncIOScheduler hooks the same loop the cron job needs to use.
     start_scheduler()
+    # Clean up stale sessions from previous runs
+    try:
+        deleted = _cleanup_old_sessions()
+        if deleted:
+            logging.info("session cleanup: removed %d stale sessions", deleted)
+    except Exception:
+        logging.exception("session cleanup failed (non-fatal)")
     # Chart smoke-test: every container restart fires plot_ohlc_chart
     # for one US + one Indian ticker. Surfaces tz/dtype/upstream
     # regressions immediately rather than waiting for a debate to hit
@@ -112,8 +171,77 @@ async def _shutdown():
     stop_scheduler()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# session_id -> {"notebook_path": str | None, "history": list}
-_sessions: dict = {}
+# ── SQLite-backed session store ──────────────────────────────────────────
+# Replaces the old in-memory `_sessions: dict` so sessions survive
+# process restarts. DB lives next to the outputs directory.
+
+import sqlite3
+
+_SESSION_DB_PATH = Path(os.environ.get("SESSION_DB_PATH", "outputs/sessions.db"))
+_SESSION_TTL_DAYS = int(os.environ.get("SESSION_TTL_DAYS", "7"))
+
+
+def _init_session_db() -> None:
+    _SESSION_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(_SESSION_DB_PATH)) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                notebook_path TEXT,
+                history TEXT DEFAULT '[]',
+                created_at REAL DEFAULT (strftime('%s', 'now')),
+                updated_at REAL DEFAULT (strftime('%s', 'now'))
+            )
+        """)
+        conn.commit()
+
+
+def _get_session(sid: str) -> dict:
+    with sqlite3.connect(str(_SESSION_DB_PATH)) as conn:
+        row = conn.execute(
+            "SELECT notebook_path, history FROM sessions WHERE session_id = ?", (sid,)
+        ).fetchone()
+    if row:
+        return {"notebook_path": row[0], "history": json.loads(row[1] or "[]")}
+    return _create_session(sid)
+
+
+def _create_session(sid: str) -> dict:
+    with sqlite3.connect(str(_SESSION_DB_PATH)) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions (session_id) VALUES (?)", (sid,)
+        )
+        conn.commit()
+    return {"notebook_path": None, "history": []}
+
+
+def _update_session(sid: str, notebook_path: str | None, history: list) -> None:
+    with sqlite3.connect(str(_SESSION_DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE sessions SET notebook_path = ?, history = ?, updated_at = strftime('%s', 'now') WHERE session_id = ?",
+            (notebook_path, json.dumps(history), sid),
+        )
+        conn.commit()
+
+
+def _delete_session(sid: str) -> None:
+    with sqlite3.connect(str(_SESSION_DB_PATH)) as conn:
+        conn.execute("DELETE FROM sessions WHERE session_id = ?", (sid,))
+        conn.commit()
+
+
+def _cleanup_old_sessions() -> int:
+    """Delete sessions older than SESSION_TTL_DAYS. Returns count deleted."""
+    cutoff = _time.time() - (_SESSION_TTL_DAYS * 86400)
+    with sqlite3.connect(str(_SESSION_DB_PATH)) as conn:
+        cursor = conn.execute(
+            "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
+        )
+        conn.commit()
+        return cursor.rowcount
+
+
+_init_session_db()
 
 
 class ChatRequest(BaseModel):
@@ -129,16 +257,14 @@ async def index():
 @app.post("/api/session")
 async def new_session():
     sid = str(uuid.uuid4())
-    _sessions[sid] = {"notebook_path": None, "history": []}
+    _create_session(sid)
     return {"session_id": sid}
 
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     sid = req.session_id
-    if sid not in _sessions:
-        _sessions[sid] = {"notebook_path": None, "history": []}
-    session = _sessions[sid]
+    session = _get_session(sid)
 
     progress_queue: asyncio.Queue = asyncio.Queue()
 
@@ -151,17 +277,19 @@ async def chat(req: ChatRequest):
                 progress_cb=progress_queue.put,
             )
             # Update session state
-            session["notebook_path"] = result.get("notebook_path") or session["notebook_path"]
-            session["history"].append(
+            notebook_path = result.get("notebook_path") or session["notebook_path"]
+            history = list(session["history"])
+            history.append(
                 {"role": "user", "content": [{"type": "input_text", "text": req.message}]}
             )
-            session["history"].append(
+            history.append(
                 {"role": "assistant", "content": [{"type": "output_text", "text": result.get("output_text", "")}]}
             )
+            _update_session(sid, notebook_path, history)
             await progress_queue.put({
                 "type": "done",
                 "mode": result.get("mode", "new"),
-                "notebook_path": session["notebook_path"],
+                "notebook_path": notebook_path,
                 "summary": result.get("output_text", ""),  # used by question mode
             })
         except Exception as e:
@@ -186,8 +314,8 @@ async def chat(req: ChatRequest):
 
 @app.get("/api/notebook/{session_id}")
 async def download_notebook(session_id: str):
-    session = _sessions.get(session_id)
-    if not session or not session["notebook_path"]:
+    session = _get_session(session_id)
+    if not session["notebook_path"]:
         return {"error": "No notebook for this session"}
     path = Path(session["notebook_path"])
     if not path.exists():
@@ -197,7 +325,7 @@ async def download_notebook(session_id: str):
 
 @app.delete("/api/session/{session_id}")
 async def clear_session(session_id: str):
-    _sessions.pop(session_id, None)
+    _delete_session(session_id)
     return {"ok": True}
 
 

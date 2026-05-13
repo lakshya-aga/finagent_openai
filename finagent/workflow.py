@@ -27,7 +27,7 @@ from .functions import extract_trace_markdown
 from .functions.notebook_io import _get_current_path
 from .hooks import StreamingHooks, build_notebook_outline, emit_phase
 from .lineage import extract_lineage_ast, extract_lineage_runtime
-from .mcp_connections import make_data_mcp, make_fruit_thrower, optional_knowledge_mcp
+from .mcp_connections import mcp_servers
 
 
 logging.basicConfig(
@@ -342,7 +342,7 @@ async def run_workflow(
                     f"Apply this diff spec to the current notebook:\n{diff_spec_raw}"
                 )
                 await _emit_agent_input("edit_apply", edit_orchestration_agent.name, edit_apply_prompt)
-                async with MCPServerManager([make_fruit_thrower(), make_data_mcp(), make_knowledge_mcp()]) as _edit_mcp_mgr:
+                async with MCPServerManager(mcp_servers()) as _edit_mcp_mgr:
                     _edit_orch = edit_orchestration_agent.clone(mcp_servers=_edit_mcp_mgr.active_servers)
                     edit_orch_result_temp = await Runner.run(
                         _edit_orch,
@@ -376,7 +376,7 @@ async def run_workflow(
                     validatorandfixingagent.name,
                     f"Validate the edited notebook at {existing_notebook_path}.",
                 )
-                async with MCPServerManager([make_fruit_thrower(), make_data_mcp(), make_knowledge_mcp()]) as _val_mcp_mgr:
+                async with MCPServerManager(mcp_servers()) as _val_mcp_mgr:
                     _val = validatorandfixingagent.clone(mcp_servers=_val_mcp_mgr.active_servers)
                     val_result_temp = await Runner.run(
                         _val,
@@ -435,7 +435,7 @@ async def run_workflow(
         await emit_phase(progress_cb, "plan", "start")
         plan_prompt = f"Research request: {workflow['input_as_text']}"
         await _emit_agent_input("plan", planner.name, plan_prompt)
-        async with MCPServerManager([make_fruit_thrower(), make_data_mcp(), make_knowledge_mcp()]) as _planner_mcp_mgr:
+        async with MCPServerManager(mcp_servers()) as _planner_mcp_mgr:
             _planner = planner.clone(mcp_servers=_planner_mcp_mgr.active_servers)
             planner_result_temp = await Runner.run(
                 _planner,
@@ -465,7 +465,7 @@ async def run_workflow(
             f"DAG plan from planner:\n{planner_result['output_text']}"
         )
         await _emit_agent_input("build", orchestration_agent.name, build_prompt)
-        async with MCPServerManager([make_fruit_thrower(), make_data_mcp(), make_knowledge_mcp()]) as _orch_mcp_mgr:
+        async with MCPServerManager(mcp_servers()) as _orch_mcp_mgr:
             _orchestration_agent = orchestration_agent.clone(mcp_servers=_orch_mcp_mgr.active_servers)
             try:
                 orchestration_agent_result_temp = await Runner.run(
@@ -517,7 +517,7 @@ async def run_workflow(
             f"Validate the freshly built notebook at {nb_path_after_build}. "
             "Run it cell-by-cell, fix any errors, escalate if blocked.",
         )
-        async with MCPServerManager([make_fruit_thrower(), make_data_mcp(), make_knowledge_mcp()]) as _val_mcp_mgr:
+        async with MCPServerManager(mcp_servers()) as _val_mcp_mgr:
             _validatorandfixingagent = validatorandfixingagent.clone(mcp_servers=_val_mcp_mgr.active_servers)
             validatorandfixingagent_result_temp = await Runner.run(
                 _validatorandfixingagent,
