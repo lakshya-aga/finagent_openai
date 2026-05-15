@@ -45,8 +45,9 @@ from agent_workflow import run_workflow, WorkflowInput
 
 # ── Rate Limiting ────────────────────────────────────────────────────────
 # Simple in-memory sliding-window rate limiter. Tracks timestamps per key
-# (session_id or IP). Configurable via RATE_LIMIT_RPM (default 10).
-# Only applied to expensive endpoints: /api/chat, /api/debates, /api/recipes.
+# (user id, session id, or IP). Configurable via RATE_LIMIT_RPM (default 10).
+# Only applied to expensive endpoints: /api/chat, /api/debates, /api/recipes,
+# and the Synapse-facing /chat route.
 
 import time as _time
 from collections import defaultdict as _defaultdict
@@ -71,7 +72,41 @@ def _check_rate_limit(key: str) -> bool:
     return True
 
 
-_RATE_LIMITED_PATHS = {"/api/chat", "/api/debates", "/api/recipes"}
+_RATE_LIMITED_PATHS = {"/api/chat", "/api/debates", "/api/recipes", "/chat"}
+
+
+async def _rate_limit_key(request: "StarletteRequest") -> str:
+    """Best-effort per-request key for in-process rate limiting.
+
+    Prefer stable request identities carried in JSON payloads so the Synapse
+    proxy does not collapse every end user onto one shared container IP.
+    Fall back to the forwarded/client IP when no better key is available.
+    """
+    payload: dict | None = None
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            payload = json.loads((await request.body()).decode("utf-8") or "{}")
+        except Exception:
+            payload = None
+
+    if request.url.path == "/chat" and isinstance(payload, dict):
+        user = payload.get("user")
+        if isinstance(user, dict) and user.get("id"):
+            return f"user:{user['id']}"
+
+    if request.url.path == "/api/chat" and isinstance(payload, dict):
+        session_id = payload.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            return f"session:{session_id}"
+
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",", 1)[0].strip()
+        if client_ip:
+            return f"ip:{client_ip}"
+
+    client_ip = request.client.host if request.client else "unknown"
+    return f"ip:{client_ip}"
 
 app = FastAPI()
 
@@ -84,8 +119,7 @@ from starlette.responses import Response as StarletteResponse
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: StarletteRequest, call_next):
         if request.method in ("POST",) and request.url.path in _RATE_LIMITED_PATHS:
-            # Key by session_id from JSON body if available, else by client IP
-            key = request.client.host if request.client else "unknown"
+            key = await _rate_limit_key(request)
             if not _check_rate_limit(key):
                 return StarletteResponse(
                     content="Rate limit exceeded. Try again shortly.",
@@ -172,8 +206,9 @@ async def _shutdown():
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ── SQLite-backed session store ──────────────────────────────────────────
-# Replaces the old in-memory `_sessions: dict` so sessions survive
-# process restarts. DB lives next to the outputs directory.
+# Persists legacy `/api/session` + `/api/chat` sessions and the web-facing
+# `/chat` notebook pointer across process restarts. DB lives next to the
+# outputs directory.
 
 import sqlite3
 
@@ -242,6 +277,10 @@ def _cleanup_old_sessions() -> int:
 
 
 _init_session_db()
+
+
+def _web_session_id(uid: str) -> str:
+    return f"web:{uid}"
 
 
 class ChatRequest(BaseModel):
@@ -1451,7 +1490,7 @@ async def chat_web(req: _WebChatRequest):
     prior_history = _to_internal_history(req.messages[:last_user_idx])
 
     uid = req.user.id
-    session = _sessions.setdefault(uid, {"notebook_path": None, "history": []})
+    session = _get_session(_web_session_id(uid))
 
     progress_queue: asyncio.Queue = asyncio.Queue()
 
@@ -1464,12 +1503,13 @@ async def chat_web(req: _WebChatRequest):
                 prior_history=prior_history,
                 progress_cb=progress_queue.put,
             )
-            session["notebook_path"] = result.get("notebook_path") or session["notebook_path"]
+            notebook_path = result.get("notebook_path") or session["notebook_path"]
+            _update_session(_web_session_id(uid), notebook_path, [])
             await progress_queue.put({
                 "type": "done",
                 "text": result.get("output_text", ""),
                 "mode": result.get("mode", "new"),
-                "notebook_path": session["notebook_path"],
+                "notebook_path": notebook_path,
             })
         except Exception as e:
             logging.exception("/chat run_workflow failed")
