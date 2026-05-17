@@ -176,6 +176,18 @@ def start_scheduler() -> None:
     #   11:00 UTC = 16:30 IST   Portfolio-manager agent commits
     #                            TOMORROW'S directions (LLM, ~30-90s).
     #                            Uses today's market data + verdicts.
+    # ALL-50 daily stock-analyst run BEFORE market open. ~$0.001 per
+    # ticker × 50 = ~$0.05/day on gpt-5-mini; ~90 seconds wall-clock
+    # with 5-way parallelism. Lands a (direction, target, stop_loss,
+    # max_hold_days) row in predictions for every ticker. The
+    # portfolio-manager agent at 16:30 IST then reads those + applies
+    # portfolio-level filters before committing TOMORROW's book.
+    sch.add_job(
+        run_daily_stock_analyses,
+        CronTrigger(hour=3, minute=30, timezone="UTC"),
+        id="paper_trading_daily_analyses",
+        replace_existing=True, misfire_grace_time=1800,
+    )
     sch.add_job(
         run_paper_trading_capture_opens,
         CronTrigger(hour=3, minute=50, timezone="UTC"),
@@ -187,6 +199,14 @@ def start_scheduler() -> None:
         CronTrigger(hour="4-9", minute="*/15", timezone="UTC"),
         id="paper_trading_monitor_triggers",
         replace_existing=True, misfire_grace_time=600,
+    )
+    # EOD intraday replay (Fix #3) MUST run before finalize_eod —
+    # both write to the trades table, so we serialise via 5-min gap.
+    sch.add_job(
+        run_paper_trading_replay,
+        CronTrigger(hour=10, minute=5, timezone="UTC"),
+        id="paper_trading_replay",
+        replace_existing=True, misfire_grace_time=1800,
     )
     sch.add_job(
         run_paper_trading_finalize_eod,
@@ -207,6 +227,42 @@ def start_scheduler() -> None:
         "scheduler: started — Nifty debates 02:00 UTC + paper trading "
         "(opens 03:50, monitor */15 04-09, finalize 10:10, agent 11:00 UTC)",
     )
+
+
+async def run_daily_stock_analyses() -> dict:
+    """Phase 0 cron target — fire the per-ticker stock_analyst for
+    every Nifty 50 ticker, writing direction + target + stop_loss +
+    max_hold_days into the predictions table. Runs ~$0.05 of LLM
+    calls in ~90 seconds (5-way parallelism on gpt-5-mini)."""
+    from datetime import datetime, timezone
+    from .agents.stock_analyst import run_daily_all_50
+    today = datetime.now(timezone.utc).date().isoformat()
+    logging.info("scheduler: stock_analyst daily run for %s", today)
+    try:
+        return await run_daily_all_50(today)
+    except Exception:
+        logging.exception("scheduler: stock_analyst daily run failed")
+        return {"date": today, "error": "see logs"}
+
+
+async def run_paper_trading_replay() -> dict:
+    """EOD intraday replay — walk yfinance 1m bars for the day and
+    close any open trade whose target/stop was breached between
+    15-min monitor checks. Runs BEFORE finalize_eod so the daily
+    snapshot reflects every trigger that actually happened."""
+    from datetime import datetime, timezone
+    from .paper_trading import intraday
+    today = datetime.now(timezone.utc).date().isoformat()
+    logging.info("scheduler: intraday replay for %s", today)
+    try:
+        reports = await intraday.replay_intraday_triggers_all(today)
+        firings = sum(r.triggered_target + r.triggered_stop_loss for r in reports)
+        if firings:
+            logging.info("scheduler: intraday replay %s — %d additional firings", today, firings)
+        return {"date": today, "reports": [r.__dict__ for r in reports]}
+    except Exception:
+        logging.exception("scheduler: intraday replay failed")
+        return {"date": today, "error": "see logs"}
 
 
 async def run_paper_trading_capture_opens() -> dict:

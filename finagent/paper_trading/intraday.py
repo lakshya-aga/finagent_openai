@@ -137,6 +137,7 @@ async def capture_open_prices(
             transaction_cost=TRANSACTION_COST,
             target_price=meta.get("target_price"),
             stop_loss_price=meta.get("stop_loss_price"),
+            max_hold_days=meta.get("max_hold_days"),
             opened_via="market_open",
         )
         opened += 1
@@ -270,6 +271,201 @@ async def monitor_triggers(
     )
 
 
+# ── EOD intraday replay (catches triggers between 15-min snapshots) ─
+
+
+@dataclass
+class ReplayReport:
+    date: str
+    strategy: str
+    trades_scanned: int
+    triggered_target: int
+    triggered_stop_loss: int
+
+
+async def replay_intraday_triggers(
+    date: str,
+    strategy: str,
+    *,
+    bars: Optional[dict] = None,
+) -> ReplayReport:
+    """Walk today's 1-minute OHLC bars and close any open trade whose
+    target or stop_loss was breached during the day — even if the
+    15-min ``monitor_triggers`` cron missed the touch.
+
+    Runs at EOD just before ``finalize_eod`` so the daily snapshot
+    reflects every trigger that ACTUALLY happened intraday, not
+    just the ones the periodic monitor sampled.
+
+    Trigger price = the SL/TP level itself (paper-realistic market
+    order with no slippage). closed_ts = the timestamp of the 1m
+    bar that breached, so the trade-history UI shows the real
+    intra-day fill clock.
+
+    Trade ordering note: ``monitor_triggers`` may have already
+    closed some of today's trades. ``list_open_trades`` only
+    returns currently-open ones, so we don't double-close.
+
+    ``bars`` lets tests inject pre-built OHLC frames without
+    touching yfinance. Shape: ``{ticker: DataFrame with
+    'High'/'Low' columns indexed by tz-naive Timestamp}``.
+    """
+    if strategy not in STRATEGIES:
+        raise ValueError(f"unknown strategy {strategy!r}")
+
+    open_trades = [
+        t for t in store.list_open_trades(strategy)
+        if t.get("target_price") is not None or t.get("stop_loss_price") is not None
+    ]
+    if not open_trades:
+        return ReplayReport(date=date, strategy=strategy, trades_scanned=0,
+                            triggered_target=0, triggered_stop_loss=0)
+
+    tickers = sorted({t["ticker"] for t in open_trades})
+    if bars is None:
+        bars = await _fetch_intraday_1m(tickers, date)
+
+    triggered_tp = 0
+    triggered_sl = 0
+    prev_snap = store.previous_snapshot(strategy, date)
+    prev_equity = prev_snap["equity_value"] if prev_snap else STARTING_CAPITAL
+
+    for trade in open_trades:
+        df = bars.get(trade["ticker"])
+        if df is None or len(df) == 0:
+            continue
+        # Trades opened today have entry timestamp == today's first
+        # bar; we only walk bars AT OR AFTER the open price's bar.
+        # For simplicity (and to align with capture_open_prices using
+        # the day's first OHLC open), walk every bar in the day.
+        first_hit = _scan_bars_for_trigger(
+            df,
+            direction=int(trade["direction"]),
+            target=trade.get("target_price"),
+            stop_loss=trade.get("stop_loss_price"),
+        )
+        if first_hit is None:
+            continue
+        trigger_price, close_reason, hit_ts = first_hit
+
+        notional = abs(trade["open_weight"]) * prev_equity
+        pct_move = (trigger_price - trade["open_price"]) / trade["open_price"]
+        pnl = int(trade["direction"]) * pct_move * notional
+
+        store.close_trade(
+            trade["id"], closed_at=date,
+            close_price=trigger_price, realized_pnl=pnl,
+            close_reason=close_reason,
+            closed_ts=hit_ts.timestamp() if hasattr(hit_ts, "timestamp") else None,
+        )
+        if close_reason == "target":
+            triggered_tp += 1
+        else:
+            triggered_sl += 1
+        logger.info(
+            "paper_trading.intraday.replay: %s %s %s breached at ₹%.2f "
+            "(ts=%s, open ₹%.2f) pnl=₹%+.2f",
+            strategy, close_reason, trade["ticker"], trigger_price,
+            hit_ts, trade["open_price"], pnl,
+        )
+
+    return ReplayReport(
+        date=date, strategy=strategy,
+        trades_scanned=len(open_trades),
+        triggered_target=triggered_tp,
+        triggered_stop_loss=triggered_sl,
+    )
+
+
+def _scan_bars_for_trigger(df, *, direction: int,
+                           target: Optional[float],
+                           stop_loss: Optional[float]):
+    """Walk a 1m OHLC frame forward; return (trigger_price, reason, ts)
+    of the FIRST bar whose high/low breached target or stop_loss.
+
+    Stop-loss wins on a same-bar tie (risk-first). For LONG positions
+    we check (high >= target) and (low <= stop). For SHORTs, mirrored.
+    """
+    for ts, row in df.iterrows():
+        try:
+            hi = float(row.get("High"))
+            lo = float(row.get("Low"))
+        except (TypeError, ValueError):
+            continue
+        if direction > 0:
+            sl_hit = stop_loss is not None and lo <= stop_loss
+            tp_hit = target is not None and hi >= target
+            if sl_hit:
+                return stop_loss, "stop_loss", ts
+            if tp_hit:
+                return target, "target", ts
+        else:
+            sl_hit = stop_loss is not None and hi >= stop_loss
+            tp_hit = target is not None and lo <= target
+            if sl_hit:
+                return stop_loss, "stop_loss", ts
+            if tp_hit:
+                return target, "target", ts
+    return None
+
+
+async def _fetch_intraday_1m(tickers: list[str], date: str) -> dict:
+    """One yfinance batch call → ``{ticker: DataFrame of 1m bars for
+    the trading day}``. yfinance supports up to 7 days of 1m history,
+    so this works for today's EOD replay (today + previous 6 days).
+    """
+    if not tickers:
+        return {}
+
+    def _fetch() -> dict:
+        import yfinance as yf
+        import pandas as pd
+        out: dict = {}
+        try:
+            df = yf.download(
+                tickers=tickers, period="2d", interval="1m",
+                progress=False, auto_adjust=False, group_by="ticker",
+                threads=True,
+            )
+            if df is None or df.empty:
+                return out
+        except Exception as e:
+            logger.warning("paper_trading.intraday.replay: yfinance 1m fetch failed (%s)", e)
+            return out
+
+        # Trim each ticker's frame to bars on the target date (UTC) —
+        # otherwise an extra session would double-count triggers.
+        target_date = pd.Timestamp(date).date()
+
+        if len(tickers) == 1:
+            sub = df
+            sub = sub[sub.index.normalize().date == target_date] if hasattr(sub.index, 'normalize') else sub
+            if not sub.empty:
+                out[tickers[0]] = sub
+            return out
+
+        for t in tickers:
+            try:
+                sub = df[t].dropna(how="all")
+                # MultiIndex columns flatten; normalise the index date.
+                idx_dates = pd.Series(sub.index).dt.tz_localize(None).dt.date
+                sub = sub[idx_dates.values == target_date]
+                if not sub.empty:
+                    out[t] = sub
+            except Exception:
+                continue
+        return out
+
+    return await asyncio.to_thread(_fetch)
+
+
+async def replay_intraday_triggers_all(date: str) -> list[ReplayReport]:
+    """Convenience: run replay for every strategy. Used by the EOD
+    cron — called BEFORE finalize_eod_all so closures land in the
+    same daily snapshot."""
+    return [await replay_intraday_triggers(date, s) for s in STRATEGIES]
+
+
 # ── Phase 3: finalize EOD ────────────────────────────────────────
 
 
@@ -320,11 +516,19 @@ async def finalize_eod(
     open_trades = store.list_open_trades(strategy)
     open_by_ticker = {t["ticker"]: t for t in open_trades}
 
-    # Trades to close = ticker dropped from today's target, OR direction
-    # flipped sign. (Already-triggered SL/TP closes will not appear in
-    # open_trades — they're closed_at != NULL.)
-    to_close: dict[str, str] = {}  # ticker → reason
+    # Trades to close. Three reasons may apply (priority in this order):
+    #   time_horizon      — third barrier: days_held > max_hold_days
+    #   direction_change  — ticker dropped from today's target, OR
+    #                       direction flipped sign vs today's prediction
+    # Already-triggered SL/TP closes won't appear in open_trades since
+    # they have closed_at != NULL after monitor_triggers or replay.
+    to_close: dict[str, str] = {}
     for ticker, trade in open_by_ticker.items():
+        max_hold = trade.get("max_hold_days")
+        days_held = _days_between(trade["opened_at"], date)
+        if max_hold is not None and days_held >= int(max_hold):
+            to_close[ticker] = "time_horizon"
+            continue
         if ticker not in target:
             to_close[ticker] = "direction_change"
         elif (target[ticker] > 0) != (trade["direction"] > 0):

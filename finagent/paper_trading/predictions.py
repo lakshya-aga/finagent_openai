@@ -43,6 +43,8 @@ def record_prediction(
     reasoning: str | None = None,
     target_price: float | None = None,
     stop_loss_price: float | None = None,
+    time_horizon: str | None = None,
+    max_hold_days: int | None = None,
     source: str = "manual",
 ) -> int:
     """Public wrapper around store.upsert_prediction with universe check."""
@@ -55,6 +57,7 @@ def record_prediction(
         date=date, ticker=ticker, direction=direction,
         confidence=confidence, reasoning=reasoning,
         target_price=target_price, stop_loss_price=stop_loss_price,
+        time_horizon=time_horizon, max_hold_days=max_hold_days,
         source=source,
     )
 

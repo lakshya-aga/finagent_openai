@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS predictions (
     reasoning       TEXT,
     target_price    REAL,                           -- optional
     stop_loss_price REAL,                           -- optional
+    time_horizon    TEXT,                           -- analyst's free-form horizon (e.g. '5d', 'swing')
+    max_hold_days   INTEGER,                        -- third barrier: close after N trading days
     source          TEXT NOT NULL DEFAULT 'manual', -- 'manual' / 'debate:<id>' / 'agent:v1'
     created_at      REAL NOT NULL,
     UNIQUE(date, ticker)
@@ -119,7 +121,8 @@ CREATE TABLE IF NOT EXISTS trades (
     target_price       REAL,
     stop_loss_price    REAL,
     opened_via         TEXT DEFAULT 'eod_close', -- 'market_open' | 'eod_close' | 'manual'
-    closed_ts          REAL                       -- UTC epoch seconds (intraday precision)
+    closed_ts          REAL,                      -- UTC epoch seconds (intraday precision)
+    max_hold_days      INTEGER                    -- third barrier; close after N days held
 );
 CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
 CREATE INDEX IF NOT EXISTS idx_trades_open     ON trades(strategy, ticker, closed_at);

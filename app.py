@@ -687,6 +687,32 @@ async def paper_trading_monitor_triggers(date: Optional[str] = None):
     return {"date": date, "reports": [r.__dict__ for r in reports]}
 
 
+@app.post("/api/paper-trading/intraday/replay")
+async def paper_trading_intraday_replay(date: Optional[str] = None):
+    """EOD intraday replay — walk yfinance 1m bars for the day and
+    close any open trade whose target/stop_loss was breached between
+    the 15-min monitor checks. Idempotent; safe to re-run."""
+    from finagent.paper_trading import intraday
+    from datetime import datetime, timezone
+    if not date:
+        date = datetime.now(timezone.utc).date().isoformat()
+    reports = await intraday.replay_intraday_triggers_all(date)
+    return {"date": date, "reports": [r.__dict__ for r in reports]}
+
+
+@app.post("/api/paper-trading/stock-analyses/run")
+async def paper_trading_run_stock_analyses(date: Optional[str] = None):
+    """Run the per-ticker stock_analyst for every Nifty 50 ticker.
+    Writes direction + target + stop_loss + max_hold_days into the
+    predictions table for ``date`` (default: today UTC). ~$0.05 of
+    LLM calls in ~90s."""
+    from finagent.agents.stock_analyst import run_daily_all_50
+    from datetime import datetime, timezone
+    if not date:
+        date = datetime.now(timezone.utc).date().isoformat()
+    return await run_daily_all_50(date)
+
+
 @app.post("/api/paper-trading/intraday/finalize")
 async def paper_trading_finalize_eod(date: Optional[str] = None):
     """Phase 3: end-of-day reconciliation. Closes direction-change

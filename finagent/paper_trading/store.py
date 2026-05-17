@@ -63,21 +63,32 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_v2_trade_columns(conn: sqlite3.Connection) -> None:
-    """Add intraday-execution columns to a legacy v1 trades table.
+    """Add intraday-execution + triple-barrier columns to legacy tables.
 
     No-op on fresh DBs (CREATE TABLE already includes the columns).
     """
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
-    additions = [
+    # trades — v2 intraday execution + v3 triple-barrier time column
+    existing_trades = {r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
+    for col, ddl in [
         ("target_price",    "REAL"),
         ("stop_loss_price", "REAL"),
         ("opened_via",      "TEXT DEFAULT 'eod_close'"),
         ("closed_ts",       "REAL"),
-    ]
-    for col, ddl in additions:
-        if col not in existing:
+        ("max_hold_days",   "INTEGER"),
+    ]:
+        if col not in existing_trades:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {ddl}")
             logger.info("paper_trading: migrated trades — added column %s", col)
+
+    # predictions — v3 triple-barrier columns (time_horizon + max_hold_days)
+    existing_preds = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
+    for col, ddl in [
+        ("time_horizon",   "TEXT"),
+        ("max_hold_days",  "INTEGER"),
+    ]:
+        if col not in existing_preds:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {ddl}")
+            logger.info("paper_trading: migrated predictions — added column %s", col)
 
 
 def _row_to_dict(r) -> dict[str, Any]:
@@ -96,11 +107,20 @@ def upsert_prediction(
     reasoning: str | None = None,
     target_price: float | None = None,
     stop_loss_price: float | None = None,
+    time_horizon: str | None = None,
+    max_hold_days: int | None = None,
     source: str = "manual",
 ) -> int:
-    """Insert-or-overwrite. UNIQUE(date, ticker) means a second call
-    for the same key updates rather than duplicating — lets the
-    manual-override path reuse this without a separate UPDATE."""
+    """Insert-or-merge. UNIQUE(date, ticker) so a second call with the
+    same key updates rather than duplicating.
+
+    IMPORTANT: COALESCE semantics on ON CONFLICT — if the caller passes
+    None for any of the optional fields, the existing value is PRESERVED.
+    This stops the portfolio-manager agent (which commits direction only)
+    from blowing away the target_price/stop_loss/time_horizon that the
+    stock_analyst wrote upstream. Direction + source always overwrite —
+    those are the fields the override path means to change.
+    """
     if direction not in (-1, 0, 1):
         raise ValueError(f"direction must be -1/0/+1, got {direction!r}")
     with _conn() as c:
@@ -108,18 +128,22 @@ def upsert_prediction(
             """
             INSERT INTO predictions (
                 date, ticker, direction, confidence, reasoning,
-                target_price, stop_loss_price, source, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                target_price, stop_loss_price, time_horizon, max_hold_days,
+                source, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(date, ticker) DO UPDATE SET
                 direction       = excluded.direction,
-                confidence      = excluded.confidence,
-                reasoning       = excluded.reasoning,
-                target_price    = excluded.target_price,
-                stop_loss_price = excluded.stop_loss_price,
+                confidence      = COALESCE(excluded.confidence,      predictions.confidence),
+                reasoning       = COALESCE(excluded.reasoning,       predictions.reasoning),
+                target_price    = COALESCE(excluded.target_price,    predictions.target_price),
+                stop_loss_price = COALESCE(excluded.stop_loss_price, predictions.stop_loss_price),
+                time_horizon    = COALESCE(excluded.time_horizon,    predictions.time_horizon),
+                max_hold_days   = COALESCE(excluded.max_hold_days,   predictions.max_hold_days),
                 source          = excluded.source
             """,
             (date, ticker, direction, confidence, reasoning,
-             target_price, stop_loss_price, source, time.time()),
+             target_price, stop_loss_price, time_horizon, max_hold_days,
+             source, time.time()),
         )
         return cur.lastrowid or 0
 
@@ -281,23 +305,24 @@ def open_trade(
     transaction_cost: float = 20.0,
     target_price: float | None = None,
     stop_loss_price: float | None = None,
+    max_hold_days: int | None = None,
     opened_via: str = "eod_close",
 ) -> int:
-    """Open a new trade. target_price + stop_loss_price are snapshotted
-    at open-time so a later prediction edit doesn't move the trigger
-    on this already-open position."""
+    """Open a new trade. target_price + stop_loss_price + max_hold_days
+    are snapshotted at open-time so a later prediction edit doesn't move
+    the trigger on this already-open position."""
     with _conn() as c:
         cur = c.execute(
             """
             INSERT INTO trades (
                 strategy, ticker, direction, opened_at, open_price,
                 open_weight, transaction_cost,
-                target_price, stop_loss_price, opened_via
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                target_price, stop_loss_price, max_hold_days, opened_via
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (strategy, ticker, direction, opened_at, open_price,
              open_weight, transaction_cost,
-             target_price, stop_loss_price, opened_via),
+             target_price, stop_loss_price, max_hold_days, opened_via),
         )
         return cur.lastrowid or 0
 
