@@ -35,7 +35,7 @@ import uuid
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
@@ -1300,6 +1300,92 @@ async def reject_template_draft(slug: str):
 # Cheap to cache by (ticker, lookback_days) since the underlying yfinance
 # call is the bottleneck.
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Visit analytics — self-hosted lightweight web analytics.
+# Public POST /track endpoint (called from browser beacon on every page load);
+# admin-gated GET endpoints for the dashboard.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TrackVisitPayload(BaseModel):
+    path: str
+    anonymous_id: Optional[str] = None
+    referrer: Optional[str] = None
+    # ua is sniffed from the request header by default; only set by tests.
+    ua: Optional[str] = None
+
+
+@app.post("/api/analytics/track")
+async def analytics_track(p: TrackVisitPayload, request: Request):
+    """Public endpoint — every page load on the synapse frontend fires
+    a navigator.sendBeacon to this URL. Returns ``{ok}`` immediately;
+    the row write is best-effort (any error logged but swallowed so
+    the beacon never breaks the page).
+    """
+    from finagent.analytics import store as visit_store
+    ua = p.ua or request.headers.get("user-agent") or ""
+    try:
+        visit_store.record_visit(
+            path=p.path, anonymous_id=p.anonymous_id,
+            referrer=p.referrer, ua=ua,
+        )
+    except Exception:
+        logging.exception("/api/analytics/track: failed to record visit")
+    return {"ok": True}
+
+
+@app.get("/api/analytics/summary")
+async def analytics_summary(exclude_bots: bool = True):
+    """Headline numbers — pageviews + uniques over today / 7d / 30d /
+    all-time. Admin-gated at the synapse proxy layer."""
+    from finagent.analytics import store as visit_store
+    return visit_store.summary(exclude_bots=exclude_bots)
+
+
+@app.get("/api/analytics/timeline")
+async def analytics_timeline(days: int = 30, exclude_bots: bool = True):
+    """Day-by-day pageviews + uniques over the last ``days``. Empty
+    days are emitted with zeroes so the chart doesn't gap."""
+    from finagent.analytics import store as visit_store
+    return {
+        "days": days,
+        "exclude_bots": exclude_bots,
+        "series": visit_store.timeline(days=max(1, min(365, days)), exclude_bots=exclude_bots),
+    }
+
+
+@app.get("/api/analytics/top-pages")
+async def analytics_top_pages(days: int = 7, limit: int = 20, exclude_bots: bool = True):
+    from finagent.analytics import store as visit_store
+    return {
+        "days": days,
+        "rows": visit_store.top_pages(days=max(1, min(365, days)),
+                                      limit=max(1, min(100, limit)),
+                                      exclude_bots=exclude_bots),
+    }
+
+
+@app.get("/api/analytics/top-referrers")
+async def analytics_top_referrers(days: int = 7, limit: int = 20, exclude_bots: bool = True):
+    from finagent.analytics import store as visit_store
+    return {
+        "days": days,
+        "rows": visit_store.top_referrers(days=max(1, min(365, days)),
+                                          limit=max(1, min(100, limit)),
+                                          exclude_bots=exclude_bots),
+    }
+
+
+@app.get("/api/analytics/devices")
+async def analytics_devices(days: int = 30, exclude_bots: bool = False):
+    from finagent.analytics import store as visit_store
+    return {
+        "days": days,
+        "rows": visit_store.device_breakdown(days=max(1, min(365, days)),
+                                             exclude_bots=exclude_bots),
+    }
 
 
 @app.get("/api/charts/ohlc")
