@@ -137,53 +137,114 @@ class YFinanceSource:
 
 
 class GrowwSource:
-    """REST-poll quote provider against GROWW's developer API.
+    """Groww quote provider — wraps the official ``growwapi`` SDK.
 
-    NOT FULLY WIRED YET — the REST quote endpoint shape isn't
-    documented in the WS-only code we have (live_data uses the
-    WebSocket feed exclusively). When the REST endpoint is verified:
-      1. Implement _fetch_quote_json(symbols) below
-      2. Drop the NotImplementedError + return parsed dict
+    Auth: ``GROWW_ACCESS_TOKEN`` env var must hold a token with the
+    ``apiTrading`` role. To generate one:
+      1. Sign in at https://developer.groww.in
+      2. Create an API app → returns an API key + API secret
+      3. Run the developer portal's TOTP login flow → returns the
+         long-lived API token. THAT is what GROWW_ACCESS_TOKEN
+         expects.
 
-    Until then, get_ltps() raises and the engine falls back to
-    yfinance via the auto-select rule.
+    What WON'T work: pasting your normal Groww app session token
+    (role ``auth-totp``). Those tokens are scoped to the UI and
+    return 403 on every market-data endpoint. Symptom: GrowwAPI()
+    constructs fine, but every method returns
+    ``GrowwAPIException: Access forbidden for this request.``
 
-    Auth: GROWW_ACCESS_TOKEN env var. If absent, raises
-    ``RuntimeError("GROWW credentials not configured")`` so the
-    operator sees a clean failure instead of a 401 from the API.
+    On instantiation failure (missing token, SDK import error, or
+    auth rejection) we raise a clear RuntimeError so the resolver
+    in get_quote_source() falls back to yfinance.
+
+    Symbol convention: our codebase uses ``RELIANCE.NS`` (yfinance
+    style). The SDK uses bare ``RELIANCE`` with a separate
+    ``segment="CASH"`` arg. We strip the ``.NS`` suffix on the way
+    in and pin every Nifty 50 query to the cash segment.
     """
 
     name = "groww"
 
-    _QUOTES_URL = "https://api.groww.in/v1/market-data/quotes"  # speculative
-    _OPEN_URL   = "https://api.groww.in/v1/historical/{symbol}" # speculative
-
     def __init__(self) -> None:
-        self._token = os.environ.get("GROWW_ACCESS_TOKEN", "")
-        if not self._token:
+        token = os.environ.get("GROWW_ACCESS_TOKEN", "").strip()
+        if not token:
             raise RuntimeError(
                 "GROWW_ACCESS_TOKEN not set — cannot use GROWW quote source. "
-                "Either provision the token or unset PAPER_TRADING_QUOTE_SOURCE "
-                "to fall back to yfinance.",
+                "Unset PAPER_TRADING_QUOTE_SOURCE to fall back to yfinance.",
             )
+        try:
+            from growwapi import GrowwAPI  # type: ignore[import-not-found]
+        except ImportError as e:
+            raise RuntimeError(
+                "growwapi SDK not installed — `pip install growwapi`. "
+                f"Underlying error: {e}",
+            ) from e
+        self._client = GrowwAPI(token)
+        self._SEGMENT_CASH = getattr(GrowwAPI, "SEGMENT_CASH", "CASH")
 
-    def _nse(self, ticker: str) -> str:
-        """RELIANCE.NS → NSE:RELIANCE (matches the WS subscribe format)."""
-        return f"NSE:{ticker.removesuffix('.NS')}"
+    @staticmethod
+    def _strip_ns(ticker: str) -> str:
+        """``RELIANCE.NS`` → ``RELIANCE``; the SDK wants bare symbols."""
+        return ticker.removesuffix(".NS")
+
+    @staticmethod
+    def _restore_ns(symbol: str) -> str:
+        return symbol if symbol.endswith(".NS") else f"{symbol}.NS"
 
     async def get_ltps(self, tickers: list[str]) -> dict[str, float]:
         if not tickers:
             return {}
-        raise NotImplementedError(
-            "GROWW REST quote endpoint not yet wired — the WS protocol is "
-            "well-known (see live_data/server/sources/groww.py) but the "
-            "REST shape needs verification against the developer portal. "
-            "Set PAPER_TRADING_QUOTE_SOURCE=yfinance (or unset) to use the "
-            "yfinance fallback in the meantime.",
-        )
+        bare = tuple(self._strip_ns(t) for t in tickers)
+
+        def _fetch() -> dict[str, float]:
+            # get_ltp signature: (exchange_trading_symbols: Tuple[str], segment: str, ...)
+            # On a typical call it returns {"NSE_RELIANCE": 2856.0, ...}
+            try:
+                resp = self._client.get_ltp(
+                    exchange_trading_symbols=bare, segment=self._SEGMENT_CASH,
+                    timeout=10,
+                )
+            except Exception as e:
+                logger.warning("paper_trading: GROWW get_ltp failed (%s)", e)
+                return {}
+            out: dict[str, float] = {}
+            for key, px in (resp or {}).items():
+                # SDK keys back as "NSE_RELIANCE" — extract the symbol.
+                sym = key.split("_", 1)[-1] if "_" in key else key
+                try:
+                    out[self._restore_ns(sym)] = float(px)
+                except (TypeError, ValueError):
+                    continue
+            return out
+
+        return await asyncio.to_thread(_fetch)
 
     async def get_day_open(self, ticker: str, date: str) -> float | None:
-        raise NotImplementedError("see get_ltps")
+        """Today's open via ``get_ohlc``; for non-today dates use
+        ``get_historical_candles``. The intraday-engine only ever calls
+        this for the current trading day so we optimise for that."""
+        bare = self._strip_ns(ticker)
+
+        def _fetch_today_ohlc() -> float | None:
+            try:
+                resp = self._client.get_ohlc(
+                    exchange_trading_symbols=(bare,),
+                    segment=self._SEGMENT_CASH,
+                    timeout=10,
+                )
+            except Exception as e:
+                logger.warning("paper_trading: GROWW get_ohlc failed for %s (%s)", ticker, e)
+                return None
+            for _, ohlc in (resp or {}).items():
+                op = ohlc.get("open") if isinstance(ohlc, dict) else None
+                if op is not None:
+                    try:
+                        return float(op)
+                    except (TypeError, ValueError):
+                        return None
+            return None
+
+        return await asyncio.to_thread(_fetch_today_ohlc)
 
 
 # ── Source resolver ────────────────────────────────────────────────

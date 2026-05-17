@@ -88,3 +88,10 @@ langchain-ollama>=0.2           # for the default Qwen-via-Ollama path
 # Current: fc17c7b — news_gdelt ToneChart enrichment + ohlc_chart SMA
 # all-NaN guard + candlestick_patterns dtype helper.
 git+https://github.com/lakshya-aga/data-mcp.git@fc17c7baa8977a2377780a0509cc5dcbc6ff3838
+
+# Groww broker API SDK — used by finagent.paper_trading.quotes as the
+# GROWW provider when PAPER_TRADING_QUOTE_SOURCE=groww. Falls back to
+# yfinance when the env var is unset or the SDK auth fails. We import
+# lazily inside GrowwSource so a missing wheel doesn't break paper-
+# trading module load on a yfinance-only deploy.
+growwapi>=1.5,<2.0
