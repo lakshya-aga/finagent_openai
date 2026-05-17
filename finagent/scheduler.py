@@ -194,12 +194,16 @@ def start_scheduler() -> None:
         id="paper_trading_capture_opens",
         replace_existing=True, misfire_grace_time=1800,
     )
-    sch.add_job(
-        run_paper_trading_monitor_triggers,
-        CronTrigger(hour="4-9", minute="*/15", timezone="UTC"),
-        id="paper_trading_monitor_triggers",
-        replace_existing=True, misfire_grace_time=600,
-    )
+    # 15-min monitor_triggers DELIBERATELY DISABLED. Was burning ~24
+    # yfinance batch calls/day (50 tickers each) and risking rate-
+    # limits during market hours. The EOD intraday-replay pass below
+    # walks the full 1m tape for the day and books every trigger that
+    # fired, so we lose no SL/TP correctness — only the in-day "live"
+    # status indicator on the dashboard. Re-enable here if/when we
+    # swap the quote source to a paid feed (GROWW with apiTrading
+    # token, or Polygon/Databento) that handles the polling cleanly.
+    # The endpoint POST /api/paper-trading/intraday/monitor still
+    # exists for manual ad-hoc checks.
     # EOD intraday replay (Fix #3) MUST run before finalize_eod —
     # both write to the trades table, so we serialise via 5-min gap.
     sch.add_job(
@@ -225,7 +229,8 @@ def start_scheduler() -> None:
     _scheduler = sch
     logging.info(
         "scheduler: started — Nifty debates 02:00 UTC + paper trading "
-        "(opens 03:50, monitor */15 04-09, finalize 10:10, agent 11:00 UTC)",
+        "(analyst 03:30, opens 03:50, replay 10:05, finalize 10:10, "
+        "agent 11:00 UTC; intraday monitor disabled — rely on EOD replay)",
     )
 
 
