@@ -898,6 +898,34 @@ async def debates_calendar(
     }
 
 
+@app.post("/api/paper-trading/scheduler/run-now")
+async def trigger_paper_trading_now():
+    """Manually fire the paper-trading EOD cron (admin / smoke-test).
+
+    Same routine the daily 11:00 UTC cron runs: seed today's
+    predictions from any debate verdicts that landed today, then
+    run the EOD close for both strategies. Synchronous (~20-60s
+    because of the yfinance fetch) so the caller sees the result.
+    """
+    from finagent.scheduler import run_paper_trading_eod
+    return await run_paper_trading_eod()
+
+
+@app.post("/api/paper-trading/portfolio-manager/run")
+async def trigger_portfolio_manager(date: Optional[str] = None):
+    """Run the portfolio-manager agent for ``date`` (default: today UTC).
+
+    The agent reads upstream debate verdicts + recent track record,
+    then commits a direction call for every Nifty 50 ticker. Slow
+    (~30-90s — multiple LLM tool-loop iterations). Use this as the
+    high-quality path; ``seed-from-debates`` is the cheap fallback
+    when the agent isn't available.
+    """
+    from finagent.agents.portfolio_manager import run_portfolio_manager
+    report = await run_portfolio_manager(date)
+    return report.model_dump()
+
+
 @app.post("/api/debates/scheduler/run-now")
 async def trigger_scheduler_now(n: int = 5, rounds: int = 2):
     """Manually fire the daily Nifty cron (admin / smoke-test).

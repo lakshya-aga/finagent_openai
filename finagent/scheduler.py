@@ -153,9 +153,94 @@ def start_scheduler() -> None:
         replace_existing=True,
         misfire_grace_time=3600,  # tolerate 1h late firing if the worker was down
     )
+
+    # Paper-trading daily close. Two-step sequence in one job so the
+    # ordering is guaranteed (seed → close).
+    #
+    #   1. seed today's predictions from existing debate verdicts
+    #      (no extra LLM cost — reuses the 5/day debate output)
+    #   2. run EOD close for both strategies (yfinance batch fetch
+    #      for the close prices, MTM, snapshot write)
+    #
+    # Cron at 11:00 UTC = 16:30 IST — 1h after NSE close at 15:30 IST.
+    # Gives yfinance enough margin to have today's bars available
+    # before we ask for them.
+    sch.add_job(
+        run_paper_trading_eod,
+        CronTrigger(hour=11, minute=0, timezone="UTC"),
+        id="paper_trading_eod_close",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
     sch.start()
     _scheduler = sch
-    logging.info("scheduler: started; daily Nifty 50 debates at 02:00 UTC")
+    logging.info(
+        "scheduler: started; daily Nifty 50 debates at 02:00 UTC + "
+        "paper-trading EOD close at 11:00 UTC",
+    )
+
+
+async def run_paper_trading_eod() -> dict:
+    """Run the daily paper-trading pipeline:
+
+      1. Portfolio-manager agent fills today's direction set (high
+         quality, ~30-90s of LLM time).
+         If the agent is unavailable or commits zero predictions,
+         FALL BACK to seed_from_debates (cheap, no-LLM, ~5 tickers
+         from today's debate scheduler verdicts).
+      2. EOD close routine writes snapshots for both strategies.
+
+    Idempotent on the (date, strategy) key — re-running overwrites
+    the day's snapshots rather than producing duplicates. Used by
+    the daily 11:00 UTC cron and by the admin "run now" endpoint.
+
+    Returns ``{date, agent, seeded, reports}``.
+    """
+    from datetime import datetime, timezone
+    from .paper_trading import predictions as ptp, engine as pte
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    logging.info("scheduler: paper-trading EOD starting for %s", today)
+
+    # Step 1a — try the portfolio-manager agent first.
+    agent_report: dict | None = None
+    try:
+        from .agents.portfolio_manager import run_portfolio_manager
+        report = await run_portfolio_manager(today)
+        agent_report = report.model_dump()
+        logging.info(
+            "scheduler: portfolio_manager %s — status=%s accepted=%d",
+            today, agent_report.get("status"), agent_report.get("accepted"),
+        )
+    except Exception:
+        logging.exception("scheduler: portfolio_manager raised for %s", today)
+
+    # Step 1b — fall back to seed_from_debates if the agent didn't
+    # commit anything (unavailable, error, or empty commit).
+    seed_summary: dict = {}
+    if not agent_report or agent_report.get("status") != "ok":
+        try:
+            seed_summary = ptp.seed_from_debates(today)
+        except Exception:
+            logging.exception("scheduler: seed_from_debates fallback failed for %s", today)
+
+    # Step 2 — EOD close for both strategies.
+    reports: list[dict] = []
+    try:
+        for r in await pte.run_eod_close_all(today):
+            reports.append(r.__dict__)
+    except Exception:
+        logging.exception("scheduler: run_eod_close_all failed for %s", today)
+
+    logging.info(
+        "scheduler: paper-trading EOD complete for %s — agent=%s seed_accepted=%s reports=%d",
+        today,
+        (agent_report or {}).get("status"),
+        seed_summary.get("accepted"),
+        len(reports),
+    )
+    return {"date": today, "agent": agent_report, "seeded": seed_summary, "reports": reports}
 
 
 def stop_scheduler() -> None:
