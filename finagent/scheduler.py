@@ -154,31 +154,112 @@ def start_scheduler() -> None:
         misfire_grace_time=3600,  # tolerate 1h late firing if the worker was down
     )
 
-    # Paper-trading daily close. Two-step sequence in one job so the
-    # ordering is guaranteed (seed → close).
+    # Paper-trading intraday pipeline. Four cron jobs replace the v1
+    # monolithic "EOD batch" with a realistic open → monitor → close
+    # cycle. UTC times below; IST is UTC+5:30.
     #
-    #   1. seed today's predictions from existing debate verdicts
-    #      (no extra LLM cost — reuses the 5/day debate output)
-    #   2. run EOD close for both strategies (yfinance batch fetch
-    #      for the close prices, MTM, snapshot write)
-    #
-    # Cron at 11:00 UTC = 16:30 IST — 1h after NSE close at 15:30 IST.
-    # Gives yfinance enough margin to have today's bars available
-    # before we ask for them.
+    #   03:50 UTC = 09:20 IST   Phase 1: capture opening prints for
+    #                            every direction != 0 prediction. Runs
+    #                            5 min after NSE open (09:15 IST) so
+    #                            the opening bar has landed in
+    #                            yfinance.
+    #   04:00-09:55 UTC (*/15)  Phase 2: scan open trades for SL/TP
+    #                            triggers every 15 min during market
+    #                            hours (09:30-15:25 IST). 15 min is
+    #                            tight enough that a triggered close
+    #                            books a sensible price even with
+    #                            yfinance's ~15-min delay.
+    #   10:10 UTC = 15:40 IST   Phase 3: end-of-day reconciliation.
+    #                            Closes direction-change trades at
+    #                            today's close, MTMs remaining, writes
+    #                            the daily snapshot.
+    #   11:00 UTC = 16:30 IST   Portfolio-manager agent commits
+    #                            TOMORROW'S directions (LLM, ~30-90s).
+    #                            Uses today's market data + verdicts.
     sch.add_job(
-        run_paper_trading_eod,
+        run_paper_trading_capture_opens,
+        CronTrigger(hour=3, minute=50, timezone="UTC"),
+        id="paper_trading_capture_opens",
+        replace_existing=True, misfire_grace_time=1800,
+    )
+    sch.add_job(
+        run_paper_trading_monitor_triggers,
+        CronTrigger(hour="4-9", minute="*/15", timezone="UTC"),
+        id="paper_trading_monitor_triggers",
+        replace_existing=True, misfire_grace_time=600,
+    )
+    sch.add_job(
+        run_paper_trading_finalize_eod,
+        CronTrigger(hour=10, minute=10, timezone="UTC"),
+        id="paper_trading_finalize_eod",
+        replace_existing=True, misfire_grace_time=3600,
+    )
+    sch.add_job(
+        run_paper_trading_eod,  # legacy name kept for back-compat
         CronTrigger(hour=11, minute=0, timezone="UTC"),
-        id="paper_trading_eod_close",
-        replace_existing=True,
-        misfire_grace_time=3600,
+        id="paper_trading_portfolio_agent",
+        replace_existing=True, misfire_grace_time=3600,
     )
 
     sch.start()
     _scheduler = sch
     logging.info(
-        "scheduler: started; daily Nifty 50 debates at 02:00 UTC + "
-        "paper-trading EOD close at 11:00 UTC",
+        "scheduler: started — Nifty debates 02:00 UTC + paper trading "
+        "(opens 03:50, monitor */15 04-09, finalize 10:10, agent 11:00 UTC)",
     )
+
+
+async def run_paper_trading_capture_opens() -> dict:
+    """Phase 1 cron target — open positions at the day's opening print
+    for every prediction with direction != 0."""
+    from datetime import datetime, timezone
+    from .paper_trading import intraday
+    today = datetime.now(timezone.utc).date().isoformat()
+    logging.info("scheduler: paper-trading capture_opens for %s", today)
+    try:
+        reports = await intraday.capture_open_prices_all(today)
+        return {"date": today, "reports": [r.__dict__ for r in reports]}
+    except Exception:
+        logging.exception("scheduler: capture_open_prices_all failed")
+        return {"date": today, "error": "see logs"}
+
+
+async def run_paper_trading_monitor_triggers() -> dict:
+    """Phase 2 cron target — scan open trades for SL/TP triggers.
+    Cheap (one batched LTP fetch + N arithmetic checks); safe to run
+    every 15 min during market hours."""
+    from datetime import datetime, timezone
+    from .paper_trading import intraday
+    today = datetime.now(timezone.utc).date().isoformat()
+    try:
+        reports = await intraday.monitor_triggers_all(today)
+        # Only log when something triggered — keeps cron-spam down.
+        firings = sum(r.triggered_target + r.triggered_stop_loss for r in reports)
+        if firings:
+            logging.info(
+                "scheduler: paper-trading monitor_triggers %s — %d firings",
+                today, firings,
+            )
+        return {"date": today, "reports": [r.__dict__ for r in reports]}
+    except Exception:
+        logging.exception("scheduler: monitor_triggers_all failed")
+        return {"date": today, "error": "see logs"}
+
+
+async def run_paper_trading_finalize_eod() -> dict:
+    """Phase 3 cron target — end-of-day reconciliation. Closes
+    direction-change trades, MTMs remaining open positions, writes
+    the daily portfolio + position snapshots."""
+    from datetime import datetime, timezone
+    from .paper_trading import intraday
+    today = datetime.now(timezone.utc).date().isoformat()
+    logging.info("scheduler: paper-trading finalize_eod for %s", today)
+    try:
+        reports = await intraday.finalize_eod_all(today)
+        return {"date": today, "reports": [r.__dict__ for r in reports]}
+    except Exception:
+        logging.exception("scheduler: finalize_eod_all failed")
+        return {"date": today, "error": "see logs"}
 
 
 async def run_paper_trading_eod() -> dict:

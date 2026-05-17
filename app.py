@@ -641,6 +641,65 @@ async def paper_trading_eod_close(date: Optional[str] = None):
     return {"date": date, "reports": [r.__dict__ for r in reports]}
 
 
+@app.get("/api/paper-trading/trades")
+async def paper_trading_trades(
+    strategy: str = "equal_weight",
+    limit: int = 100,
+    only_closed: bool = False,
+):
+    """Trade history. Returns closed trades with realized PnL + close
+    reason; set ``only_closed=false`` to include currently-open trades
+    (closed_at=null, realized_pnl=null) for a unified ledger view."""
+    from finagent.paper_trading import store, universe, STRATEGIES
+    if strategy not in STRATEGIES:
+        raise HTTPException(400, f"strategy must be one of {STRATEGIES}")
+    trades = store.list_trades(strategy, limit=max(1, min(500, int(limit))),
+                               only_closed=bool(only_closed))
+    for t in trades:
+        t["sector"] = universe.get_sector(t["ticker"])
+    return {"strategy": strategy, "n": len(trades), "trades": trades}
+
+
+# ── Intraday execution — admin triggers (cron entrypoints) ─────────
+
+
+@app.post("/api/paper-trading/intraday/capture-opens")
+async def paper_trading_capture_opens(date: Optional[str] = None):
+    """Phase 1: open today's positions at their opening print. Run
+    once per day at ~09:20 IST after the open prints land."""
+    from finagent.paper_trading import intraday
+    from datetime import datetime, timezone
+    if not date:
+        date = datetime.now(timezone.utc).date().isoformat()
+    reports = await intraday.capture_open_prices_all(date)
+    return {"date": date, "reports": [r.__dict__ for r in reports]}
+
+
+@app.post("/api/paper-trading/intraday/monitor")
+async def paper_trading_monitor_triggers(date: Optional[str] = None):
+    """Phase 2: scan open trades for SL/TP triggers using the latest
+    LTPs. Idempotent — run every 5-15 min during market hours."""
+    from finagent.paper_trading import intraday
+    from datetime import datetime, timezone
+    if not date:
+        date = datetime.now(timezone.utc).date().isoformat()
+    reports = await intraday.monitor_triggers_all(date)
+    return {"date": date, "reports": [r.__dict__ for r in reports]}
+
+
+@app.post("/api/paper-trading/intraday/finalize")
+async def paper_trading_finalize_eod(date: Optional[str] = None):
+    """Phase 3: end-of-day reconciliation. Closes direction-change
+    trades at today's close, MTMs remaining open positions, writes
+    the daily snapshot. Run once at ~15:35 IST."""
+    from finagent.paper_trading import intraday
+    from datetime import datetime, timezone
+    if not date:
+        date = datetime.now(timezone.utc).date().isoformat()
+    reports = await intraday.finalize_eod_all(date)
+    return {"date": date, "reports": [r.__dict__ for r in reports]}
+
+
 @app.post("/api/paper-trading/seed-from-debates")
 async def paper_trading_seed_from_debates(date: Optional[str] = None):
     """Convert today's existing debate verdicts into predictions.

@@ -49,4 +49,4 @@ TRANSACTION_COST = 20.0            # INR per position change
 
 STRATEGIES = ("equal_weight", "market_cap")
 
-from . import universe, store, engine, predictions, schema  # noqa: E402, F401
+from . import universe, store, engine, predictions, schema, quotes, intraday  # noqa: E402, F401

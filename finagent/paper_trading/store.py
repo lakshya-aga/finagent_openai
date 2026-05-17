@@ -48,14 +48,36 @@ _SCHEMA_CREATED = False
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Idempotent. Runs once per process; second+ calls short-circuit.
 
-    SCHEMA only contains CREATE TABLE IF NOT EXISTS / CREATE INDEX IF
-    NOT EXISTS so it's safe to re-run on existing DBs.
+    SCHEMA contains CREATE TABLE IF NOT EXISTS / CREATE INDEX IF
+    NOT EXISTS so it's safe to re-run on existing DBs. For columns
+    added after v1 we run ALTER TABLE … ADD COLUMN inside
+    ``_migrate_v2_trade_columns`` — SQLite tolerates this
+    idempotently when wrapped in PRAGMA table_info checks.
     """
     global _SCHEMA_CREATED
     if _SCHEMA_CREATED:
         return
     conn.executescript(SCHEMA)
+    _migrate_v2_trade_columns(conn)
     _SCHEMA_CREATED = True
+
+
+def _migrate_v2_trade_columns(conn: sqlite3.Connection) -> None:
+    """Add intraday-execution columns to a legacy v1 trades table.
+
+    No-op on fresh DBs (CREATE TABLE already includes the columns).
+    """
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
+    additions = [
+        ("target_price",    "REAL"),
+        ("stop_loss_price", "REAL"),
+        ("opened_via",      "TEXT DEFAULT 'eod_close'"),
+        ("closed_ts",       "REAL"),
+    ]
+    for col, ddl in additions:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {ddl}")
+            logger.info("paper_trading: migrated trades — added column %s", col)
 
 
 def _row_to_dict(r) -> dict[str, Any]:
@@ -257,17 +279,25 @@ def open_trade(
     open_price: float,
     open_weight: float,
     transaction_cost: float = 20.0,
+    target_price: float | None = None,
+    stop_loss_price: float | None = None,
+    opened_via: str = "eod_close",
 ) -> int:
+    """Open a new trade. target_price + stop_loss_price are snapshotted
+    at open-time so a later prediction edit doesn't move the trigger
+    on this already-open position."""
     with _conn() as c:
         cur = c.execute(
             """
             INSERT INTO trades (
                 strategy, ticker, direction, opened_at, open_price,
-                open_weight, transaction_cost
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                open_weight, transaction_cost,
+                target_price, stop_loss_price, opened_via
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (strategy, ticker, direction, opened_at, open_price,
-             open_weight, transaction_cost),
+             open_weight, transaction_cost,
+             target_price, stop_loss_price, opened_via),
         )
         return cur.lastrowid or 0
 
@@ -279,16 +309,21 @@ def close_trade(
     close_price: float,
     realized_pnl: float,
     close_reason: str,
+    closed_ts: float | None = None,
 ) -> None:
+    """Close a trade. closed_at is the trading-date 'YYYY-MM-DD';
+    closed_ts is the wall-clock UTC epoch (set when an intraday
+    trigger fires, NULL when close is part of an EOD batch)."""
     with _conn() as c:
         c.execute(
             """
             UPDATE trades
                SET closed_at = ?, close_price = ?, realized_pnl = ?,
-                   close_reason = ?
+                   close_reason = ?, closed_ts = ?
              WHERE id = ?
             """,
-            (closed_at, close_price, realized_pnl, close_reason, trade_id),
+            (closed_at, close_price, realized_pnl, close_reason,
+             closed_ts, trade_id),
         )
 
 

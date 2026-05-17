@@ -90,6 +90,15 @@ CREATE INDEX IF NOT EXISTS idx_possnaps_ticker ON position_snapshots(ticker);
 -- ── trades ───────────────────────────────────────────────────────
 -- Lifecycle of one trade — opened, then later closed. Open trades
 -- have closed_at = NULL. Filter is_open = (closed_at IS NULL).
+--
+-- v2 columns (target_price, stop_loss_price, opened_via, closed_ts)
+-- support intraday execution. target/stoploss are copied from the
+-- prediction at open-time so a later prediction edit doesn't move
+-- the trigger on an already-open position. opened_via tags the
+-- entry source so the UI can label market-open vs eod fills.
+-- closed_ts is the wall-clock instant of the trigger fire (UTC
+-- epoch seconds) — distinct from closed_at which stays a trading-
+-- date 'YYYY-MM-DD'.
 CREATE TABLE IF NOT EXISTS trades (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy          TEXT NOT NULL,
@@ -101,8 +110,16 @@ CREATE TABLE IF NOT EXISTS trades (
     closed_at         TEXT,
     close_price       REAL,
     realized_pnl      REAL,                      -- INR
-    close_reason      TEXT,                      -- 'direction_change' | 'neutral' | 'stop_loss' | 'target' | 'manual'
-    transaction_cost  REAL NOT NULL DEFAULT 20.0
+    close_reason      TEXT,                      -- 'direction_change' | 'neutral' | 'stop_loss' | 'target' | 'manual' | 'market_close'
+    transaction_cost  REAL NOT NULL DEFAULT 20.0,
+
+    -- v2 — added by store._migrate_v2_trade_columns on first run.
+    -- The CREATE TABLE keeps them for fresh DBs; the migration
+    -- ALTERs existing DBs in place.
+    target_price       REAL,
+    stop_loss_price    REAL,
+    opened_via         TEXT DEFAULT 'eod_close', -- 'market_open' | 'eod_close' | 'manual'
+    closed_ts          REAL                       -- UTC epoch seconds (intraday precision)
 );
 CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
 CREATE INDEX IF NOT EXISTS idx_trades_open     ON trades(strategy, ticker, closed_at);
