@@ -513,6 +513,146 @@ class _DebateSubmission(BaseModel):
 # button is just status='paused' → status='active' once the user has
 # eyeballed the signal.
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Paper trading — Nifty 50 daily directional book.
+# Six endpoints: 4 read (dashboard) + 2 write (seed predictions + run EOD close).
+# See finagent.paper_trading.__init__ for the data-flow doc.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/paper-trading/portfolio")
+async def paper_trading_portfolio(strategy: str = "equal_weight"):
+    """Surface A header stats — equity, today's PnL, all-time return,
+    Sharpe, max drawdown, exposure summary."""
+    from finagent.paper_trading import store, STRATEGIES
+    if strategy not in STRATEGIES:
+        raise HTTPException(400, f"strategy must be one of {STRATEGIES}")
+    return store.portfolio_overview(strategy)
+
+
+@app.get("/api/paper-trading/equity-curve")
+async def paper_trading_equity_curve(
+    strategy: str = "equal_weight",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    """Surface B chart data — list of {date, equity_value, daily_pnl,
+    daily_return_pct, drawdown}. Drawdown is computed on the fly from
+    the equity curve so the store stays write-once."""
+    from finagent.paper_trading import store, STRATEGIES, STARTING_CAPITAL
+    if strategy not in STRATEGIES:
+        raise HTTPException(400, f"strategy must be one of {STRATEGIES}")
+    snaps = store.list_snapshots(strategy, start=start, end=end)
+    # Drawdown vs running peak so the chart can shade pale-rose under
+    # an underwater stretch.
+    peak = STARTING_CAPITAL
+    out = []
+    for s in snaps:
+        v = s["equity_value"]
+        if v > peak:
+            peak = v
+        out.append({
+            "date": s["date"],
+            "equity_value": v,
+            "daily_pnl": s["daily_pnl"],
+            "daily_return_pct": s["daily_return_pct"],
+            "drawdown": (v - peak) / peak if peak > 0 else 0.0,
+            "transaction_costs": s["transaction_costs"],
+            "n_long": s["n_long"], "n_short": s["n_short"], "n_neutral": s["n_neutral"],
+        })
+    return {"strategy": strategy, "n_points": len(out), "points": out}
+
+
+@app.get("/api/paper-trading/positions")
+async def paper_trading_positions(
+    strategy: str = "equal_weight",
+    date: Optional[str] = None,
+):
+    """Surface C table — open positions for a strategy at a given date
+    (default: most recent snapshot date)."""
+    from finagent.paper_trading import store, universe, STRATEGIES
+    if strategy not in STRATEGIES:
+        raise HTTPException(400, f"strategy must be one of {STRATEGIES}")
+    positions = store.list_positions(strategy, date)
+    # Enrich with sector + display name so the UI doesn't need a
+    # second lookup per row.
+    for p in positions:
+        p["sector"] = universe.get_sector(p["ticker"])
+    return {"strategy": strategy, "as_of": positions[0]["date"] if positions else None,
+            "n_positions": len(positions), "positions": positions}
+
+
+@app.get("/api/paper-trading/predictions")
+async def paper_trading_predictions(date: Optional[str] = None):
+    """Surface D table — predictions for a given date (default: most
+    recent date with predictions). Returns all 50 (filtered later by
+    the UI to non-NEUTRAL if desired)."""
+    from finagent.paper_trading import store
+    if date is None:
+        date = store.latest_prediction_date()
+    if not date:
+        return {"date": None, "n": 0, "predictions": []}
+    preds = store.list_predictions(date=date)
+    return {"date": date, "n": len(preds), "predictions": preds}
+
+
+class PaperTradingPredictionPayload(BaseModel):
+    date: str                          # 'YYYY-MM-DD'
+    ticker: str
+    direction: int                     # -1 / 0 / +1
+    confidence: Optional[float] = None
+    reasoning: Optional[str] = None
+    target_price: Optional[float] = None
+    stop_loss_price: Optional[float] = None
+    source: Optional[str] = "manual"
+
+
+@app.post("/api/paper-trading/predictions")
+async def paper_trading_record_prediction(p: PaperTradingPredictionPayload):
+    """Write a single prediction. Used by the manual-override UI button
+    + the portfolio-agent commit tool. UNIQUE(date, ticker) means a
+    second call with the same key overwrites."""
+    from finagent.paper_trading import predictions
+    try:
+        pid = predictions.record_prediction(
+            date=p.date, ticker=p.ticker, direction=p.direction,
+            confidence=p.confidence, reasoning=p.reasoning,
+            target_price=p.target_price, stop_loss_price=p.stop_loss_price,
+            source=p.source or "manual",
+        )
+        return {"id": pid, "date": p.date, "ticker": p.ticker, "direction": p.direction}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/paper-trading/eod-close")
+async def paper_trading_eod_close(date: Optional[str] = None):
+    """Run the end-of-day close routine for both strategies. Idempotent
+    via UNIQUE(date, strategy). Defaults to today (UTC) if no date.
+
+    Returns the EodReport for each strategy. Slow (~5-15s) because of
+    yfinance batch fetch; the synapse proxy bumps the per-request
+    timeout for this route."""
+    from finagent.paper_trading import engine
+    from datetime import datetime, timezone
+    if not date:
+        date = datetime.now(timezone.utc).date().isoformat()
+    reports = await engine.run_eod_close_all(date)
+    return {"date": date, "reports": [r.__dict__ for r in reports]}
+
+
+@app.post("/api/paper-trading/seed-from-debates")
+async def paper_trading_seed_from_debates(date: Optional[str] = None):
+    """Convert today's existing debate verdicts into predictions.
+    Lets a freshly-deployed paper book bootstrap from the daily-debate
+    history without spinning up the portfolio agent first."""
+    from finagent.paper_trading import predictions
+    from datetime import datetime, timezone
+    if not date:
+        date = datetime.now(timezone.utc).date().isoformat()
+    return predictions.seed_from_debates(date)
+
+
 @app.get("/api/signals")
 async def list_signals_route(
     project: Optional[str] = None,
