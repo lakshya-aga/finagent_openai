@@ -659,3 +659,217 @@ async def monitor_triggers_all(date: str) -> list[TriggerReport]:
 
 async def finalize_eod_all(date: str) -> list[FinalizeReport]:
     return [await finalize_eod(date, s) for s in STRATEGIES]
+
+
+# ── Rebalance-at-close (the new single-shot daily cycle) ─────────
+
+
+@dataclass
+class RebalanceReport:
+    date: str
+    strategy: str
+    equity_value: float
+    daily_pnl: float
+    transaction_costs: float
+    triggered_target: int          # from intraday replay
+    triggered_stop_loss: int       # from intraday replay
+    closed_for_direction_change: int
+    opened_at_close: int
+    n_open_positions: int
+
+
+async def rebalance_at_close(
+    date: str,
+    strategy: str,
+    *,
+    close_prices: Optional[dict[str, float]] = None,
+    intraday_bars: Optional[dict] = None,
+) -> RebalanceReport:
+    """Single daily cycle: replay → close direction-changes → open new
+    at today's close → MTM survivors → snapshot.
+
+    Replaces the start-of-day-open / EOD-close split. Positions opened
+    by this routine are held at today's close price and carry over to
+    the next trading day until a future rebalance closes them.
+
+    Idempotent on UNIQUE(date, strategy). Safe to re-run; replay won't
+    double-close (open_trades excludes already-closed rows) and the
+    snapshot upsert overwrites the previous row.
+    """
+    if strategy not in STRATEGIES:
+        raise ValueError(f"unknown strategy {strategy!r}")
+
+    # ── 1. Replay intraday 1m bars to catch SL/TP fires ──────────
+    replay_report = await replay_intraday_triggers(
+        date, strategy, bars=intraday_bars,
+    )
+
+    # ── 2. Compute today's target weights ────────────────────────
+    preds = store.list_predictions(date=date)
+    directions = {p["ticker"]: int(p["direction"]) for p in preds}
+    pred_meta = {p["ticker"]: p for p in preds}
+
+    if strategy == "equal_weight":
+        target = compute_equal_weights(directions)
+    else:
+        mcaps_table = store.get_market_caps()
+        mcaps = {t: v["market_cap"] for t, v in mcaps_table.items() if v.get("market_cap")}
+        if not mcaps:
+            mcaps = await universe.refresh_market_caps()
+        target = compute_market_cap_weights(directions, mcaps)
+
+    # ── 3. Diff against currently-open trades ────────────────────
+    open_trades = store.list_open_trades(strategy)
+    open_by_ticker = {t["ticker"]: t for t in open_trades}
+
+    to_close: dict[str, str] = {}
+    for ticker, trade in open_by_ticker.items():
+        # Time barrier expires first — close on age, even if direction unchanged
+        max_hold = trade.get("max_hold_days")
+        days_held = _days_between(trade["opened_at"], date)
+        if max_hold is not None and days_held >= int(max_hold):
+            to_close[ticker] = "time_horizon"
+            continue
+        if ticker not in target:
+            to_close[ticker] = "direction_change"
+        elif (target[ticker] > 0) != (trade["direction"] > 0):
+            to_close[ticker] = "direction_change"
+
+    # Open everything that should be on the book today and isn't
+    # already held in the right direction. Tickers being closed for
+    # direction_change / time_horizon are eligible to be re-opened
+    # in today's direction at today's close — without this the short
+    # we just closed would never get flipped long.
+    held_and_keeping = set(open_by_ticker.keys()) - set(to_close.keys())
+    to_open = {t for t in target.keys() if t not in held_and_keeping}
+
+    # ── 4. Fetch close prices for everything we touch ────────────
+    needed = list(set(to_close.keys()) | to_open | set(open_by_ticker.keys()))
+    if close_prices is None and needed:
+        close_prices = await get_quote_source().get_ltps(needed)
+    close_prices = close_prices or {}
+
+    prev_snap = store.previous_snapshot(strategy, date)
+    prev_equity = prev_snap["equity_value"] if prev_snap else STARTING_CAPITAL
+
+    # ── 5. Close direction-change / time-horizon trades ──────────
+    realized_pnl = 0.0
+    transaction_costs = 0.0
+    closed_dir = 0
+    for ticker, reason in to_close.items():
+        trade = open_by_ticker[ticker]
+        px = close_prices.get(ticker, trade["open_price"])
+        notional = abs(trade["open_weight"]) * prev_equity
+        pct_move = (px - trade["open_price"]) / trade["open_price"]
+        pnl = trade["direction"] * pct_move * notional
+        realized_pnl += pnl
+        transaction_costs += TRANSACTION_COST
+        closed_dir += 1
+        store.close_trade(
+            trade["id"], closed_at=date, close_price=px,
+            realized_pnl=pnl, close_reason=reason,
+        )
+
+    # ── 6. Open new trades at today's CLOSE (the key behaviour shift)
+    opened_at_close = 0
+    for ticker in to_open:
+        if ticker not in close_prices:
+            logger.warning("paper_trading.rebalance: no close price for %s — skipping open", ticker)
+            continue
+        direction = 1 if target[ticker] > 0 else -1
+        meta = pred_meta.get(ticker, {})
+        store.open_trade(
+            strategy=strategy, ticker=ticker, direction=direction,
+            opened_at=date, open_price=close_prices[ticker],
+            open_weight=target[ticker],
+            transaction_cost=TRANSACTION_COST,
+            target_price=meta.get("target_price"),
+            stop_loss_price=meta.get("stop_loss_price"),
+            max_hold_days=meta.get("max_hold_days"),
+            opened_via="rebalance_close",
+        )
+        opened_at_close += 1
+        transaction_costs += TRANSACTION_COST
+
+    # Pick up triggered closes (from the replay step above) — their
+    # realized PnL needs to roll into today's daily_pnl + their txn
+    # cost into today's costs.
+    triggered_today = [
+        t for t in store.list_trades(strategy, limit=500, only_closed=True)
+        if t.get("closed_at") == date and t.get("close_reason") in ("stop_loss", "target")
+    ]
+    realized_pnl += sum((t.get("realized_pnl") or 0.0) for t in triggered_today)
+    transaction_costs += TRANSACTION_COST * len(triggered_today)
+
+    # ── 7. MTM survivors + write snapshots ───────────────────────
+    current_open = store.list_open_trades(strategy)
+    unrealized_total = 0.0
+    gross_notional = 0.0
+    net_notional = 0.0
+    store.clear_position_snapshots(date, strategy)
+    for trade in current_open:
+        ticker = trade["ticker"]
+        px = close_prices.get(ticker, trade["open_price"])
+        notional = abs(trade["open_weight"]) * prev_equity
+        pct_move = (px - trade["open_price"]) / trade["open_price"]
+        unrealized = trade["direction"] * pct_move * notional
+        unrealized_total += unrealized
+        gross_notional += notional
+        net_notional += trade["direction"] * notional
+        store.upsert_position_snapshot({
+            "date": date, "strategy": strategy, "ticker": ticker,
+            "direction": trade["direction"], "weight": trade["open_weight"],
+            "notional": notional,
+            "entry_date": trade["opened_at"], "entry_price": trade["open_price"],
+            "current_price": px,
+            "days_held": _days_between(trade["opened_at"], date),
+            "unrealized_pnl": unrealized,
+            "unrealized_pnl_pct": pct_move * trade["direction"],
+        })
+
+    yesterday_unrealized = sum(
+        p["unrealized_pnl"]
+        for p in store.list_positions(strategy, prev_snap["date"])
+    ) if prev_snap else 0.0
+
+    daily_pnl = realized_pnl + (unrealized_total - yesterday_unrealized) - transaction_costs
+    equity_today = prev_equity + daily_pnl
+    daily_return = daily_pnl / prev_equity if prev_equity > 0 else 0.0
+
+    n_long = sum(1 for t in current_open if t["direction"] > 0)
+    n_short = sum(1 for t in current_open if t["direction"] < 0)
+    n_neutral = max(0, len(universe.NIFTY50_TICKERS) - n_long - n_short)
+
+    store.upsert_portfolio_snapshot({
+        "date": date, "strategy": strategy,
+        "equity_value": equity_today, "cash": equity_today,
+        "gross_exposure": gross_notional / equity_today if equity_today else 0.0,
+        "net_exposure":   net_notional   / equity_today if equity_today else 0.0,
+        "daily_pnl": daily_pnl, "daily_return_pct": daily_return,
+        "transaction_costs": transaction_costs,
+        "n_long": n_long, "n_short": n_short, "n_neutral": n_neutral,
+    })
+
+    logger.info(
+        "paper_trading.rebalance(%s, %s) — equity=₹%.2f daily_pnl=₹%+.2f "
+        "opened=%d closed_dir=%d triggered=(tp:%d sl:%d) open=%d costs=₹%.2f",
+        date, strategy, equity_today, daily_pnl, opened_at_close, closed_dir,
+        replay_report.triggered_target, replay_report.triggered_stop_loss,
+        len(current_open), transaction_costs,
+    )
+
+    return RebalanceReport(
+        date=date, strategy=strategy, equity_value=equity_today,
+        daily_pnl=daily_pnl, transaction_costs=transaction_costs,
+        triggered_target=replay_report.triggered_target,
+        triggered_stop_loss=replay_report.triggered_stop_loss,
+        closed_for_direction_change=closed_dir,
+        opened_at_close=opened_at_close,
+        n_open_positions=len(current_open),
+    )
+
+
+async def rebalance_at_close_all(date: str) -> list[RebalanceReport]:
+    """Run the daily rebalance for both strategies. Used by the
+    cron + the admin POST /api/paper-trading/rebalance endpoint."""
+    return [await rebalance_at_close(date, s) for s in STRATEGIES]

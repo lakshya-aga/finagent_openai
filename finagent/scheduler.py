@@ -154,74 +154,44 @@ def start_scheduler() -> None:
         misfire_grace_time=3600,  # tolerate 1h late firing if the worker was down
     )
 
-    # Paper-trading intraday pipeline. Four cron jobs replace the v1
-    # monolithic "EOD batch" with a realistic open → monitor → close
-    # cycle. UTC times below; IST is UTC+5:30.
+    # Paper-trading daily lifecycle. TWO cron jobs replace the v2
+    # four-phase intraday pipeline. Positions now open AT TODAY'S
+    # CLOSE and carry overnight; the daily rebalance is the single
+    # write surface. UTC times below; IST is UTC+5:30.
     #
-    #   03:50 UTC = 09:20 IST   Phase 1: capture opening prints for
-    #                            every direction != 0 prediction. Runs
-    #                            5 min after NSE open (09:15 IST) so
-    #                            the opening bar has landed in
-    #                            yfinance.
-    #   04:00-09:55 UTC (*/15)  Phase 2: scan open trades for SL/TP
-    #                            triggers every 15 min during market
-    #                            hours (09:30-15:25 IST). 15 min is
-    #                            tight enough that a triggered close
-    #                            books a sensible price even with
-    #                            yfinance's ~15-min delay.
-    #   10:10 UTC = 15:40 IST   Phase 3: end-of-day reconciliation.
-    #                            Closes direction-change trades at
-    #                            today's close, MTMs remaining, writes
-    #                            the daily snapshot.
-    #   11:00 UTC = 16:30 IST   Portfolio-manager agent commits
-    #                            TOMORROW'S directions (LLM, ~30-90s).
-    #                            Uses today's market data + verdicts.
-    # ALL-50 daily stock-analyst run BEFORE market open. ~$0.001 per
-    # ticker × 50 = ~$0.05/day on gpt-5-mini; ~90 seconds wall-clock
-    # with 5-way parallelism. Lands a (direction, target, stop_loss,
-    # max_hold_days) row in predictions for every ticker. The
-    # portfolio-manager agent at 16:30 IST then reads those + applies
-    # portfolio-level filters before committing TOMORROW's book.
+    #   09:30 UTC = 15:00 IST   Phase A: stock-analyst run for all 50
+    #                            Nifty tickers. 30 min before market
+    #                            close so the analyst sees a near-full
+    #                            session of price action and the
+    #                            recommendations feed straight into
+    #                            the close-rebalance below. Runs FULLY
+    #                            in parallel (concurrency=50) — ~$0.05
+    #                            of LLM, finishes in 20–60s.
+    #   10:00 UTC = 15:30 IST   Phase B: close-rebalance. Replays the
+    #                            day's 1m tape to catch SL/TP fires,
+    #                            closes any positions whose new
+    #                            direction disagrees with today's
+    #                            analyst output (or that hit the
+    #                            max_hold_days time barrier), then
+    #                            OPENS NEW positions AT TODAY'S CLOSE
+    #                            and snapshots equity/exposure.
+    #                            Positions carry overnight until the
+    #                            next day's rebalance touches them.
+    #
+    # No more capture_opens / monitor / finalize / portfolio_agent —
+    # the single rebalance routine subsumes all four. The intraday
+    # replay still catches every SL/TP that fired during the day so
+    # we lose no triple-barrier correctness.
     sch.add_job(
         run_daily_stock_analyses,
-        CronTrigger(hour=3, minute=30, timezone="UTC"),
+        CronTrigger(hour=9, minute=30, timezone="UTC"),
         id="paper_trading_daily_analyses",
         replace_existing=True, misfire_grace_time=1800,
     )
     sch.add_job(
-        run_paper_trading_capture_opens,
-        CronTrigger(hour=3, minute=50, timezone="UTC"),
-        id="paper_trading_capture_opens",
-        replace_existing=True, misfire_grace_time=1800,
-    )
-    # 15-min monitor_triggers DELIBERATELY DISABLED. Was burning ~24
-    # yfinance batch calls/day (50 tickers each) and risking rate-
-    # limits during market hours. The EOD intraday-replay pass below
-    # walks the full 1m tape for the day and books every trigger that
-    # fired, so we lose no SL/TP correctness — only the in-day "live"
-    # status indicator on the dashboard. Re-enable here if/when we
-    # swap the quote source to a paid feed (GROWW with apiTrading
-    # token, or Polygon/Databento) that handles the polling cleanly.
-    # The endpoint POST /api/paper-trading/intraday/monitor still
-    # exists for manual ad-hoc checks.
-    # EOD intraday replay (Fix #3) MUST run before finalize_eod —
-    # both write to the trades table, so we serialise via 5-min gap.
-    sch.add_job(
-        run_paper_trading_replay,
-        CronTrigger(hour=10, minute=5, timezone="UTC"),
-        id="paper_trading_replay",
-        replace_existing=True, misfire_grace_time=1800,
-    )
-    sch.add_job(
-        run_paper_trading_finalize_eod,
-        CronTrigger(hour=10, minute=10, timezone="UTC"),
-        id="paper_trading_finalize_eod",
-        replace_existing=True, misfire_grace_time=3600,
-    )
-    sch.add_job(
-        run_paper_trading_eod,  # legacy name kept for back-compat
-        CronTrigger(hour=11, minute=0, timezone="UTC"),
-        id="paper_trading_portfolio_agent",
+        run_paper_trading_rebalance,
+        CronTrigger(hour=10, minute=0, timezone="UTC"),
+        id="paper_trading_rebalance",
         replace_existing=True, misfire_grace_time=3600,
     )
 
@@ -229,8 +199,7 @@ def start_scheduler() -> None:
     _scheduler = sch
     logging.info(
         "scheduler: started — Nifty debates 02:00 UTC + paper trading "
-        "(analyst 03:30, opens 03:50, replay 10:05, finalize 10:10, "
-        "agent 11:00 UTC; intraday monitor disabled — rely on EOD replay)",
+        "(analyst 09:30 UTC / 15:00 IST, close-rebalance 10:00 UTC / 15:30 IST)",
     )
 
 
@@ -270,139 +239,60 @@ async def run_daily_stock_analyses() -> dict:
         }
 
 
-async def run_paper_trading_replay() -> dict:
-    """EOD intraday replay — walk yfinance 1m bars for the day and
-    close any open trade whose target/stop was breached between
-    15-min monitor checks. Runs BEFORE finalize_eod so the daily
-    snapshot reflects every trigger that actually happened."""
-    from datetime import datetime, timezone
-    from .paper_trading import intraday
-    today = datetime.now(timezone.utc).date().isoformat()
-    logging.info("scheduler: intraday replay for %s", today)
-    try:
-        reports = await intraday.replay_intraday_triggers_all(today)
-        firings = sum(r.triggered_target + r.triggered_stop_loss for r in reports)
-        if firings:
-            logging.info("scheduler: intraday replay %s — %d additional firings", today, firings)
-        return {"date": today, "reports": [r.__dict__ for r in reports]}
-    except Exception:
-        logging.exception("scheduler: intraday replay failed")
-        return {"date": today, "error": "see logs"}
+async def run_paper_trading_rebalance() -> dict:
+    """Single-shot daily lifecycle cron target.
 
+    Runs at 10:00 UTC (15:30 IST = NSE close). Wraps the
+    ``intraday.rebalance_at_close_all`` routine which:
 
-async def run_paper_trading_capture_opens() -> dict:
-    """Phase 1 cron target — open positions at the day's opening print
-    for every prediction with direction != 0."""
-    from datetime import datetime, timezone
-    from .paper_trading import intraday
-    today = datetime.now(timezone.utc).date().isoformat()
-    logging.info("scheduler: paper-trading capture_opens for %s", today)
-    try:
-        reports = await intraday.capture_open_prices_all(today)
-        return {"date": today, "reports": [r.__dict__ for r in reports]}
-    except Exception:
-        logging.exception("scheduler: capture_open_prices_all failed")
-        return {"date": today, "error": "see logs"}
+      1. Replays today's 1m intraday tape to catch any SL/TP fires
+         that happened during the session.
+      2. Closes positions whose direction disagrees with today's
+         stock_analyst output, or that hit the max_hold_days time
+         barrier.
+      3. OPENS NEW positions at today's close price (positions then
+         carry overnight until the next rebalance touches them).
+      4. MTMs survivors at today's close + writes
+         portfolio_snapshots + position_snapshots.
 
+    Returns a per-strategy report list. Idempotent on (date, strategy)
+    so re-running the day overwrites the snapshot rather than
+    duplicating; safe for the admin "run now" endpoint to call mid-day.
 
-async def run_paper_trading_monitor_triggers() -> dict:
-    """Phase 2 cron target — scan open trades for SL/TP triggers.
-    Cheap (one batched LTP fetch + N arithmetic checks); safe to run
-    every 15 min during market hours."""
-    from datetime import datetime, timezone
-    from .paper_trading import intraday
-    today = datetime.now(timezone.utc).date().isoformat()
-    try:
-        reports = await intraday.monitor_triggers_all(today)
-        # Only log when something triggered — keeps cron-spam down.
-        firings = sum(r.triggered_target + r.triggered_stop_loss for r in reports)
-        if firings:
-            logging.info(
-                "scheduler: paper-trading monitor_triggers %s — %d firings",
-                today, firings,
-            )
-        return {"date": today, "reports": [r.__dict__ for r in reports]}
-    except Exception:
-        logging.exception("scheduler: monitor_triggers_all failed")
-        return {"date": today, "error": "see logs"}
-
-
-async def run_paper_trading_finalize_eod() -> dict:
-    """Phase 3 cron target — end-of-day reconciliation. Closes
-    direction-change trades, MTMs remaining open positions, writes
-    the daily portfolio + position snapshots."""
-    from datetime import datetime, timezone
-    from .paper_trading import intraday
-    today = datetime.now(timezone.utc).date().isoformat()
-    logging.info("scheduler: paper-trading finalize_eod for %s", today)
-    try:
-        reports = await intraday.finalize_eod_all(today)
-        return {"date": today, "reports": [r.__dict__ for r in reports]}
-    except Exception:
-        logging.exception("scheduler: finalize_eod_all failed")
-        return {"date": today, "error": "see logs"}
-
-
-async def run_paper_trading_eod() -> dict:
-    """Run the daily paper-trading pipeline:
-
-      1. Portfolio-manager agent fills today's direction set (high
-         quality, ~30-90s of LLM time).
-         If the agent is unavailable or commits zero predictions,
-         FALL BACK to seed_from_debates (cheap, no-LLM, ~5 tickers
-         from today's debate scheduler verdicts).
-      2. EOD close routine writes snapshots for both strategies.
-
-    Idempotent on the (date, strategy) key — re-running overwrites
-    the day's snapshots rather than producing duplicates. Used by
-    the daily 11:00 UTC cron and by the admin "run now" endpoint.
-
-    Returns ``{date, agent, seeded, reports}``.
+    On failure returns a structured error payload (rather than raising)
+    so the admin endpoint can show the operator exactly what went wrong
+    without ssh'ing the VM.
     """
+    import traceback
     from datetime import datetime, timezone
-    from .paper_trading import predictions as ptp, engine as pte
+    from .paper_trading import intraday
 
     today = datetime.now(timezone.utc).date().isoformat()
-    logging.info("scheduler: paper-trading EOD starting for %s", today)
-
-    # Step 1a — try the portfolio-manager agent first.
-    agent_report: dict | None = None
+    logging.info("scheduler: paper-trading close-rebalance for %s", today)
     try:
-        from .agents.portfolio_manager import run_portfolio_manager
-        report = await run_portfolio_manager(today)
-        agent_report = report.model_dump()
+        reports = await intraday.rebalance_at_close_all(today)
         logging.info(
-            "scheduler: portfolio_manager %s — status=%s accepted=%d",
-            today, agent_report.get("status"), agent_report.get("accepted"),
+            "scheduler: rebalance %s — %s",
+            today,
+            ", ".join(
+                f"{r.strategy} equity=₹{r.equity_value:.2f} pnl=₹{r.daily_pnl:+.2f} "
+                f"open={r.n_open_positions} opened={r.opened_at_close} "
+                f"closed_dir={r.closed_for_direction_change} "
+                f"triggers=(tp:{r.triggered_target} sl:{r.triggered_stop_loss})"
+                for r in reports
+            ),
         )
-    except Exception:
-        logging.exception("scheduler: portfolio_manager raised for %s", today)
-
-    # Step 1b — fall back to seed_from_debates if the agent didn't
-    # commit anything (unavailable, error, or empty commit).
-    seed_summary: dict = {}
-    if not agent_report or agent_report.get("status") != "ok":
-        try:
-            seed_summary = ptp.seed_from_debates(today)
-        except Exception:
-            logging.exception("scheduler: seed_from_debates fallback failed for %s", today)
-
-    # Step 2 — EOD close for both strategies.
-    reports: list[dict] = []
-    try:
-        for r in await pte.run_eod_close_all(today):
-            reports.append(r.__dict__)
-    except Exception:
-        logging.exception("scheduler: run_eod_close_all failed for %s", today)
-
-    logging.info(
-        "scheduler: paper-trading EOD complete for %s — agent=%s seed_accepted=%s reports=%d",
-        today,
-        (agent_report or {}).get("status"),
-        seed_summary.get("accepted"),
-        len(reports),
-    )
-    return {"date": today, "agent": agent_report, "seeded": seed_summary, "reports": reports}
+        return {
+            "date": today, "status": "ok",
+            "reports": [r.__dict__ for r in reports],
+        }
+    except Exception as e:
+        logging.exception("scheduler: paper-trading rebalance failed for %s", today)
+        return {
+            "date": today, "status": "rebalance_failed",
+            "error": f"{type(e).__name__}: {e}",
+            "traceback": traceback.format_exc()[-1500:],
+        }
 
 
 def stop_scheduler() -> None:

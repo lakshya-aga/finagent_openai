@@ -880,6 +880,122 @@ async def paper_trading_run_stock_analyses(date: Optional[str] = None):
     return await run_daily_all_50(date)
 
 
+@app.post("/api/paper-trading/diagnostics/groww")
+async def paper_trading_diagnostics_groww():
+    """End-to-end smoke of the Groww auth + REST chain.
+
+    Returns: token mint status, per-test outcomes (REST get_quote +
+    get_ltp + Feed get_index_value). Lets the operator hit one
+    button and see exactly which link is broken without ssh'ing
+    the VM.
+    """
+    import asyncio as _asyncio
+    out: dict = {"token_minted": False, "token_len": 0,
+                 "sdk_imported": False, "feed_imported": False, "tests": []}
+    try:
+        from growwapi import GrowwAPI, GrowwFeed  # noqa: F401
+        out["sdk_imported"] = True
+        out["feed_imported"] = True
+    except ImportError as e:
+        out["import_error"] = f"{type(e).__name__}: {e}"
+        return out
+    try:
+        from finagent.paper_trading import groww_auth
+        token = groww_auth.get_token()
+        out["token_minted"] = True
+        out["token_len"] = len(token)
+    except Exception as e:
+        out["token_mint_error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    client = GrowwAPI(token)
+    SEGMENT_CASH = getattr(GrowwAPI, "SEGMENT_CASH", "CASH")
+
+    def _shrink(obj, depth: int = 0):
+        if depth > 4: return "<...>"
+        if isinstance(obj, dict):
+            return {k: _shrink(v, depth + 1) for k, v in list(obj.items())[:20]}
+        if isinstance(obj, (list, tuple)):
+            return [_shrink(x, depth + 1) for x in obj[:5]]
+        if isinstance(obj, str) and len(obj) > 300:
+            return obj[:300] + "..."
+        return obj
+
+    def _try(name, fn, *args, **kwargs):
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as e:
+            return {"name": name, "ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+        return {"name": name, "ok": True, "result": _shrink(result)}
+
+    out["tests"].append(await _asyncio.to_thread(
+        _try, "get_quote(RELIANCE/NSE/CASH)",
+        client.get_quote, "RELIANCE", "NSE", SEGMENT_CASH, 10,
+    ))
+    out["tests"].append(await _asyncio.to_thread(
+        _try, "get_ltp([RELIANCE,TCS,HDFCBANK]/CASH)",
+        client.get_ltp, ("RELIANCE", "TCS", "HDFCBANK"), SEGMENT_CASH, 10,
+    ))
+
+    # Feed-based NIFTY 50 index value — separate connection (WebSocket).
+    def _probe_index():
+        try:
+            feed = GrowwFeed(token)
+        except Exception as e:
+            return {"name": "feed get_index_value(NIFTY)", "ok": False,
+                    "error": f"GrowwFeed init: {type(e).__name__}: {e}"}
+        attempts: list[dict] = []
+        for cand in (
+            [{"exchange": "NSE", "trading_symbol": "NIFTY", "segment": "INDEX"}],
+            [{"exchange": "NSE", "trading_symbol": "NIFTY 50", "segment": "INDEX"}],
+            [{"exchange": "NSE", "trading_symbol": "NIFTY", "segment": "CASH"}],
+        ):
+            a: dict = {"instrument": cand[0]}
+            try:
+                feed.subscribe_index_value(cand)  # type: ignore[attr-defined]
+                import time as _time
+                _time.sleep(3.0)
+                a["result"] = _shrink(feed.get_index_value())
+                a["ok"] = True
+            except Exception as e:
+                a["ok"] = False
+                a["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+            attempts.append(a)
+            if a.get("ok") and a.get("result"):
+                break
+        return {"name": "feed get_index_value(NIFTY)",
+                "ok": any(a.get("ok") for a in attempts),
+                "attempts": attempts}
+
+    out["tests"].append(await _asyncio.to_thread(_probe_index))
+    return out
+
+
+@app.post("/api/paper-trading/rebalance")
+async def paper_trading_rebalance(date: Optional[str] = None):
+    """The new daily cycle's single entry point. Runs in this order
+    per strategy:
+
+      1. Replay today's intraday 1m bars → close any SL/TP triggers
+         that fired during the day (snapshots fill at trigger price)
+      2. Close any open trade whose direction flipped or went to 0
+         in today's predictions (at today's close price)
+      3. Open new trades for fresh directions (at today's close price
+         — positions now carry overnight)
+      4. MTM remaining open positions at today's close
+      5. Write portfolio_snapshots + position_snapshots
+
+    Replaces the old start-of-day-open / EOD-close split with a
+    single rebalance-at-close that lets positions persist across days.
+    """
+    from finagent.paper_trading import intraday
+    from datetime import datetime, timezone
+    if not date:
+        date = datetime.now(timezone.utc).date().isoformat()
+    reports = await intraday.rebalance_at_close_all(date)
+    return {"date": date, "reports": [r.__dict__ for r in reports]}
+
+
 @app.post("/api/paper-trading/intraday/finalize")
 async def paper_trading_finalize_eod(date: Optional[str] = None):
     """Phase 3: end-of-day reconciliation. Closes direction-change
@@ -1152,15 +1268,17 @@ async def debates_calendar(
 
 @app.post("/api/paper-trading/scheduler/run-now")
 async def trigger_paper_trading_now():
-    """Manually fire the paper-trading EOD cron (admin / smoke-test).
+    """Manually fire the daily close-rebalance cron (admin / smoke-test).
 
-    Same routine the daily 11:00 UTC cron runs: seed today's
-    predictions from any debate verdicts that landed today, then
-    run the EOD close for both strategies. Synchronous (~20-60s
-    because of the yfinance fetch) so the caller sees the result.
+    Same routine the daily 10:00 UTC (15:30 IST) cron runs: replay
+    today's intraday tape to catch SL/TP fires, close any positions
+    whose direction disagrees with today's stock_analyst output (or
+    that hit max_hold_days), open new positions at today's close, and
+    snapshot equity for both strategies. Synchronous (~20-60s because
+    of the yfinance fetch) so the caller sees the result.
     """
-    from finagent.scheduler import run_paper_trading_eod
-    return await run_paper_trading_eod()
+    from finagent.scheduler import run_paper_trading_rebalance
+    return await run_paper_trading_rebalance()
 
 
 @app.post("/api/paper-trading/portfolio-manager/run")

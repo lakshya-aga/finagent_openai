@@ -225,11 +225,23 @@ async def run_daily_all_50(
     date: str,
     *,
     context_for: Optional["callable"] = None,
-    concurrency: int = 5,
+    concurrency: int = 50,
 ) -> dict:
-    """Run the analyst for every Nifty 50 ticker on ``date``, with
-    bounded parallelism. Writes results directly into the predictions
-    table via ``record_prediction(source='agent:stock_analyst')``.
+    """Run the analyst for every Nifty 50 ticker on ``date``, fully
+    in parallel by default. Writes results directly into the
+    predictions table via ``record_prediction(source='agent:stock_analyst')``.
+
+    ``concurrency`` defaults to 50 — one slot per Nifty 50 ticker —
+    so every ticker is analysed at the same time. Wall-clock is gated
+    by the slowest LLM round-trip (~10–20s) rather than serial batching.
+    Cost is unchanged (~$0.05 of LLM); we burn the same tokens whether
+    we do them serially or in parallel. The OpenAI Tier-1 default of
+    500 RPM is comfortably above 50 concurrent requests, and the cron
+    runs once/day so we never sustain pressure on the rate limiter.
+
+    Drop concurrency back to 5–10 if you're testing on a Tier-Free
+    key (3 RPM cap will 429 hard) or running against a self-hosted
+    Ollama instance with constrained GPU memory.
 
     ``context_for(ticker)`` is a caller-supplied coroutine that returns
     the (current_price, context_str) tuple for that ticker. Defaults to
