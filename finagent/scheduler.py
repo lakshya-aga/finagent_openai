@@ -238,16 +238,36 @@ async def run_daily_stock_analyses() -> dict:
     """Phase 0 cron target — fire the per-ticker stock_analyst for
     every Nifty 50 ticker, writing direction + target + stop_loss +
     max_hold_days into the predictions table. Runs ~$0.05 of LLM
-    calls in ~90 seconds (5-way parallelism on gpt-5-mini)."""
+    calls in ~90 seconds (5-way parallelism on gpt-4o-mini).
+
+    On a top-level failure (import error, OpenAI auth, etc.) returns
+    the exception text + a short traceback so the admin endpoint can
+    show the operator exactly what went wrong without ssh'ing the VM.
+    """
+    import traceback
     from datetime import datetime, timezone
-    from .agents.stock_analyst import run_daily_all_50
     today = datetime.now(timezone.utc).date().isoformat()
     logging.info("scheduler: stock_analyst daily run for %s", today)
     try:
-        return await run_daily_all_50(today)
-    except Exception:
+        from .agents.stock_analyst import run_daily_all_50
+    except Exception as e:
+        logging.exception("scheduler: stock_analyst import failed")
+        return {
+            "date": today, "status": "import_failed",
+            "error": f"{type(e).__name__}: {e}",
+            "traceback": traceback.format_exc()[-1500:],
+        }
+    try:
+        result = await run_daily_all_50(today)
+        result.setdefault("status", "ok")
+        return result
+    except Exception as e:
         logging.exception("scheduler: stock_analyst daily run failed")
-        return {"date": today, "error": "see logs"}
+        return {
+            "date": today, "status": "run_failed",
+            "error": f"{type(e).__name__}: {e}",
+            "traceback": traceback.format_exc()[-1500:],
+        }
 
 
 async def run_paper_trading_replay() -> dict:

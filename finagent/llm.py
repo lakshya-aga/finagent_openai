@@ -50,6 +50,12 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     "template_author":   ("openai", "gpt-5"),
     # Audit + verdict layers
     "bias_auditor":      ("openai", "gpt-4o-mini"),
+    # Paper-trading daily per-ticker analyst (50 calls/day → keep cheap).
+    "stock_analyst":     ("openai", "gpt-4o-mini"),
+    # Portfolio-manager agent that commits the daily direction set.
+    "portfolio_manager": ("openai", "gpt-4o-mini"),
+    # Notebook-name suggester — one-shot, lowest tier.
+    "name_suggester":    ("openai", "gpt-4o-mini"),
     # Debate package
     "debate_bull":       ("openai", "gpt-4o"),
     "debate_bear":       ("openai", "gpt-4o"),

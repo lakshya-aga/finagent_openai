@@ -264,10 +264,18 @@ async def run_daily_all_50(
 
     await asyncio.gather(*(_one(t) for t in tickers))
 
-    # Persist
-    n_buy = n_sell = n_avoid = n_failed = 0
+    # Persist + collect per-ticker outcomes so the admin response can
+    # surface exactly what happened without forcing the operator to
+    # ssh in and tail logs.
+    n_buy = n_sell = n_avoid = n_failed = n_persisted = 0
+    persist_errors: list[dict] = []
+    per_ticker: list[dict] = []
     for ticker, rec in results.items():
-        if "unavailable" in (rec.reasoning or "") or "failed" in (rec.reasoning or ""):
+        is_failed = (
+            "unavailable" in (rec.reasoning or "")
+            or "failed" in (rec.reasoning or "")
+        )
+        if is_failed:
             n_failed += 1
         if rec.action == "buy":   n_buy += 1
         elif rec.action == "sell": n_sell += 1
@@ -277,17 +285,30 @@ async def run_daily_all_50(
         )
         try:
             ptp.record_prediction(**kwargs)
-        except Exception:
+            n_persisted += 1
+        except Exception as e:
             logger.exception("stock_analyst: failed to persist %s", ticker)
+            persist_errors.append({"ticker": ticker, "error": f"{type(e).__name__}: {e}"[:200]})
+        per_ticker.append({
+            "ticker": ticker, "action": rec.action,
+            "confidence": rec.confidence,
+            "target_price": rec.target_price,
+            "stop_loss_price": rec.stop_loss_price,
+            "reasoning": (rec.reasoning or "")[:200],
+        })
 
     logger.info(
-        "stock_analyst: daily run for %s — buy=%d sell=%d avoid=%d failed=%d",
-        date, n_buy, n_sell, n_avoid, n_failed,
+        "stock_analyst: daily run for %s — buy=%d sell=%d avoid=%d failed=%d persisted=%d",
+        date, n_buy, n_sell, n_avoid, n_failed, n_persisted,
     )
     return {
-        "date": date, "n_analysed": len(results),
+        "date": date, "n_analysed": len(results), "n_persisted": n_persisted,
         "n_buy": n_buy, "n_sell": n_sell, "n_avoid": n_avoid,
         "n_failed": n_failed,
+        # Truncated to top-5 + bottom-5 by reasoning length so the
+        # admin endpoint response stays readable.
+        "sample_per_ticker": (per_ticker[:10] if len(per_ticker) > 10 else per_ticker),
+        "persist_errors": persist_errors[:10],
     }
 
 
