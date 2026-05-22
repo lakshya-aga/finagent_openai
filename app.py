@@ -111,6 +111,51 @@ async def _rate_limit_key(request: "StarletteRequest") -> str:
 app = FastAPI()
 
 
+# Process-start timestamp + commit SHA snapshot — captured at import
+# so /api/health can answer "did the new code actually pull and the
+# container actually restart" without shelling out per request.
+import subprocess as _subprocess
+import time as _time
+_PROCESS_STARTED_AT = _time.time()
+
+
+def _resolve_commit_info() -> dict:
+    """Best-effort commit info for /api/health.
+
+    Order of preference:
+      1. FINAGENT_COMMIT_SHA / _SUBJECT / _TIME env vars (set by the
+         deploy workflow if you want to bake them in).
+      2. `git rev-parse HEAD` inside /app (the Dockerfile COPYs the
+         repo so .git is present in the running container).
+      3. ``{}`` if neither works (local dev without .git, etc.).
+    """
+    env_sha = os.environ.get("FINAGENT_COMMIT_SHA", "").strip()
+    if env_sha:
+        return {
+            "sha":     env_sha,
+            "subject": os.environ.get("FINAGENT_COMMIT_SUBJECT", ""),
+            "time":    os.environ.get("FINAGENT_COMMIT_TIME", ""),
+            "source":  "env",
+        }
+    try:
+        cwd = Path(__file__).resolve().parent
+        sha = _subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(cwd), timeout=2,
+        ).decode().strip()
+        subject = _subprocess.check_output(
+            ["git", "log", "-1", "--pretty=%s"], cwd=str(cwd), timeout=2,
+        ).decode().strip()
+        commit_time = _subprocess.check_output(
+            ["git", "log", "-1", "--pretty=%cI"], cwd=str(cwd), timeout=2,
+        ).decode().strip()
+        return {"sha": sha, "subject": subject, "time": commit_time, "source": "git"}
+    except Exception as e:
+        return {"sha": None, "subject": None, "time": None, "source": f"unavailable: {type(e).__name__}"}
+
+
+_COMMIT_INFO = _resolve_commit_info()
+
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response as StarletteResponse
@@ -1263,6 +1308,77 @@ async def debates_calendar(
         "month": f"{year:04d}-{mon:02d}",
         "source": source,
         "days": out_by_day,
+    }
+
+
+@app.get("/api/health")
+async def health():
+    """Read-only deploy + scheduler health snapshot.
+
+    Designed to answer four questions post-deploy without SSHing the VM:
+
+      1. *Did the new code actually pull?* ``commit.sha`` + ``commit.subject``
+         should match the SHA you just pushed to finagent_openai/main.
+      2. *Did the container actually restart?* ``uptime_seconds`` should be
+         small (single-digit minutes) right after a deploy.
+      3. *Is the scheduler running and what crons are registered?*
+         ``scheduler.jobs[]`` lists each registered cron with its next
+         fire time; ``scheduler.last_fire{}`` shows the most recent
+         invocation per job (with status + summary).
+      4. *Are the required env vars present?* ``env_present{}`` reports
+         BOOLEAN presence — never values — for the keys that matter.
+
+    Never raises; on any partial failure the corresponding key is
+    populated with ``{"error": ...}`` and the rest of the payload
+    is still returned. Cheap (no DB, no LLM, no GROWW mint) — safe
+    to poll from monitoring.
+    """
+    from finagent.scheduler import get_registered_jobs, get_last_fire_table
+    from datetime import datetime, timezone
+
+    uptime = max(0.0, _time.time() - _PROCESS_STARTED_AT)
+
+    # Env presence — boolean only, never values. Lets the operator
+    # confirm the GH-Actions deploy actually wrote the .env on the VM
+    # without exposing the keys to anyone reading /api/health.
+    env_keys = [
+        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "FRED_API_KEY",
+        "GROWW_API_KEY", "GROWW_API_SECRET", "GROWW_ACCESS_TOKEN",
+        "GROWW_TOTP_SECRET", "MCP_PUBLIC_KEY",
+        "PAPER_TRADING_QUOTE_SOURCE",
+    ]
+    env_present = {k: bool(os.environ.get(k, "").strip()) for k in env_keys}
+
+    # Resolve "what quote provider would auto-selection pick" without
+    # actually constructing GrowwSource (which would mint a token as a
+    # side-effect — we don't want /api/health to do that).
+    pref = os.environ.get("PAPER_TRADING_QUOTE_SOURCE", "auto").lower()
+    has_token = env_present["GROWW_ACCESS_TOKEN"]
+    has_pair = env_present["GROWW_API_KEY"] and env_present["GROWW_TOTP_SECRET"]
+    if pref == "yfinance":
+        quote_source_pred = "yfinance (forced)"
+    elif pref == "groww":
+        quote_source_pred = "groww (forced; would raise if creds missing)"
+    elif has_token or has_pair:
+        quote_source_pred = "groww (auto; creds present)"
+    else:
+        quote_source_pred = "yfinance (auto; no GROWW creds)"
+
+    jobs = get_registered_jobs()
+    last_fire = get_last_fire_table()
+
+    return {
+        "ok": True,
+        "now":             datetime.now(timezone.utc).isoformat(),
+        "uptime_seconds":  round(uptime, 1),
+        "commit":          _COMMIT_INFO,
+        "scheduler": {
+            "started":     len(jobs) > 0,
+            "jobs":        jobs,
+            "last_fire":   last_fire,
+        },
+        "env_present":     env_present,
+        "quote_source_resolved": quote_source_pred,
     }
 
 

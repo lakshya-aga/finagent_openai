@@ -115,6 +115,7 @@ async def run_daily_nifty_debates(n: int = 5, rounds: int = 2) -> dict:
         "debate_ids": debate_ids,
     }
     logging.info("scheduler: completed daily debates: %s", summary)
+    _record_fire("nifty50_daily_debates", "ok", summary)
     return summary
 
 
@@ -122,6 +123,42 @@ async def run_daily_nifty_debates(n: int = 5, rounds: int = 2) -> dict:
 
 
 _scheduler: Optional[object] = None  # AsyncIOScheduler, lazy import
+
+
+# Per-job execution telemetry — populated by the cron handler
+# wrappers below and read by /api/health. Kept module-level (rather
+# than persisted) on purpose: this is "did the cron fire since the
+# process came up", not historical state. If the process restarts
+# the dict resets, which is exactly what you want for diagnosing
+# "did the new container actually run the cron yet".
+_LAST_FIRE: dict[str, dict] = {}
+
+
+def _record_fire(job_id: str, status: str, result: dict | None = None) -> None:
+    """Stamp ``_LAST_FIRE[job_id]`` with the most recent invocation.
+
+    ``status`` is one of ``ok`` / ``error`` / ``starting``.
+    ``result`` is the (possibly truncated) return payload — handy
+    for the health endpoint to surface n_buy / n_sell etc. without
+    re-running the job.
+    """
+    import time as _time
+    entry = {"status": status, "ts": _time.time()}
+    if result is not None:
+        # Trim noisy fields so the health response stays under a few KB.
+        trimmed = {k: v for k, v in result.items() if k not in ("sample_per_ticker", "traceback")}
+        if "reports" in trimmed and isinstance(trimmed["reports"], list):
+            trimmed["reports"] = [
+                {k: v for k, v in r.items() if k not in ("trades", "positions")}
+                for r in trimmed["reports"]
+            ]
+        entry["summary"] = trimmed
+    _LAST_FIRE[job_id] = entry
+
+
+def get_last_fire_table() -> dict[str, dict]:
+    """Read-only snapshot of ``_LAST_FIRE`` for the health endpoint."""
+    return dict(_LAST_FIRE)
 
 
 def start_scheduler() -> None:
@@ -217,26 +254,32 @@ async def run_daily_stock_analyses() -> dict:
     from datetime import datetime, timezone
     today = datetime.now(timezone.utc).date().isoformat()
     logging.info("scheduler: stock_analyst daily run for %s", today)
+    _record_fire("paper_trading_daily_analyses", "starting")
     try:
         from .agents.stock_analyst import run_daily_all_50
     except Exception as e:
         logging.exception("scheduler: stock_analyst import failed")
-        return {
+        payload = {
             "date": today, "status": "import_failed",
             "error": f"{type(e).__name__}: {e}",
             "traceback": traceback.format_exc()[-1500:],
         }
+        _record_fire("paper_trading_daily_analyses", "error", payload)
+        return payload
     try:
         result = await run_daily_all_50(today)
         result.setdefault("status", "ok")
+        _record_fire("paper_trading_daily_analyses", "ok", result)
         return result
     except Exception as e:
         logging.exception("scheduler: stock_analyst daily run failed")
-        return {
+        payload = {
             "date": today, "status": "run_failed",
             "error": f"{type(e).__name__}: {e}",
             "traceback": traceback.format_exc()[-1500:],
         }
+        _record_fire("paper_trading_daily_analyses", "error", payload)
+        return payload
 
 
 async def run_paper_trading_rebalance() -> dict:
@@ -269,6 +312,7 @@ async def run_paper_trading_rebalance() -> dict:
 
     today = datetime.now(timezone.utc).date().isoformat()
     logging.info("scheduler: paper-trading close-rebalance for %s", today)
+    _record_fire("paper_trading_rebalance", "starting")
     try:
         reports = await intraday.rebalance_at_close_all(today)
         logging.info(
@@ -282,17 +326,21 @@ async def run_paper_trading_rebalance() -> dict:
                 for r in reports
             ),
         )
-        return {
+        payload = {
             "date": today, "status": "ok",
             "reports": [r.__dict__ for r in reports],
         }
+        _record_fire("paper_trading_rebalance", "ok", payload)
+        return payload
     except Exception as e:
         logging.exception("scheduler: paper-trading rebalance failed for %s", today)
-        return {
+        payload = {
             "date": today, "status": "rebalance_failed",
             "error": f"{type(e).__name__}: {e}",
             "traceback": traceback.format_exc()[-1500:],
         }
+        _record_fire("paper_trading_rebalance", "error", payload)
+        return payload
 
 
 def stop_scheduler() -> None:
@@ -303,3 +351,23 @@ def stop_scheduler() -> None:
         except Exception:
             logging.exception("scheduler: shutdown failed")
         _scheduler = None
+
+
+def get_registered_jobs() -> list[dict]:
+    """Read-only snapshot of the registered APScheduler jobs for the
+    health endpoint. Returns ``[]`` when the scheduler hasn't started
+    (lets the caller distinguish "no scheduler" from "no jobs")."""
+    if _scheduler is None:
+        return []
+    out: list[dict] = []
+    try:
+        for job in _scheduler.get_jobs():  # type: ignore[attr-defined]
+            next_run = getattr(job, "next_run_time", None)
+            out.append({
+                "id":            getattr(job, "id", "?"),
+                "next_run_time": next_run.isoformat() if next_run else None,
+                "trigger":       str(getattr(job, "trigger", "?")),
+            })
+    except Exception as e:
+        logging.warning("scheduler.get_registered_jobs failed: %s", e)
+    return out
