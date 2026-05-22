@@ -1,14 +1,22 @@
 """Prediction sources.
 
-v1 sources:
-  - manual entry (POST /api/paper-trading/predictions)
-  - seed_from_debates(date) — pull verdicts from the existing daily
-    Nifty 50 debate scheduler and convert {buy → +1, sell → -1,
-    avoid → 0}.
+Active sources:
+  - daily stock_analyst agent — one LLM call per Nifty 50 ticker,
+    fires from the scheduler at 09:30 UTC (15:00 IST, 30 min before
+    NSE close). Writes ``source='agent:stock_analyst'``. This is the
+    primary path; the per-ticker analysis methodology follows the
+    Tauric-style multi-agent debate (see finagent.agents.trading_panel).
+  - manual entry (POST /api/paper-trading/predictions) — admin
+    override; writes ``source='manual'``.
+  - seed_from_debates(date) — back-compat cheap fallback that pulls
+    verdicts from the existing daily Nifty 50 debate scheduler and
+    converts {buy → +1, sell → -1, avoid → 0}. Writes
+    ``source='seed_from_debates'``. Retained because the close-rebalance
+    will degrade gracefully to it if the analyst cron failed.
 
-Later v2 sources (not yet implemented):
-  - daily stock_analyst agent per ticker (cheap LLM, ~$0.05/day)
-  - portfolio_manager agent that overlays its own filter on top
+The old batch portfolio_manager agent (which wrote
+``source='agent:portfolio_manager'``) was removed — the
+stock_analyst is the sole agentic writer going forward.
 """
 
 from __future__ import annotations

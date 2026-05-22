@@ -51,9 +51,11 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     # Audit + verdict layers
     "bias_auditor":      ("openai", "gpt-4o-mini"),
     # Paper-trading daily per-ticker analyst (50 calls/day → keep cheap).
+    # This is the sole writer to the predictions table — the old batch
+    # portfolio_manager agent was removed; the Tauric-style multi-agent
+    # debate panel (finagent.agents.trading_panel) is the per-ticker
+    # methodology going forward.
     "stock_analyst":     ("openai", "gpt-4o-mini"),
-    # Portfolio-manager agent that commits the daily direction set.
-    "portfolio_manager": ("openai", "gpt-4o-mini"),
     # Notebook-name suggester — one-shot, lowest tier.
     "name_suggester":    ("openai", "gpt-4o-mini"),
     # Debate package
