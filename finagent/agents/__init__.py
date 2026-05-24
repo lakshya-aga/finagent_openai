@@ -4,3 +4,5 @@ from .validator import validatorandfixingagent
 from .edit_planner import edit_planner
 from .edit_orchestration import edit_orchestration_agent
 from .question import question_agent
+from .analysis_planner import analysis_planner
+from .analysis_orchestration import analysis_orchestration_agent

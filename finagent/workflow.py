@@ -16,6 +16,8 @@ from agents import RunConfig, Runner, TResponseInputItem, trace
 from agents.mcp import MCPServerManager
 
 from .agents import (
+    analysis_orchestration_agent,
+    analysis_planner,
     edit_orchestration_agent,
     edit_planner,
     orchestration_agent,
@@ -126,7 +128,29 @@ class WorkflowInput(BaseModel):
 
 
 async def _classify_intent(message: str, has_notebook: bool) -> str:
-    """Return 'question', 'edit', or 'new' based on the user message."""
+    """Return 'question', 'edit', 'explore', or 'new' based on the user message.
+
+    The intent buckets correspond to four distinct routing paths in
+    ``run_workflow``:
+
+      * ``question`` — chat-only reply (no notebook write); answers
+        "what is X" / "why does cell N do Y" without touching disk.
+      * ``edit``     — modify an existing notebook in place.
+      * ``explore``  — ad-hoc analysis or plot of real data
+        (e.g. "plot the historical daily P/E of Micron",
+        "show me the correlation matrix of these 5 stocks",
+        "what does the yield curve look like over the last 10 years").
+        Routes through ``analysis_planner`` + ``analysis_orchestrator``
+        which DO NOT enforce the asset_weights/returns + backtest
+        shape — the deliverable is the chart / dataframe itself.
+      * ``new``      — brand-new TRADING STRATEGY notebook. Routes
+        through the strategy planner/orchestrator which require the
+        DAG to end in asset_weights + asset_returns and a backtest call.
+
+    The "explore" vs "new" split matters because forcing a simple
+    plotting request through the strategy pipeline produces a synthetic
+    backtest on a one-row dataframe and answers nothing.
+    """
     from .llm import get_llm_client, get_model_name
     client = get_llm_client("intent_classifier")
     resp = await client.chat.completions.create(
@@ -136,9 +160,15 @@ async def _classify_intent(message: str, has_notebook: bool) -> str:
                 "role": "system",
                 "content": (
                     "Classify the user message as exactly one of:\n"
-                    "- question: asking for explanation, analysis, clarification, or general info\n"
+                    "- question: asking for explanation, analysis, clarification, or general info "
+                    "(no chart, no dataframe — just an answer in chat)\n"
                     "- edit: requesting a change, addition, or fix to an existing notebook\n"
-                    "- new: requesting a brand-new research notebook or strategy\n\n"
+                    "- explore: requesting an ad-hoc analysis, plot, chart, or computation "
+                    "of REAL DATA (e.g. 'plot historical P/E of MU', 'show correlation matrix', "
+                    "'compare returns of A vs B'). The deliverable is the chart/dataframe, "
+                    "NOT a trading strategy.\n"
+                    "- new: requesting a brand-new TRADING STRATEGY notebook (the deliverable "
+                    "is asset weights + returns over time, suitable for backtesting).\n\n"
                     "Reply with only the single word."
                 ),
             },
@@ -151,8 +181,8 @@ async def _classify_intent(message: str, has_notebook: bool) -> str:
         temperature=0,
     )
     intent = resp.choices[0].message.content.strip().lower()
-    if intent not in ("question", "edit", "new"):
-        intent = "edit" if has_notebook else "new"
+    if intent not in ("question", "edit", "explore", "new"):
+        intent = "edit" if has_notebook else "explore"
     return intent
 
 
@@ -396,7 +426,21 @@ async def run_workflow(
                     "mode": "edit",
                 }
 
-        # ── NEW NOTEBOOK MODE ────────────────────────────────────────────────
+        # ── NEW NOTEBOOK MODE (strategy build OR ad-hoc explore) ─────────────
+        #
+        # Both `new` and `explore` use the same plan → build → validate flow.
+        # The ONLY difference is the planner + orchestrator pair: `new` uses
+        # the strategy pair (asset_weights / asset_returns / backtest), `explore`
+        # uses the analysis pair (free-form chart / dataframe).
+        if intent == "explore":
+            _intent_planner = analysis_planner
+            _intent_orchestrator = analysis_orchestration_agent
+            mode_label = "explore"
+        else:
+            _intent_planner = planner
+            _intent_orchestrator = orchestration_agent
+            mode_label = "new"
+
         conversation_history.append({
             "role": "user",
             "content": [{"type": "input_text", "text": workflow["input_as_text"]}],
@@ -431,12 +475,12 @@ async def run_workflow(
             # counter inside _get_latest_path.
             logging.exception("workflow: name suggester failed (non-fatal)")
 
-        await _emit("Planning research...")
+        await _emit("Planning research..." if mode_label == "new" else "Planning analysis...")
         await emit_phase(progress_cb, "plan", "start")
         plan_prompt = f"Research request: {workflow['input_as_text']}"
-        await _emit_agent_input("plan", planner.name, plan_prompt)
+        await _emit_agent_input("plan", _intent_planner.name, plan_prompt)
         async with MCPServerManager(mcp_servers()) as _planner_mcp_mgr:
-            _planner = planner.clone(mcp_servers=_planner_mcp_mgr.active_servers)
+            _planner = _intent_planner.clone(mcp_servers=_planner_mcp_mgr.active_servers)
             planner_result_temp = await Runner.run(
                 _planner,
                 input=[
@@ -464,9 +508,9 @@ async def run_workflow(
             f"User request: {workflow['input_as_text']}\n\n"
             f"DAG plan from planner:\n{planner_result['output_text']}"
         )
-        await _emit_agent_input("build", orchestration_agent.name, build_prompt)
+        await _emit_agent_input("build", _intent_orchestrator.name, build_prompt)
         async with MCPServerManager(mcp_servers()) as _orch_mcp_mgr:
-            _orchestration_agent = orchestration_agent.clone(mcp_servers=_orch_mcp_mgr.active_servers)
+            _orchestration_agent = _intent_orchestrator.clone(mcp_servers=_orch_mcp_mgr.active_servers)
             try:
                 orchestration_agent_result_temp = await Runner.run(
                     _orchestration_agent,
@@ -541,5 +585,5 @@ async def run_workflow(
         return {
             "output_text": validatorandfixingagent_result_temp.final_output_as(str),
             "notebook_path": final_path,
-            "mode": "new",
+            "mode": mode_label,
         }
