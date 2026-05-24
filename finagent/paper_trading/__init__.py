@@ -45,7 +45,16 @@ Public API:
 # can `from . import STARTING_CAPITAL` without hitting a circular-import
 # error (the submodules read them at module-load time).
 STARTING_CAPITAL = 100_000.0       # INR — anchor for equity curve
-TRANSACTION_COST = 20.0            # INR per position change
+# Transaction costs are DISABLED for now (operator request 2026-05-24):
+# we want to see gross strategy PnL on the equity curve while the
+# stock_analyst / panel iterates, without ~₹40-100/day of cost drag
+# muddying the signal. The bookkeeping plumbing (per-trade
+# transaction_cost column, daily transaction_costs total in the
+# portfolio snapshot, report field on every Report dataclass) is
+# left in place — flip this back to 20.0 (or any other INR/round-trip
+# figure) when you want to re-enable cost accounting, no other code
+# changes needed.
+TRANSACTION_COST = 0.0             # INR per position change
 
 STRATEGIES = ("equal_weight", "market_cap")
 
