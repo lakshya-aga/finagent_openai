@@ -252,7 +252,19 @@ async def run_daily_stock_analyses() -> dict:
     """
     import traceback
     from datetime import datetime, timezone
+    from .paper_trading.calendar import is_nse_trading_day, next_nse_trading_day
     today = datetime.now(timezone.utc).date().isoformat()
+    if not is_nse_trading_day(today):
+        # Calendar gate — no live NSE session today (weekend / holiday).
+        # Skip cleanly rather than burning $5-10 of LLM on predictions
+        # that will then be acted on at stale prices by the rebalance.
+        skip = {
+            "date": today, "status": "skipped_non_trading_day",
+            "next_trading_day": next_nse_trading_day(today).isoformat(),
+        }
+        logging.info("scheduler: stock_analyst SKIP %s (not an NSE trading day)", today)
+        _record_fire("paper_trading_daily_analyses", "ok", skip)
+        return skip
     logging.info("scheduler: stock_analyst daily run for %s", today)
     _record_fire("paper_trading_daily_analyses", "starting")
     try:
@@ -309,8 +321,21 @@ async def run_paper_trading_rebalance() -> dict:
     import traceback
     from datetime import datetime, timezone
     from .paper_trading import intraday
+    from .paper_trading.calendar import is_nse_trading_day, next_nse_trading_day
 
     today = datetime.now(timezone.utc).date().isoformat()
+    if not is_nse_trading_day(today):
+        # Calendar gate — no NSE close to rebalance against today.
+        # Without this guard the rebalance would close any open
+        # positions at the LAST KNOWN close (Friday's), booking
+        # artificial "direction flip" rows with ₹0 PnL every weekend.
+        skip = {
+            "date": today, "status": "skipped_non_trading_day",
+            "next_trading_day": next_nse_trading_day(today).isoformat(),
+        }
+        logging.info("scheduler: rebalance SKIP %s (not an NSE trading day)", today)
+        _record_fire("paper_trading_rebalance", "ok", skip)
+        return skip
     logging.info("scheduler: paper-trading close-rebalance for %s", today)
     _record_fire("paper_trading_rebalance", "starting")
     try:

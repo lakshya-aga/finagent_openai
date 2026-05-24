@@ -53,6 +53,13 @@ mplfinance>=0.12.10b0
 # container required.
 apscheduler>=3.10,<4.0
 
+# NSE trading-calendar (weekend + holiday gating for the daily crons).
+# Without this the rebalance fires on Saturdays and books artificial
+# "direction flip" rows at Friday's close price. The library knows
+# every published NSE holiday; updates ship via pypi when NSE
+# publishes the next year's calendar.
+pandas_market_calendars>=4.4
+
 # Phoenix tracing (self-hosted OpenTelemetry-based LLM observability).
 # Auto-instruments OpenAI / httpx / LangChain calls when
 # PHOENIX_COLLECTOR_ENDPOINT is set; no-ops locally without it.

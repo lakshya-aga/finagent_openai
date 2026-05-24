@@ -1367,6 +1367,22 @@ async def health():
     jobs = get_registered_jobs()
     last_fire = get_last_fire_table()
 
+    # Trading-calendar state — surfaces "did the cron skip today
+    # because it's a holiday" without ssh'ing the VM to read logs.
+    try:
+        from finagent.paper_trading.calendar import (
+            is_nse_trading_day, next_nse_trading_day, calendar_backend,
+        )
+        today = datetime.now(timezone.utc).date()
+        calendar_state = {
+            "today_iso":              today.isoformat(),
+            "is_trading_day":         is_nse_trading_day(today),
+            "next_trading_day":       next_nse_trading_day(today).isoformat(),
+            "backend":                calendar_backend(),
+        }
+    except Exception as e:
+        calendar_state = {"error": f"{type(e).__name__}: {e}"}
+
     return {
         "ok": True,
         "now":             datetime.now(timezone.utc).isoformat(),
@@ -1379,6 +1395,7 @@ async def health():
         },
         "env_present":     env_present,
         "quote_source_resolved": quote_source_pred,
+        "nse_calendar":    calendar_state,
     }
 
 

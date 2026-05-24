@@ -684,6 +684,7 @@ async def rebalance_at_close(
     *,
     close_prices: Optional[dict[str, float]] = None,
     intraday_bars: Optional[dict] = None,
+    force: bool = False,
 ) -> RebalanceReport:
     """Single daily cycle: replay → close direction-changes → open new
     at today's close → MTM survivors → snapshot.
@@ -695,9 +696,35 @@ async def rebalance_at_close(
     Idempotent on UNIQUE(date, strategy). Safe to re-run; replay won't
     double-close (open_trades excludes already-closed rows) and the
     snapshot upsert overwrites the previous row.
+
+    Trading-day gate: skips ``date`` cleanly if NSE was closed (weekend
+    or holiday) so callers (admin endpoints, manual replays) can't
+    accidentally book "direction flip" rows at stale Friday prices.
+    Pass ``force=True`` to bypass the gate — only useful for tests with
+    mocked close_prices on a synthetic date.
     """
     if strategy not in STRATEGIES:
         raise ValueError(f"unknown strategy {strategy!r}")
+
+    if not force:
+        from .calendar import is_nse_trading_day, next_nse_trading_day
+        if not is_nse_trading_day(date):
+            logger.info(
+                "paper_trading.rebalance: SKIP %s %s (not an NSE trading day, next: %s)",
+                date, strategy, next_nse_trading_day(date).isoformat(),
+            )
+            # Surface as an empty report (zero touches, zero PnL) rather
+            # than raising so the cron handler doesn't have to special-case.
+            prev_snap = store.previous_snapshot(strategy, date)
+            prev_equity = prev_snap["equity_value"] if prev_snap else STARTING_CAPITAL
+            return RebalanceReport(
+                date=date, strategy=strategy, equity_value=prev_equity,
+                daily_pnl=0.0, transaction_costs=0.0,
+                triggered_target=0, triggered_stop_loss=0,
+                closed_for_direction_change=0,
+                opened_at_close=0,
+                n_open_positions=len(store.list_open_trades(strategy)),
+            )
 
     # ── 1. Replay intraday 1m bars to catch SL/TP fires ──────────
     replay_report = await replay_intraday_triggers(
