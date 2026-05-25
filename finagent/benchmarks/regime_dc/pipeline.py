@@ -18,9 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 from . import classifiers as clf
@@ -38,12 +36,13 @@ logger = logging.getLogger(__name__)
 class Splits:
     """Date boundaries for the three-way split. Defaults match the
     paper (Section 1 + Section 2.6)."""
+
     train_start: str = "2005-01-01"
-    train_end:   str = "2017-12-31"
+    train_end: str = "2017-12-31"
     valid_start: str = "2018-01-01"
-    valid_end:   str = "2019-12-31"
-    test_start:  str = "2020-01-01"
-    test_end:    str = "2022-12-31"
+    valid_end: str = "2019-12-31"
+    test_start: str = "2020-01-01"
+    test_end: str = "2022-12-31"
 
 
 # ── pipeline ───────────────────────────────────────────────────────
@@ -89,14 +88,14 @@ class Pipeline:
     # Filled by .fit()
     indicator_train: pd.Series = field(init=False, default=None)
     indicator_valid: pd.Series = field(init=False, default=None)
-    indicator_test:  pd.Series = field(init=False, default=None)
-    regimes_train:   pd.Series = field(init=False, default=None)
-    regimes_valid:   pd.Series = field(init=False, default=None)
-    regimes_test:    pd.Series = field(init=False, default=None)
-    hmm_model:       object    = field(init=False, default=None)
-    clf_model:       object    = field(init=False, default=None)
+    indicator_test: pd.Series = field(init=False, default=None)
+    regimes_train: pd.Series = field(init=False, default=None)
+    regimes_valid: pd.Series = field(init=False, default=None)
+    regimes_test: pd.Series = field(init=False, default=None)
+    hmm_model: object = field(init=False, default=None)
+    clf_model: object = field(init=False, default=None)
     # Per-split DC events + indicator dict for downstream visualisation
-    _dc:         dict = field(init=False, default_factory=dict)
+    _dc: dict = field(init=False, default_factory=dict)
     _indicators: dict = field(init=False, default_factory=dict)
 
     # ── helpers ────────────────────────────────────────────────────
@@ -104,11 +103,11 @@ class Pipeline:
     def _slice(self, split: str) -> pd.Series:
         s = self.splits
         if split == "train":
-            return self.prices.loc[s.train_start:s.train_end]
+            return self.prices.loc[s.train_start : s.train_end]
         if split == "valid":
-            return self.prices.loc[s.valid_start:s.valid_end]
+            return self.prices.loc[s.valid_start : s.valid_end]
         if split == "test":
-            return self.prices.loc[s.test_start:s.test_end]
+            return self.prices.loc[s.test_start : s.test_end]
         raise ValueError(f"unknown split {split!r}")
 
     def _indicator_for(self, split: str) -> pd.Series:
@@ -127,13 +126,13 @@ class Pipeline:
             prices_split = self._slice(split)
             d, tmv, T, R = dc_mod.compute_indicators(prices_split, theta=self.theta)
             self._dc[split] = d
-            self._indicators["R"][split]   = R
-            self._indicators["T"][split]   = T
+            self._indicators["R"][split] = R
+            self._indicators["T"][split] = T
             self._indicators["TMV"][split] = tmv
 
         self.indicator_train = self._indicator_for("train")
         self.indicator_valid = self._indicator_for("valid")
-        self.indicator_test  = self._indicator_for("test")
+        self.indicator_test = self._indicator_for("test")
 
         # 2. Fit the HMM on the train indicator → labels.
         self.regimes_train, self.hmm_model = hmm_mod.fit_hmm(
@@ -154,7 +153,9 @@ class Pipeline:
 
         # Also predict on test — cheap, lets the same fit serve both
         # cross-val and final eval.
-        test_pred = clf.predict(self.clf_model, self.indicator_test.values, epsilon=self.epsilon)
+        test_pred = clf.predict(
+            self.clf_model, self.indicator_test.values, epsilon=self.epsilon
+        )
         self.regimes_test = pd.Series(test_pred, index=self.indicator_test.index)
 
         return self
@@ -169,18 +170,26 @@ class Pipeline:
         dc_split = self._dc[split]
 
         ev = strat_mod.build_event_frame(
-            prices=prices_split, dc=dc_split,
-            regimes=regimes_split, theta=self.theta,
+            prices=prices_split,
+            dc=dc_split,
+            regimes=regimes_split,
+            theta=self.theta,
         )
 
         out_regime = strat_mod.regime_dependent(ev, threshold=self.trade_threshold)
-        out_meanrev = strat_mod.mean_reverting_control(ev, threshold=self.trade_threshold)
+        out_meanrev = strat_mod.mean_reverting_control(
+            ev, threshold=self.trade_threshold
+        )
         out_momentum = strat_mod.momentum_control(ev, threshold=self.trade_threshold)
 
         return {
-            "regime_dependent":  strat_mod.metrics_summary(out_regime,   name="regime_dependent"),
-            "mean_reverting":    strat_mod.metrics_summary(out_meanrev,  name="mean_reverting"),
-            "momentum":          strat_mod.metrics_summary(out_momentum, name="momentum"),
+            "regime_dependent": strat_mod.metrics_summary(
+                out_regime, name="regime_dependent"
+            ),
+            "mean_reverting": strat_mod.metrics_summary(
+                out_meanrev, name="mean_reverting"
+            ),
+            "momentum": strat_mod.metrics_summary(out_momentum, name="momentum"),
         }
 
     @property

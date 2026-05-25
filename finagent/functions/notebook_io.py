@@ -15,7 +15,6 @@ from pathlib import Path
 import nbformat
 from nbformat.v4 import new_code_cell, new_markdown_cell
 
-
 _OUTPUTS_DIR = Path(__file__).resolve().parents[2] / "outputs"
 
 
@@ -71,7 +70,7 @@ def _get_latest_path() -> Path:
     global _NEXT_NOTEBOOK_BASE
     if _NEXT_NOTEBOOK_BASE:
         base = _NEXT_NOTEBOOK_BASE
-        _NEXT_NOTEBOOK_BASE = None     # consume; don't reuse
+        _NEXT_NOTEBOOK_BASE = None  # consume; don't reuse
         return _path_for_named(base)
 
     i = 1
@@ -151,7 +150,8 @@ def _get_current_path() -> Path:
     instead so the "current" notebook tracks the freshest run.
     """
     candidates = [
-        f for f in os.listdir(_OUTPUTS_DIR)
+        f
+        for f in os.listdir(_OUTPUTS_DIR)
         if f.endswith(".ipynb") and _notebook_index(f) >= 0
     ]
     if not candidates:

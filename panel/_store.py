@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-
 # ── Paths ──────────────────────────────────────────────────────────────
 
 _OUTPUTS_DIR = Path(
@@ -91,7 +90,9 @@ def write_manifest(path: Path, payload: Mapping[str, Any]) -> None:
     enriched = dict(payload)
     enriched.setdefault("schema_version", MANIFEST_SCHEMA_VERSION)
     enriched.setdefault("written_at", utc_now_iso())
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".manifest-", suffix=".json")
+    fd, tmp = tempfile.mkstemp(
+        dir=str(path.parent), prefix=".manifest-", suffix=".json"
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(enriched, f, indent=2, sort_keys=True, default=str)
@@ -111,6 +112,7 @@ def read_manifest(path: Path) -> dict[str, Any]:
 
 
 # ── Run-id auto-detection ──────────────────────────────────────────────
+
 
 def current_run_id() -> str | None:
     """The recipe_workflow exports ``FINAGENT_RUN_ID`` into the kernel

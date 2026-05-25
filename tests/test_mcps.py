@@ -14,7 +14,6 @@ servers aren't reachable on the configured URLs.
 from __future__ import annotations
 
 import asyncio
-import os
 
 import pytest
 
@@ -84,6 +83,7 @@ def test_mcp_factory_imports_clean():
     agent ever starts."""
     pytest.importorskip("agents")
     from finagent.mcp_connections import servers
+
     assert hasattr(servers, "make_data_mcp")
     assert hasattr(servers, "make_fruit_thrower")
     assert hasattr(servers, "DATA_MCP_TOOLS")

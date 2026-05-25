@@ -12,7 +12,6 @@ metric is a matter of writing one function and registering it in
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -25,8 +24,8 @@ class MetricSpec:
     key: str
     label: str
     description: str
-    direction: str             # "up_is_good" | "down_is_good"
-    fmt: str                   # "percent" | "ratio" | "seconds" | "count"
+    direction: str  # "up_is_good" | "down_is_good"
+    fmt: str  # "percent" | "ratio" | "seconds" | "count"
     fn: Callable[[ExperimentStore, float, float], Optional[float]]
 
 
@@ -51,7 +50,9 @@ def _notebook_pass_rate(store, start, end) -> Optional[float]:
     rows = _runs_in_window(store, start, end)
     if not rows:
         return None
-    passed = sum(1 for r in rows if r.status == "completed" and not (r.error or "").strip())
+    passed = sum(
+        1 for r in rows if r.status == "completed" and not (r.error or "").strip()
+    )
     return passed / len(rows)
 
 
@@ -64,7 +65,8 @@ def _recipe_success_rate(store, start, end) -> Optional[float]:
 
 def _avg_time_to_metric(store, start, end) -> Optional[float]:
     rows = [
-        r for r in _runs_in_window(store, start, end)
+        r
+        for r in _runs_in_window(store, start, end)
         if r.status == "completed" and r.metrics()
     ]
     if not rows:
@@ -91,11 +93,13 @@ def _total_runs(store, start, end) -> Optional[float]:
 def _provenance_coverage(store, start, end) -> Optional[float]:
     """% of code cells whose finagent.node_id metadata is set, scanned across
     notebooks produced by recipe runs in the window."""
-    import nbformat
     from pathlib import Path
 
+    import nbformat
+
     rows = [
-        r for r in _runs_in_window(store, start, end)
+        r
+        for r in _runs_in_window(store, start, end)
         if r.notebook_path and Path(r.notebook_path).exists()
     ]
     if not rows:
@@ -122,11 +126,13 @@ def _provenance_coverage(store, start, end) -> Optional[float]:
 
 def _output_completeness(store, start, end) -> Optional[float]:
     """% of code cells with at least one output (across runs in window)."""
-    import nbformat
     from pathlib import Path
 
+    import nbformat
+
     rows = [
-        r for r in _runs_in_window(store, start, end)
+        r
+        for r in _runs_in_window(store, start, end)
         if r.notebook_path and Path(r.notebook_path).exists()
     ]
     if not rows:
@@ -154,8 +160,7 @@ def _reproducibility_drift(store, start, end) -> Optional[float]:
     """For recipe_hashes that ran 2+ times in the window, return the median
     relative spread of their headline metric. Lower is better."""
     rows = [
-        r for r in _runs_in_window(store, start, end)
-        if r.recipe_hash and r.metrics()
+        r for r in _runs_in_window(store, start, end) if r.recipe_hash and r.metrics()
     ]
     if not rows:
         return None
@@ -170,7 +175,11 @@ def _reproducibility_drift(store, start, end) -> Optional[float]:
         # Pick the metric all runs share with non-zero values.
         common_keys = set.intersection(*(set(m.keys()) for m in metrics_list))
         for key in common_keys:
-            values = [float(m[key]) for m in metrics_list if isinstance(m.get(key), (int, float))]
+            values = [
+                float(m[key])
+                for m in metrics_list
+                if isinstance(m.get(key), (int, float))
+            ]
             if len(values) < 2:
                 continue
             mean = sum(values) / len(values)
@@ -188,7 +197,8 @@ def _reproducibility_drift(store, start, end) -> Optional[float]:
 def _search_count(store, start, end) -> Optional[float]:
     """Count of searches that finished in the window."""
     rows = [
-        s for s in store.list_searches(limit=500)
+        s
+        for s in store.list_searches(limit=500)
         if s.finished_at is not None and start <= s.finished_at <= end
     ]
     return float(len(rows))
@@ -197,7 +207,9 @@ def _search_count(store, start, end) -> Optional[float]:
 # ── failure-mode metrics (parsed from existing run.error text) ─────────
 
 
-def _error_match_rate(needles: list[str]) -> Callable[[Any, float, float], Optional[float]]:
+def _error_match_rate(
+    needles: list[str],
+) -> Callable[[Any, float, float], Optional[float]]:
     """Build a metric fn: fraction of finished runs whose error contains
     *any* of the given substrings (case-insensitive)."""
 
@@ -224,7 +236,11 @@ def _recipe_compile_fail_rate(store, start, end) -> Optional[float]:
     hits = 0
     for r in rows:
         err = (r.error or "").lower()
-        if "unknown template" in err or "does not support" in err or "no template" in err:
+        if (
+            "unknown template" in err
+            or "does not support" in err
+            or "no template" in err
+        ):
             hits += 1
     return hits / len(rows)
 

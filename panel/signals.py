@@ -29,10 +29,9 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 from . import _store
-
 
 logger = logging.getLogger(__name__)
 
@@ -139,9 +138,7 @@ def export_signal(
     df.to_parquet(series_path)
 
     last_value = float(series_clean.iloc[-1]) if len(series_clean) else None
-    last_value_at = (
-        series_clean.index[-1].isoformat() if len(series_clean) else None
-    )
+    last_value_at = series_clean.index[-1].isoformat() if len(series_clean) else None
 
     # Write manifest.
     manifest = {
@@ -162,7 +159,10 @@ def export_signal(
     _store.write_manifest(manifest_path, manifest)
     logger.info(
         "panel.export_signal: wrote %s (%d obs, last=%s @ %s)",
-        series_path, len(series_clean), last_value, last_value_at,
+        series_path,
+        len(series_clean),
+        last_value,
+        last_value_at,
     )
 
     # Best-effort DB upsert — if it fails, the disk artefacts are still
@@ -241,6 +241,7 @@ def _experiments_db_path() -> Path:
          backward compatibility with earlier SDK versions.
     """
     import os
+
     db_env = os.environ.get("FINAGENT_EXPERIMENT_DB") or os.environ.get("FINAGENT_DB")
     return Path(db_env or str(_store.outputs_dir() / "experiments.db"))
 
@@ -306,9 +307,17 @@ def register_signal(
                 WHERE id = ?
                 """,
                 (
-                    now, n_observations, last_value, last_value_at,
-                    frequency, universe, description,
-                    project, template, recipe_fp, run_id,
+                    now,
+                    n_observations,
+                    last_value,
+                    last_value_at,
+                    frequency,
+                    universe,
+                    description,
+                    project,
+                    template,
+                    recipe_fp,
+                    run_id,
                     json.dumps(meta, default=str),
                     sig_id,
                 ),
@@ -327,10 +336,20 @@ def register_signal(
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
                 """,
                 (
-                    sig_id, name, project, run_id, recipe_fp, template,
-                    frequency, universe, description,
-                    now, now,
-                    last_value, last_value_at, n_observations,
+                    sig_id,
+                    name,
+                    project,
+                    run_id,
+                    recipe_fp,
+                    template,
+                    frequency,
+                    universe,
+                    description,
+                    now,
+                    now,
+                    last_value,
+                    last_value_at,
+                    n_observations,
                     json.dumps(meta, default=str),
                 ),
             )
@@ -347,8 +366,12 @@ def register_signal(
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                sig_id, run_id, now, n_observations,
-                last_value, last_value_at,
+                sig_id,
+                run_id,
+                now,
+                n_observations,
+                last_value,
+                last_value_at,
                 None,  # caller can extend this later via notes if desired
             ),
         )

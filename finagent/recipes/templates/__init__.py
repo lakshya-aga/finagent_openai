@@ -23,7 +23,6 @@ from typing import Any
 
 from . import regime_modeling
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -47,18 +46,23 @@ def _build_registry() -> dict[str, Any]:
             continue
         template_name = getattr(module, "TEMPLATE_NAME", None)
         if not isinstance(template_name, str) or not template_name:
-            logger.warning("template module %s is missing TEMPLATE_NAME; skipping", name)
+            logger.warning(
+                "template module %s is missing TEMPLATE_NAME; skipping", name
+            )
             continue
         if template_name in registry:
             logger.warning(
                 "template name collision: %s already registered; %s ignored",
-                template_name, name,
+                template_name,
+                name,
             )
             continue
         for attr in ("METADATA", "supports", "compile"):
             if not hasattr(module, attr):
                 logger.warning(
-                    "template module %s missing attr %s; skipping", name, attr,
+                    "template module %s missing attr %s; skipping",
+                    name,
+                    attr,
                 )
                 break
         else:

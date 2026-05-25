@@ -25,13 +25,11 @@ reproducibility → recipe YAML.
 from __future__ import annotations
 
 import html
-import json
 import math
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import nbformat
-
 
 # ─── Detection / extraction ──────────────────────────────────────────
 
@@ -143,7 +141,7 @@ def _strip(key: str) -> str:
     s = key
     for p in _BOOK_PREFIXES:
         if s.startswith(p):
-            s = s[len(p):]
+            s = s[len(p) :]
             break
     for sfx in _SUFFIXES:
         if s.endswith(sfx):
@@ -301,7 +299,7 @@ def _section_headline(run: dict) -> str:
     if costs_applied:
         chips += '<span class="pill grey">Net of costs</span>'
     if flag_count:
-        chips += f'<span class="pill amber">{flag_count} metric{"" if flag_count==1 else "s"} flagged</span>'
+        chips += f'<span class="pill amber">{flag_count} metric{"" if flag_count == 1 else "s"} flagged</span>'
 
     return f"""
 <div class="headline {tone}">
@@ -309,9 +307,9 @@ def _section_headline(run: dict) -> str:
     <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.06em; color:#475569; font-weight:600;">{_e(label)}</div>
     <div>{chips}</div>
   </div>
-  {_stat('annual_return', 'Annual return', _fmt_return_pct)}
-  {_stat('sharpe', 'Sharpe', _fmt_ratio)}
-  {_stat('max_drawdown', 'Max drawdown', _fmt_drawdown)}
+  {_stat("annual_return", "Annual return", _fmt_return_pct)}
+  {_stat("sharpe", "Sharpe", _fmt_ratio)}
+  {_stat("max_drawdown", "Max drawdown", _fmt_drawdown)}
 </div>
 """
 
@@ -324,15 +322,15 @@ def _section_audit(run: dict) -> str:
     summary = audit.get("summary", "")
     reasons = audit.get("reasons") or []
     items = "".join(
-        f'<li><span class="severity {_e(r.get("severity","info"))}">{_e(r.get("severity",""))}</span>'
-        f'<strong>{_e(r.get("check_name",""))}:</strong> {_e(r.get("evidence",""))}</li>'
+        f'<li><span class="severity {_e(r.get("severity", "info"))}">{_e(r.get("severity", ""))}</span>'
+        f"<strong>{_e(r.get('check_name', ''))}:</strong> {_e(r.get('evidence', ''))}</li>"
         for r in reasons
     )
     return f"""
 <h2>Bias audit · {_e(verdict)}</h2>
 <div class="audit-block {_e(verdict)}">
   <p style="margin:0;">{_e(summary)}</p>
-  {f'<ul>{items}</ul>' if items else ''}
+  {f"<ul>{items}</ul>" if items else ""}
 </div>
 """
 
@@ -360,16 +358,16 @@ def _section_hypothesis(run: dict) -> str:
         actual_s = "—" if actual is None else f"{actual:.4f}"
         rows += (
             f'<li><span class="severity {chip_cls}">{_e(chip_label)}</span>'
-            f'<strong>{_e(crit.get("metric",""))}</strong> '
-            f'{_e(crit.get("op",""))} <strong>{_e(crit.get("value",""))}</strong>'
-            f' → actual {_e(actual_s)}</li>'
+            f"<strong>{_e(crit.get('metric', ''))}</strong> "
+            f"{_e(crit.get('op', ''))} <strong>{_e(crit.get('value', ''))}</strong>"
+            f" → actual {_e(actual_s)}</li>"
         )
     return f"""
 <h2>Hypothesis · {_e(verdict)}</h2>
 <div class="audit-block {_e(verdict)}">
   <p style="margin:0;">{_e(summary)}</p>
   <p style="margin:8px 0 0; font-style:italic; color:#475569;">&ldquo;{_e(thesis)}&rdquo;</p>
-  {f'<ul>{rows}</ul>' if rows else ''}
+  {f"<ul>{rows}</ul>" if rows else ""}
 </div>
 """
 
@@ -380,7 +378,7 @@ def _section_charts(notebook_path: Path) -> str:
     if not charts:
         return ""
     body = "".join(
-        f'<figure>{f"<figcaption>{_e(cap)}</figcaption>" if cap else ""}'
+        f"<figure>{f'<figcaption>{_e(cap)}</figcaption>' if cap else ''}"
         f'<img class="chart" src="data:image/png;base64,{p}" alt="{_e(cap or "chart")}"/></figure>'
         for cap, p in charts
     )
@@ -404,8 +402,17 @@ def _section_metric_grid(run: dict) -> str:
                 break
         grouped.setdefault(bucket, []).append(k)
 
-    ORDER = ("annual_return", "total_return", "sharpe", "sortino",
-             "calmar", "max_drawdown", "turnover", "hit_rate", "exposure")
+    ORDER = (
+        "annual_return",
+        "total_return",
+        "sharpe",
+        "sortino",
+        "calmar",
+        "max_drawdown",
+        "turnover",
+        "hit_rate",
+        "exposure",
+    )
 
     def _pair_book(book: str, title: str, tone: str) -> str:
         keys = grouped.get(book, [])
@@ -420,7 +427,9 @@ def _section_metric_grid(run: dict) -> str:
                 slot["net"] = k
             else:
                 slot["gross"] = k
-        ordered = sorted(pairs.keys(), key=lambda b: ORDER.index(b) if b in ORDER else 999)
+        ordered = sorted(
+            pairs.keys(), key=lambda b: ORDER.index(b) if b in ORDER else 999
+        )
         rows = ""
         for base in ordered:
             slot = pairs[base]
@@ -438,18 +447,24 @@ def _section_metric_grid(run: dict) -> str:
             rows += (
                 f'<div><div class="kv"><span class="k">{_e(base)}</span>'
                 f'<span class="{v_cls}"{v_attr}>{_e(v_text)}{" ⚠" if flag else ""}</span></div>'
-                f'{gross_caption}</div>'
+                f"{gross_caption}</div>"
             )
         return f'<div class="book {tone}"><h3>{_e(title)}</h3><div class="grid">{rows}</div></div>'
 
     blocks = []
     blocks.append(_pair_book("model", "Strategy", ""))
     components = ""
-    for b, t in [("value", "Value"), ("momentum", "Momentum"), ("both_legs", "Both legs")]:
+    for b, t in [
+        ("value", "Value"),
+        ("momentum", "Momentum"),
+        ("both_legs", "Both legs"),
+    ]:
         components += _pair_book(b, t, "")
     if components:
-        blocks.append(f'<div>{components}</div>')
-    bench = _pair_book("buy_and_hold", "Buy & hold (benchmark — not strategy performance)", "benchmark")
+        blocks.append(f"<div>{components}</div>")
+    bench = _pair_book(
+        "buy_and_hold", "Buy & hold (benchmark — not strategy performance)", "benchmark"
+    )
     if bench:
         blocks.append(bench)
     other = _pair_book("other", "Other", "")
@@ -468,8 +483,8 @@ def _section_fold_stability(run: dict) -> str:
     rows = ""
     for f in folds:
         rows += (
-            f'<tr><td>{_e(f.get("fold"))}</td>'
-            f'<td>{_e(f.get("start") or "—")} → {_e(f.get("end") or "—")}</td>'
+            f"<tr><td>{_e(f.get('fold'))}</td>"
+            f"<td>{_e(f.get('start') or '—')} → {_e(f.get('end') or '—')}</td>"
             f'<td class="num">{_e(f.get("n_obs") or "—")}</td>'
             f'<td class="num">{_e(_fmt_ratio(f.get("sharpe")))}</td>'
             f'<td class="num">{_e(_fmt_return_pct(f.get("annual_return")))}</td>'
@@ -490,7 +505,7 @@ def _section_regime_breakdown(run: dict) -> str:
     for r in regimes:
         rows += (
             f'<tr><td><span class="pill grey">state {_e(r.get("regime"))}</span></td>'
-            f'<td>{_e(r.get("n_obs"))} obs · {_e(_fmt_pct_raw(r.get("pct_of_oos")))}</td>'
+            f"<td>{_e(r.get('n_obs'))} obs · {_e(_fmt_pct_raw(r.get('pct_of_oos')))}</td>"
             f'<td class="num">{_e(_fmt_ratio(r.get("sharpe")))}</td>'
             f'<td class="num">{_e(_fmt_return_pct(r.get("annual_return")))}</td>'
             f'<td class="num">{_e(_fmt_drawdown(r.get("max_drawdown")))}</td></tr>'
@@ -508,10 +523,14 @@ def _section_repro(run: dict, notebook_path: Path) -> str:
     seed = rmeta.get("seed")
     libs = rmeta.get("library_versions") or {}
     vintage = rmeta.get("data_vintage") or {}
-    libs_html = "".join(
-        f'<span class="lib-pill">{_e(k)} {_e(v)}</span>'
-        for k, v in libs.items() if v
-    ) or "—"
+    libs_html = (
+        "".join(
+            f'<span class="lib-pill">{_e(k)} {_e(v)}</span>'
+            for k, v in libs.items()
+            if v
+        )
+        or "—"
+    )
 
     def _vintage_line(var: str, d: dict) -> str:
         bits: list[str] = []
@@ -523,7 +542,9 @@ def _section_repro(run: dict, notebook_path: Path) -> str:
             bits.append(f" · to {_e(d.get('end'))}")
         return f'<li class="mono" style="margin:2px 0;"><strong>{_e(var)}</strong>{"".join(bits)}</li>'
 
-    vint_html = "".join(_vintage_line(var, d) for var, d in vintage.items()) or "<li>—</li>"
+    vint_html = (
+        "".join(_vintage_line(var, d) for var, d in vintage.items()) or "<li>—</li>"
+    )
     return f"""
 <h2>Reproducibility</h2>
 <div class="repro">
@@ -537,7 +558,7 @@ def _section_repro(run: dict, notebook_path: Path) -> str:
 
 
 def _section_recipe(run: dict) -> str:
-    return f"<h2>Recipe</h2><pre class=\"yaml\">{_e(run.get('recipe_yaml') or '')}</pre>"
+    return f'<h2>Recipe</h2><pre class="yaml">{_e(run.get("recipe_yaml") or "")}</pre>'
 
 
 def render_tearsheet(run: dict, notebook_path: Path | None) -> str:
@@ -558,7 +579,7 @@ def render_tearsheet(run: dict, notebook_path: Path | None) -> str:
     subtitle = " · ".join(subtitle_parts)
 
     sections: list[str] = [
-        f'<h1>{_e(title)}</h1>',
+        f"<h1>{_e(title)}</h1>",
         f'<div class="muted mono" style="font-size:12px;">{_e(subtitle)}</div>',
         _section_headline(run),
         _section_hypothesis(run),
@@ -566,17 +587,19 @@ def render_tearsheet(run: dict, notebook_path: Path | None) -> str:
     ]
     if notebook_path is not None and notebook_path.exists():
         sections.append(_section_charts(notebook_path))
-    sections.extend([
-        _section_metric_grid(run),
-        _section_fold_stability(run),
-        _section_regime_breakdown(run),
-    ])
+    sections.extend(
+        [
+            _section_metric_grid(run),
+            _section_fold_stability(run),
+            _section_regime_breakdown(run),
+        ]
+    )
     if notebook_path is not None and notebook_path.exists():
         sections.append(_section_repro(run, notebook_path))
     sections.append(_section_recipe(run))
     sections.append(
         '<p class="note no-print">Use your browser&rsquo;s Save as PDF '
-        '(File → Print → Save as PDF) to capture a static copy.</p>'
+        "(File → Print → Save as PDF) to capture a static copy.</p>"
     )
 
     body = "\n".join(s for s in sections if s)

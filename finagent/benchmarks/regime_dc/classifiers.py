@@ -26,9 +26,8 @@ from typing import Protocol
 
 import numpy as np
 from numpy.typing import ArrayLike
-
-from sklearn.naive_bayes import GaussianNB
 from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import GaussianNB
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
@@ -66,9 +65,9 @@ def make_svm() -> "object":
 
 
 _FACTORIES = {
-    "naive_bayes":         make_nbc,
+    "naive_bayes": make_nbc,
     "logistic_regression": make_lr,
-    "svm":                 make_svm,
+    "svm": make_svm,
 }
 
 
@@ -94,7 +93,9 @@ def train(name: str, X: ArrayLike, y: ArrayLike) -> _BinaryClassifier:
     return model
 
 
-def predict(model: _BinaryClassifier, X: ArrayLike, *, epsilon: float = 0.5) -> np.ndarray:
+def predict(
+    model: _BinaryClassifier, X: ArrayLike, *, epsilon: float = 0.5
+) -> np.ndarray:
     """Predict 0/1 regime labels with an ε threshold on P[y=1|X].
 
     ``epsilon=0.5`` reduces to the model's native ``predict`` (which
@@ -111,8 +112,11 @@ def predict(model: _BinaryClassifier, X: ArrayLike, *, epsilon: float = 0.5) -> 
 
 def fit_predict(
     name: str,
-    X_train: ArrayLike, y_train: ArrayLike,
-    X_test: ArrayLike, *, epsilon: float = 0.5,
+    X_train: ArrayLike,
+    y_train: ArrayLike,
+    X_test: ArrayLike,
+    *,
+    epsilon: float = 0.5,
 ) -> tuple[_BinaryClassifier, np.ndarray]:
     """Convenience: fit on (X_train, y_train) then predict on X_test.
     Returns ``(trained_model, predicted_labels)`` so callers can hold

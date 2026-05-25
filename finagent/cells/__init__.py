@@ -32,5 +32,4 @@ from .classifier import (
 )
 from .splitter import split_notebook
 
-
 __all__ = ["ROLES", "classify_cell", "needs_split", "tag_notebook", "split_notebook"]

@@ -44,7 +44,7 @@ Public API:
 # NB: constants are defined BEFORE the submodule imports so engine.py
 # can `from . import STARTING_CAPITAL` without hitting a circular-import
 # error (the submodules read them at module-load time).
-STARTING_CAPITAL = 100_000.0       # INR — anchor for equity curve
+STARTING_CAPITAL = 100_000.0  # INR — anchor for equity curve
 # Transaction costs are DISABLED for now (operator request 2026-05-24):
 # we want to see gross strategy PnL on the equity curve while the
 # stock_analyst / panel iterates, without ~₹40-100/day of cost drag
@@ -54,8 +54,16 @@ STARTING_CAPITAL = 100_000.0       # INR — anchor for equity curve
 # left in place — flip this back to 20.0 (or any other INR/round-trip
 # figure) when you want to re-enable cost accounting, no other code
 # changes needed.
-TRANSACTION_COST = 0.0             # INR per position change
+TRANSACTION_COST = 0.0  # INR per position change
 
 STRATEGIES = ("equal_weight", "market_cap")
 
-from . import universe, store, engine, predictions, schema, quotes, intraday  # noqa: E402, F401
+from . import (  # noqa: E402, F401
+    engine,
+    intraday,
+    predictions,
+    quotes,
+    schema,
+    store,
+    universe,
+)

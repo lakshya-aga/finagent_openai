@@ -17,14 +17,13 @@ asyncio. Background-task wrapping happens at the FastAPI layer.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any, Optional
 
 import yaml
 
-from ..experiments import ExperimentStore, Search, get_store
+from ..experiments import ExperimentStore, get_store
 from ..recipe_workflow import run_recipe
 from ..recipes.types import recipe_from_yaml
 from .policy import make_policy
@@ -32,7 +31,6 @@ from .types import (
     SearchHistoryEntry,
     SearchSubmission,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +55,13 @@ def execute_search(
         objective_json=submission.objective.model_dump_json(),
     )
     store.update_search(search.id, status="running")
-    logger.info("search %s started: project=%s, policy=%s, budget=%s",
-                search.id, project, submission.policy, submission.budget.max_runs)
+    logger.info(
+        "search %s started: project=%s, policy=%s, budget=%s",
+        search.id,
+        project,
+        submission.policy,
+        submission.budget.max_runs,
+    )
 
     policy = make_policy(submission.policy, submission.space, submission.seed)
     history: list[SearchHistoryEntry] = []
@@ -85,23 +88,32 @@ def execute_search(
                 submission.budget.max_no_improvement is not None
                 and no_improve_streak >= submission.budget.max_no_improvement
             ):
-                logger.info("search %s early-stopped: %d no-improvement runs",
-                            search.id, no_improve_streak)
+                logger.info(
+                    "search %s early-stopped: %d no-improvement runs",
+                    search.id,
+                    no_improve_streak,
+                )
                 break
 
             # ── Propose, dedup, retry ─────────────────────────────────
             mutations = _propose_unique(
-                policy, history, submission, base_recipe, seen_fingerprints,
+                policy,
+                history,
+                submission,
+                base_recipe,
+                seen_fingerprints,
                 max_retries=20,
             )
             if mutations is None:
                 # Policy exhausted (grid done, or random hit too many duplicates)
-                logger.info("search %s policy exhausted at iter=%d",
-                            search.id, completed_iters)
+                logger.info(
+                    "search %s policy exhausted at iter=%d", search.id, completed_iters
+                )
                 break
 
             variant_yaml, variant_recipe = _apply_mutations(
-                submission.base_recipe_yaml, mutations,
+                submission.base_recipe_yaml,
+                mutations,
                 naming_iter=completed_iters,
             )
             seen_fingerprints.add(variant_recipe.fingerprint())
@@ -132,9 +144,13 @@ def execute_search(
                 best_metric = metric_val
                 best_run_id = run_id
                 no_improve_streak = 0
-                logger.info("search %s iter %d → new best %s=%.6f",
-                            search.id, completed_iters,
-                            submission.objective.metric, metric_val)
+                logger.info(
+                    "search %s iter %d → new best %s=%.6f",
+                    search.id,
+                    completed_iters,
+                    submission.objective.metric,
+                    metric_val,
+                )
             else:
                 no_improve_streak += 1
 
@@ -192,7 +208,9 @@ def _propose_unique(
             return None
         try:
             _, recipe_obj = _apply_mutations(
-                submission.base_recipe_yaml, mutations, naming_iter=0,
+                submission.base_recipe_yaml,
+                mutations,
+                naming_iter=0,
             )
         except Exception as exc:
             logger.warning("mutation rejected: %s", exc)

@@ -32,7 +32,6 @@ import logging
 import os
 from typing import Any, Optional
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -66,12 +65,12 @@ logger = logging.getLogger(__name__)
 # To swap to Anthropic:
 #   export PANEL_DEFAULT_MODEL=anthropic:claude-haiku-4-5
 _ROLE_DEFAULTS: dict[str, tuple[str, str]] = {
-    "panel_analyst":          ("openai", "gpt-5-mini"),
-    "panel_researcher":       ("openai", "gpt-5-mini"),
+    "panel_analyst": ("openai", "gpt-5-mini"),
+    "panel_researcher": ("openai", "gpt-5-mini"),
     "panel_research_manager": ("openai", "gpt-5-mini"),
-    "panel_trader":           ("openai", "gpt-5-mini"),
-    "panel_risk":             ("openai", "gpt-5-mini"),
-    "panel_pm":               ("openai", "gpt-5-mini"),
+    "panel_trader": ("openai", "gpt-5-mini"),
+    "panel_risk": ("openai", "gpt-5-mini"),
+    "panel_pm": ("openai", "gpt-5-mini"),
 }
 
 
@@ -122,7 +121,9 @@ def role_spec(role: str) -> str:
         provider, model = _ROLE_DEFAULTS[role]
         return f"{provider}:{model}"
     # Unknown role — log + fall back to the analyst default.
-    logger.warning("trading_panel.llm_factory: unknown role %r; using analyst default", role)
+    logger.warning(
+        "trading_panel.llm_factory: unknown role %r; using analyst default", role
+    )
     provider, model = _ROLE_DEFAULTS["panel_analyst"]
     return f"{provider}:{model}"
 
@@ -132,6 +133,7 @@ def role_spec(role: str) -> str:
 
 def _make_openai(model: str, **kw: Any):
     from langchain_openai import ChatOpenAI
+
     # ChatOpenAI auto-reads OPENAI_API_KEY from env. Pass temperature
     # via kw — we keep it low for managers (deterministic JSON shape)
     # and let the caller override for analysts (a touch of variety
@@ -141,11 +143,13 @@ def _make_openai(model: str, **kw: Any):
 
 def _make_anthropic(model: str, **kw: Any):
     from langchain_anthropic import ChatAnthropic
+
     return ChatAnthropic(model=model, **kw)
 
 
 def _make_google(model: str, **kw: Any):
     from langchain_google_genai import ChatGoogleGenerativeAI
+
     return ChatGoogleGenerativeAI(model=model, **kw)
 
 
@@ -171,7 +175,7 @@ _PROVIDER_FACTORIES = {
     "openai": _make_openai,
     "anthropic": _make_anthropic,
     "google": _make_google,
-    "gemini": _make_google,                # alias
+    "gemini": _make_google,  # alias
     "ollama": _make_ollama,
 }
 

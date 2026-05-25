@@ -51,7 +51,6 @@ from typing import Iterable
 
 import nbformat
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -72,63 +71,117 @@ ROLES = (
 # this allowlist is flagged as needing a split.
 _COMPATIBLE: dict[str, set[str]] = {
     "imports": {"imports"},
-    "data_load": {"data_load", "preprocess"},        # fetch + immediate filter is fine
-    "preprocess": {"preprocess", "data_load"},       # mirror above
-    "train": {"train"},                              # train alone — never with chart/eval
-    "eval": {"eval", "chart"},                       # eval that prints + plots is fine
-    "chart": {"chart", "eval"},                      # chart that uses an eval result is fine
-    "signal_export": {"signal_export"},              # always alone — single side-effect
-    "summary": {"summary"},                          # always alone
-    "other": {"other"},                              # punt
+    "data_load": {"data_load", "preprocess"},  # fetch + immediate filter is fine
+    "preprocess": {"preprocess", "data_load"},  # mirror above
+    "train": {"train"},  # train alone — never with chart/eval
+    "eval": {"eval", "chart"},  # eval that prints + plots is fine
+    "chart": {"chart", "eval"},  # chart that uses an eval result is fine
+    "signal_export": {"signal_export"},  # always alone — single side-effect
+    "summary": {"summary"},  # always alone
+    "other": {"other"},  # punt
 }
 
 
 # Function-call substring matchers — chosen to be specific enough that
 # false positives are rare. Order matters: more specific first.
 _DATA_LOAD_FUNCS = (
-    "panel.load_signal", "panel.load_model",
-    "fetch_ohlcv", "fetch_news", "fetch_factor_loadings", "fetch_fundamentals",
-    "fetch_world_themes", "fetch_sector_exposure",
-    "yfinance.download", "yf.download",
-    "pd.read_csv", "pd.read_parquet", "pd.read_excel", "read_sql",
-    "findata.", "load_data", "load_dataset",
+    "panel.load_signal",
+    "panel.load_model",
+    "fetch_ohlcv",
+    "fetch_news",
+    "fetch_factor_loadings",
+    "fetch_fundamentals",
+    "fetch_world_themes",
+    "fetch_sector_exposure",
+    "yfinance.download",
+    "yf.download",
+    "pd.read_csv",
+    "pd.read_parquet",
+    "pd.read_excel",
+    "read_sql",
+    "findata.",
+    "load_data",
+    "load_dataset",
 )
 
 _PREPROCESS_FUNCS = (
-    ".dropna", ".fillna", ".shift", ".rolling", ".resample",
-    ".merge", ".groupby", ".pct_change", ".diff",
-    "StandardScaler", "MinMaxScaler", "RobustScaler",
-    ".pivot", ".melt", ".stack", ".unstack",
+    ".dropna",
+    ".fillna",
+    ".shift",
+    ".rolling",
+    ".resample",
+    ".merge",
+    ".groupby",
+    ".pct_change",
+    ".diff",
+    "StandardScaler",
+    "MinMaxScaler",
+    "RobustScaler",
+    ".pivot",
+    ".melt",
+    ".stack",
+    ".unstack",
     "to_datetime",
 )
 
 _TRAIN_FUNCS = (
-    ".fit(", ".fit_transform",
-    "OLS(", "WLS(", "GLS(", "GLM(",
-    "GradientBoosting", "XGBClassifier", "XGBRegressor",
-    "LGBMClassifier", "LGBMRegressor",
-    "RandomForest", "LogisticRegression", "LinearRegression",
-    "KMeans", "GaussianMixture", "HMM",
-    "curve_fit", "minimize",
+    ".fit(",
+    ".fit_transform",
+    "OLS(",
+    "WLS(",
+    "GLS(",
+    "GLM(",
+    "GradientBoosting",
+    "XGBClassifier",
+    "XGBRegressor",
+    "LGBMClassifier",
+    "LGBMRegressor",
+    "RandomForest",
+    "LogisticRegression",
+    "LinearRegression",
+    "KMeans",
+    "GaussianMixture",
+    "HMM",
+    "curve_fit",
+    "minimize",
 )
 
 _EVAL_FUNCS = (
-    ".predict(", ".predict_proba", ".score(",
+    ".predict(",
+    ".predict_proba",
+    ".score(",
     ".summary(",
-    "sharpe", "sortino", "max_drawdown", "calmar",
-    "book_returns", "buy_and_hold_book", "summary_metrics",
-    "mean_squared_error", "r2_score", "accuracy_score",
+    "sharpe",
+    "sortino",
+    "max_drawdown",
+    "calmar",
+    "book_returns",
+    "buy_and_hold_book",
+    "summary_metrics",
+    "mean_squared_error",
+    "r2_score",
+    "accuracy_score",
 )
 
 _SIGNAL_EXPORT_FUNCS = (
-    "panel.export_signal", "panel.save_model",
-    "export_signal(", "save_model(",
+    "panel.export_signal",
+    "panel.save_model",
+    "export_signal(",
+    "save_model(",
 )
 
 _CHART_FUNCS = (
-    "plt.", "fig.", "ax.",
-    "matplotlib.", "mplfinance.", "mpf.",
-    ".plot(", ".hist(", ".scatter(", ".bar(", ".pie(",
+    "plt.",
+    "fig.",
+    "ax.",
+    "matplotlib.",
+    "mplfinance.",
+    "mpf.",
+    ".plot(",
+    ".hist(",
+    ".scatter(",
+    ".bar(",
+    ".pie(",
     "savefig",
 )
 
@@ -183,7 +236,9 @@ def classify_cell(source: str) -> set[str]:
     # FINAGENT_RUN_SUMMARY is a string literal — scan source, not AST.
     if "FINAGENT_RUN_SUMMARY" in src:
         roles.add("summary")
-    if _has_substr(calls, _SIGNAL_EXPORT_FUNCS) or _has_substr([src], _SIGNAL_EXPORT_FUNCS):
+    if _has_substr(calls, _SIGNAL_EXPORT_FUNCS) or _has_substr(
+        [src], _SIGNAL_EXPORT_FUNCS
+    ):
         roles.add("signal_export")
     if _has_substr(calls, _DATA_LOAD_FUNCS) or _has_substr([src], _DATA_LOAD_FUNCS):
         roles.add("data_load")

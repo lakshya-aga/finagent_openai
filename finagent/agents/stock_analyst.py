@@ -45,7 +45,6 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -61,7 +60,8 @@ class StockRecommendation(BaseModel):
         description="One of: 'buy' (go long) | 'sell' (go short) | 'avoid' (stay neutral). Be conservative — when unsure, choose 'avoid'.",
     )
     confidence: float = Field(
-        ge=0.0, le=1.0,
+        ge=0.0,
+        le=1.0,
         description="0.0..1.0 — your subjective certainty. 0.5 = coinflip; only emit 'buy' or 'sell' with confidence >= 0.55.",
     )
     target_price: Optional[float] = Field(
@@ -151,7 +151,10 @@ async def analyse_ticker(
         )
 
     return await _analyse_via_single_call(
-        ticker, current_price=current_price, context=context, model=model,
+        ticker,
+        current_price=current_price,
+        context=context,
+        model=model,
     )
 
 
@@ -177,7 +180,7 @@ async def _analyse_via_panel(ticker: str) -> Optional[StockRecommendation]:
             ticker=ticker,
             asset_class="indian_equity",
             rounds=rounds,
-            emit=None,        # no SSE — server-side only
+            emit=None,  # no SSE — server-side only
             # persist=True so all 50 daily panel runs show up on the
             # Past Debates page (tagged source='agent:stock_analyst' so
             # the UI can distinguish them from the 5 scheduled-cron
@@ -195,7 +198,8 @@ async def _analyse_via_panel(ticker: str) -> Optional[StockRecommendation]:
     verdict = result.get("verdict") or {}
     if not verdict:
         return StockRecommendation(
-            action="avoid", confidence=0.0,
+            action="avoid",
+            confidence=0.0,
             reasoning="panel produced no verdict",
         )
 
@@ -205,13 +209,15 @@ async def _analyse_via_panel(ticker: str) -> Optional[StockRecommendation]:
         target_price=verdict.get("target_price"),
         stop_loss_price=verdict.get("stoploss"),
         max_hold_days=_horizon_to_days(verdict.get("time_horizon")),
-        reasoning=(verdict.get("rationale") or "")[:200] or "panel verdict (no rationale)",
+        reasoning=(verdict.get("rationale") or "")[:200]
+        or "panel verdict (no rationale)",
     )
     return _normalise_recommendation(rec)
 
 
 async def _analyse_via_single_call(
-    ticker: str, *,
+    ticker: str,
+    *,
     current_price: float,
     context: str,
     model: Optional[str] = None,
@@ -219,12 +225,13 @@ async def _analyse_via_single_call(
     """Legacy single-LLM-call analyst. Cheap, information-thin —
     kept as the rescue path when the panel fails for a specific ticker."""
     try:
-        from agents import Agent, Runner, ModelSettings
-        from finagent.llm import get_model_name
+        from agents import Agent, ModelSettings, Runner
     except ImportError as e:
         logger.warning("stock_analyst: agents SDK unavailable (%s)", e)
         return StockRecommendation(
-            action="avoid", confidence=0.0, reasoning=f"analyst unavailable: SDK missing ({e})",
+            action="avoid",
+            confidence=0.0,
+            reasoning=f"analyst unavailable: SDK missing ({e})",
         )
 
     model_name = model or _resolve_model()
@@ -249,7 +256,8 @@ async def _analyse_via_single_call(
     except Exception as exc:
         logger.warning("stock_analyst: LLM call failed for %s (%s)", ticker, exc)
         return StockRecommendation(
-            action="avoid", confidence=0.0,
+            action="avoid",
+            confidence=0.0,
             reasoning=f"analyst unavailable: {type(exc).__name__}",
         )
 
@@ -265,14 +273,20 @@ async def _analyse_via_single_call(
 # rather than dropping to None — None would make the position
 # carry indefinitely, which is worse than picking a wrong horizon.
 _HORIZON_TO_DAYS: dict[str, int] = {
-    "intraday":  1,
-    "1d":        1,
-    "short":     3,   "short_term":     3,   "short-term":     3,
-    "medium":   10,   "medium_term":   10,   "medium-term":   10,
-    "swing":    10,
-    "long":     30,   "long_term":     30,   "long-term":     30,
+    "intraday": 1,
+    "1d": 1,
+    "short": 3,
+    "short_term": 3,
+    "short-term": 3,
+    "medium": 10,
+    "medium_term": 10,
+    "medium-term": 10,
+    "swing": 10,
+    "long": 30,
+    "long_term": 30,
+    "long-term": 30,
     "unspecified": 10,
-    "unknown":     10,
+    "unknown": 10,
 }
 
 
@@ -310,22 +324,26 @@ def _normalise_recommendation(rec: StockRecommendation) -> StockRecommendation:
     # downstream consumers don't accidentally treat 'avoid' as having
     # an actionable SL/TP.
     if action == "avoid":
-        return rec.model_copy(update={
-            "action": action,
-            "target_price": None,
-            "stop_loss_price": None,
-            "max_hold_days": None,
-        })
+        return rec.model_copy(
+            update={
+                "action": action,
+                "target_price": None,
+                "stop_loss_price": None,
+                "max_hold_days": None,
+            }
+        )
     return rec.model_copy(update={"action": action})
 
 
 def _resolve_model() -> str:
     try:
         from finagent.llm import get_model_name
+
         return get_model_name("stock_analyst")
     except Exception:
         try:
             from finagent.llm import get_model_name
+
             return get_model_name("intent_classifier")
         except Exception:
             return "gpt-4o-mini"
@@ -337,15 +355,22 @@ _ACTION_TO_DIRECTION = {"buy": +1, "sell": -1, "avoid": 0}
 
 
 def recommendation_to_prediction_kwargs(
-    rec: StockRecommendation, *, ticker: str, date: str, source: str,
+    rec: StockRecommendation,
+    *,
+    ticker: str,
+    date: str,
+    source: str,
 ) -> dict:
     """Translate a StockRecommendation into the kwargs the paper_trading
     ``record_prediction`` API accepts. Centralises the mapping so the
     daily-cron callsite stays a single line."""
     direction = _ACTION_TO_DIRECTION.get(rec.action, 0)
     return dict(
-        date=date, ticker=ticker, direction=direction,
-        confidence=rec.confidence, reasoning=rec.reasoning,
+        date=date,
+        ticker=ticker,
+        direction=direction,
+        confidence=rec.confidence,
+        reasoning=rec.reasoning,
         target_price=rec.target_price,
         stop_loss_price=rec.stop_loss_price,
         max_hold_days=rec.max_hold_days,
@@ -400,7 +425,8 @@ async def run_daily_all_50(
         if concurrency is None:
             mode = os.environ.get("STOCK_ANALYST_MODE", "panel").strip().lower()
             concurrency = 10 if mode == "panel" else 50
-    from finagent.paper_trading import universe, predictions as ptp
+    from finagent.paper_trading import predictions as ptp
+    from finagent.paper_trading import universe
 
     context_for = context_for or _default_context_for
     tickers = universe.NIFTY50_TICKERS
@@ -414,12 +440,15 @@ async def run_daily_all_50(
                 price, ctx = await context_for(ticker)
             except Exception as e:
                 results[ticker] = StockRecommendation(
-                    action="avoid", confidence=0.0,
+                    action="avoid",
+                    confidence=0.0,
                     reasoning=f"context fetch failed: {type(e).__name__}",
                 )
                 return
             results[ticker] = await analyse_ticker(
-                ticker, current_price=price, context=ctx,
+                ticker,
+                current_price=price,
+                context=ctx,
             )
 
     await asyncio.gather(*(_one(t) for t in tickers))
@@ -431,39 +460,58 @@ async def run_daily_all_50(
     persist_errors: list[dict] = []
     per_ticker: list[dict] = []
     for ticker, rec in results.items():
-        is_failed = (
-            "unavailable" in (rec.reasoning or "")
-            or "failed" in (rec.reasoning or "")
+        is_failed = "unavailable" in (rec.reasoning or "") or "failed" in (
+            rec.reasoning or ""
         )
         if is_failed:
             n_failed += 1
-        if rec.action == "buy":   n_buy += 1
-        elif rec.action == "sell": n_sell += 1
-        else:                      n_avoid += 1
+        if rec.action == "buy":
+            n_buy += 1
+        elif rec.action == "sell":
+            n_sell += 1
+        else:
+            n_avoid += 1
         kwargs = recommendation_to_prediction_kwargs(
-            rec, ticker=ticker, date=date, source="agent:stock_analyst",
+            rec,
+            ticker=ticker,
+            date=date,
+            source="agent:stock_analyst",
         )
         try:
             ptp.record_prediction(**kwargs)
             n_persisted += 1
         except Exception as e:
             logger.exception("stock_analyst: failed to persist %s", ticker)
-            persist_errors.append({"ticker": ticker, "error": f"{type(e).__name__}: {e}"[:200]})
-        per_ticker.append({
-            "ticker": ticker, "action": rec.action,
-            "confidence": rec.confidence,
-            "target_price": rec.target_price,
-            "stop_loss_price": rec.stop_loss_price,
-            "reasoning": (rec.reasoning or "")[:200],
-        })
+            persist_errors.append(
+                {"ticker": ticker, "error": f"{type(e).__name__}: {e}"[:200]}
+            )
+        per_ticker.append(
+            {
+                "ticker": ticker,
+                "action": rec.action,
+                "confidence": rec.confidence,
+                "target_price": rec.target_price,
+                "stop_loss_price": rec.stop_loss_price,
+                "reasoning": (rec.reasoning or "")[:200],
+            }
+        )
 
     logger.info(
         "stock_analyst: daily run for %s — buy=%d sell=%d avoid=%d failed=%d persisted=%d",
-        date, n_buy, n_sell, n_avoid, n_failed, n_persisted,
+        date,
+        n_buy,
+        n_sell,
+        n_avoid,
+        n_failed,
+        n_persisted,
     )
     return {
-        "date": date, "n_analysed": len(results), "n_persisted": n_persisted,
-        "n_buy": n_buy, "n_sell": n_sell, "n_avoid": n_avoid,
+        "date": date,
+        "n_analysed": len(results),
+        "n_persisted": n_persisted,
+        "n_buy": n_buy,
+        "n_sell": n_sell,
+        "n_avoid": n_avoid,
         "n_failed": n_failed,
         # Truncated to top-5 + bottom-5 by reasoning length so the
         # admin endpoint response stays readable.
@@ -479,15 +527,18 @@ async def _default_context_for(ticker: str) -> tuple[float, str]:
 
     Returns (current_price, context_str).
     """
+
     def _gather() -> tuple[float, str]:
-        from findata.equity_prices import get_equity_prices
         import pandas as pd
+        from findata.equity_prices import get_equity_prices
 
         # Last 30 days for momentum + range context.
         try:
             df = get_equity_prices(
                 tickers=[ticker],
-                start_date=(pd.Timestamp.utcnow() - pd.Timedelta(days=45)).strftime("%Y-%m-%d"),
+                start_date=(pd.Timestamp.utcnow() - pd.Timedelta(days=45)).strftime(
+                    "%Y-%m-%d"
+                ),
                 end_date=pd.Timestamp.utcnow().strftime("%Y-%m-%d"),
             )
         except Exception:
@@ -498,16 +549,36 @@ async def _default_context_for(ticker: str) -> tuple[float, str]:
 
         # Flatten potential MultiIndex into a single-ticker frame.
         if isinstance(df.columns, pd.MultiIndex):
-            close = df["Close"][ticker] if ticker in df["Close"].columns else df["Close"].iloc[:, 0]
-            high  = df["High"][ticker]  if ticker in df["High"].columns  else df["High"].iloc[:, 0]
-            low   = df["Low"][ticker]   if ticker in df["Low"].columns   else df["Low"].iloc[:, 0]
+            close = (
+                df["Close"][ticker]
+                if ticker in df["Close"].columns
+                else df["Close"].iloc[:, 0]
+            )
+            high = (
+                df["High"][ticker]
+                if ticker in df["High"].columns
+                else df["High"].iloc[:, 0]
+            )
+            low = (
+                df["Low"][ticker]
+                if ticker in df["Low"].columns
+                else df["Low"].iloc[:, 0]
+            )
         else:
-            close = df["Close"]; high = df["High"]; low = df["Low"]
+            close = df["Close"]
+            high = df["High"]
+            low = df["Low"]
 
         current_price = float(close.iloc[-1])
-        ret_5d   = (close.iloc[-1] / close.iloc[-5] - 1.0) * 100.0 if len(close) >= 5 else 0.0
-        ret_20d  = (close.iloc[-1] / close.iloc[-20] - 1.0) * 100.0 if len(close) >= 20 else 0.0
-        atr_pct  = float(((high - low) / close).tail(14).mean()) * 100.0  # 14-day ATR%
+        ret_5d = (
+            (close.iloc[-1] / close.iloc[-5] - 1.0) * 100.0 if len(close) >= 5 else 0.0
+        )
+        ret_20d = (
+            (close.iloc[-1] / close.iloc[-20] - 1.0) * 100.0
+            if len(close) >= 20
+            else 0.0
+        )
+        atr_pct = float(((high - low) / close).tail(14).mean()) * 100.0  # 14-day ATR%
         range_lo = float(low.tail(20).min())
         range_hi = float(high.tail(20).max())
 

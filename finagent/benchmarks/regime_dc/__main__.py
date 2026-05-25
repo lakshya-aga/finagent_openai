@@ -28,14 +28,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from .grid_search import run_benchmark, Splits
-
+from .grid_search import Splits, run_benchmark
 
 # Short names accepted on the CLI for ergonomics.
 _CLF_ALIASES = {
-    "nbc":  "naive_bayes", "naive_bayes":         "naive_bayes",
-    "lr":   "logistic_regression", "logistic_regression": "logistic_regression",
-    "svm":  "svm",
+    "nbc": "naive_bayes",
+    "naive_bayes": "naive_bayes",
+    "lr": "logistic_regression",
+    "logistic_regression": "logistic_regression",
+    "svm": "svm",
 }
 
 
@@ -43,8 +44,7 @@ def _parse_classifier(name: str) -> str:
     key = name.strip().lower()
     if key not in _CLF_ALIASES:
         raise argparse.ArgumentTypeError(
-            f"unknown classifier {name!r}; "
-            f"expected one of {sorted(set(_CLF_ALIASES))}",
+            f"unknown classifier {name!r}; expected one of {sorted(set(_CLF_ALIASES))}",
         )
     return _CLF_ALIASES[key]
 
@@ -53,45 +53,58 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m finagent.benchmarks.regime_dc",
         description="Reproduce the Chen-Tsang / Baid-et-al directional-change "
-                    "regime detection benchmark on S&P 500.",
+        "regime detection benchmark on S&P 500.",
     )
     ap.add_argument(
-        "--classifier", "-c", type=_parse_classifier, action="append", default=None,
+        "--classifier",
+        "-c",
+        type=_parse_classifier,
+        action="append",
+        default=None,
         help="Run only this classifier (repeatable). Default: run all three.",
     )
     ap.add_argument(
-        "--quick", action="store_true",
+        "--quick",
+        action="store_true",
         help="Tiny grid (θ=0.01, ε=0.7, ind=R) for smoke-testing the "
-             "pipeline — runs 1 cell per classifier instead of 45.",
+        "pipeline — runs 1 cell per classifier instead of 45.",
     )
     ap.add_argument(
-        "--save-json", type=Path, default=None,
+        "--save-json",
+        type=Path,
+        default=None,
         help="If given, dump the Table 4 reproduction to this path as JSON.",
     )
     ap.add_argument(
-        "--quiet", action="store_true",
+        "--quiet",
+        action="store_true",
         help="Suppress per-cell progress prints.",
     )
     args = ap.parse_args(argv)
 
-    classifiers = tuple(args.classifier) if args.classifier else \
-                  ("naive_bayes", "logistic_regression", "svm")
+    classifiers = (
+        tuple(args.classifier)
+        if args.classifier
+        else ("naive_bayes", "logistic_regression", "svm")
+    )
     splits = Splits()
 
-    grid_overrides = None
     if args.quick:
         from . import grid_search as gs
+
         # Monkey-patch the default grid for this run — keeps the API surface
         # narrow (we don't expose grid as a CLI flag because the paper's
         # 45-cell grid is the canonical benchmark).
         gs.DEFAULT_GRID = {
-            "theta":        [0.01],
+            "theta": [0.01],
             "dc_indicator": ["R"],
-            "epsilon":      [0.7],
+            "epsilon": [0.7],
         }
 
     result = run_benchmark(
-        splits=splits, classifiers=classifiers, verbose=not args.quiet,
+        splits=splits,
+        classifiers=classifiers,
+        verbose=not args.quiet,
     )
 
     print("\n" + "=" * 80)
@@ -99,13 +112,22 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 80)
     table4 = result["table4"]
     with pd.option_context(
-        "display.max_columns", None, "display.width", 200, "display.float_format", "{:.4f}".format,
+        "display.max_columns",
+        None,
+        "display.width",
+        200,
+        "display.float_format",
+        "{:.4f}".format,
     ):
         print(table4.to_string(index=False))
 
-    print("\nOptimal hyperparameters per classifier (validation-set profit-maximising):")
+    print(
+        "\nOptimal hyperparameters per classifier (validation-set profit-maximising):"
+    )
     for c, p in result["optimal"].items():
-        print(f"  {c:>20s}  θ={p.get('theta')}  ε={p.get('epsilon')}  ind={p.get('dc_indicator')}")
+        print(
+            f"  {c:>20s}  θ={p.get('theta')}  ε={p.get('epsilon')}  ind={p.get('dc_indicator')}"
+        )
 
     print(
         "\nReference (paper Table 4 + Table 3 — NBC: θ=0.01, ε=0.80, ind=R):\n"
@@ -119,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.save_json:
         payload = {
             "optimal": result["optimal"],
-            "table4":  result["table4"].to_dict(orient="records"),
+            "table4": result["table4"].to_dict(orient="records"),
         }
         args.save_json.parent.mkdir(parents=True, exist_ok=True)
         args.save_json.write_text(json.dumps(payload, indent=2, default=str))

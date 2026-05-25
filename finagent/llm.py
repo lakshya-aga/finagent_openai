@@ -31,7 +31,6 @@ from __future__ import annotations
 import os
 from typing import Any
 
-
 # ─── Role registry ──────────────────────────────────────────────────
 # (provider, model). Add a new agent role by appending here.
 # Provider is informational today (only "openai" is wired); becomes
@@ -40,30 +39,30 @@ from typing import Any
 _DEFAULTS: dict[str, tuple[str, str]] = {
     # Chat workflow
     "intent_classifier": ("openai", "gpt-4o-mini"),
-    "chat_planner":      ("openai", "gpt-5"),
+    "chat_planner": ("openai", "gpt-5"),
     "chat_orchestrator": ("openai", "gpt-5"),
-    "chat_validator":    ("openai", "gpt-5"),
-    "chat_question":     ("openai", "gpt-4o"),
-    "chat_edit_planner":      ("openai", "gpt-5"),
+    "chat_validator": ("openai", "gpt-5"),
+    "chat_question": ("openai", "gpt-4o"),
+    "chat_edit_planner": ("openai", "gpt-5"),
     "chat_edit_orchestrator": ("openai", "gpt-5"),
     # Recipe / template authoring
-    "template_author":   ("openai", "gpt-5"),
+    "template_author": ("openai", "gpt-5"),
     # Audit + verdict layers
-    "bias_auditor":      ("openai", "gpt-4o-mini"),
+    "bias_auditor": ("openai", "gpt-4o-mini"),
     # Paper-trading daily per-ticker analyst (50 calls/day → keep cheap).
     # This is the sole writer to the predictions table — the old batch
     # portfolio_manager agent was removed; the Tauric-style multi-agent
     # debate panel (finagent.agents.trading_panel) is the per-ticker
     # methodology going forward.
-    "stock_analyst":     ("openai", "gpt-4o-mini"),
+    "stock_analyst": ("openai", "gpt-4o-mini"),
     # Notebook-name suggester — one-shot, lowest tier.
-    "name_suggester":    ("openai", "gpt-4o-mini"),
+    "name_suggester": ("openai", "gpt-4o-mini"),
     # Debate package
-    "debate_bull":       ("openai", "gpt-4o"),
-    "debate_bear":       ("openai", "gpt-4o"),
-    "debate_moderator":  ("openai", "gpt-4o"),
+    "debate_bull": ("openai", "gpt-4o"),
+    "debate_bear": ("openai", "gpt-4o"),
+    "debate_moderator": ("openai", "gpt-4o"),
     # Generic fallback for un-keyed callers
-    "default":           ("openai", "gpt-4o"),
+    "default": ("openai", "gpt-4o"),
 }
 
 
@@ -80,11 +79,7 @@ def get_role_config(role: str) -> tuple[str, str]:
     role_key = role.upper().replace("-", "_")
     default_provider, default_model = _DEFAULTS.get(role, _DEFAULTS["default"])
     provider = os.getenv(f"{role_key}_PROVIDER", default_provider)
-    model = (
-        os.getenv(f"{role_key}_MODEL")
-        or os.getenv("OPENAI_MODEL")
-        or default_model
-    )
+    model = os.getenv(f"{role_key}_MODEL") or os.getenv("OPENAI_MODEL") or default_model
     return provider, model
 
 
@@ -107,6 +102,7 @@ def get_llm_client(role: str) -> Any:
     provider, _ = get_role_config(role)
     if provider == "openai":
         from openai import AsyncOpenAI
+
         return AsyncOpenAI()
     if provider == "anthropic":
         try:

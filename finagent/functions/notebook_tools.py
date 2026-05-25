@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import Any, Dict
 
 import nbformat
-from jupyter_client import KernelManager
-
 from agents import function_tool
+from jupyter_client import KernelManager
 
 from .kernel import _serialize_output
 from .notebook_io import _get_current_path, _load_notebook, _save_notebook
@@ -59,13 +58,15 @@ def find_regex_in_notebook_code(regex_pattern: str, case_sensitive: bool):
             start, end = match.span()
             snippet_start = max(0, start - 80)
             snippet_end = min(len(source), end + 80)
-            matches.append({
-                "cell_index": idx,
-                "cell_type": cell.cell_type,
-                "match_text": match.group(0),
-                "span": [start, end],
-                "snippet": source[snippet_start:snippet_end],
-            })
+            matches.append(
+                {
+                    "cell_index": idx,
+                    "cell_type": cell.cell_type,
+                    "match_text": match.group(0),
+                    "span": [start, end],
+                    "snippet": source[snippet_start:snippet_end],
+                }
+            )
 
     return {
         "success": True,
@@ -143,11 +144,13 @@ def lint_notebook_imports(path: str) -> dict:
                     spec = None
                 if spec is None:
                     seen.add(root)
-                    missing.append({
-                        "module": name,
-                        "cell_index": cell_idx,
-                        "line": line,
-                    })
+                    missing.append(
+                        {
+                            "module": name,
+                            "cell_index": cell_idx,
+                            "line": line,
+                        }
+                    )
 
     return {"ok": not missing, "missing": missing}
 
@@ -203,7 +206,10 @@ def run_all_cells_to_disk(path: str, timeout: int = 120) -> dict:
                     break
                 if msg.get("parent_header", {}).get("msg_id") != msg_id:
                     continue
-                if msg.get("msg_type") == "status" and msg.get("content", {}).get("execution_state") == "idle":
+                if (
+                    msg.get("msg_type") == "status"
+                    and msg.get("content", {}).get("execution_state") == "idle"
+                ):
                     break
                 out = _serialize_output(msg)
                 if out is not None:
@@ -214,31 +220,45 @@ def run_all_cells_to_disk(path: str, timeout: int = 120) -> dict:
             for out in cell_outputs:
                 ot = out["output_type"]
                 if ot == "stream":
-                    cell.outputs.append(nbformat.v4.new_output(
-                        output_type="stream", name=out.get("name", "stdout"),
-                        text=out.get("text", ""),
-                    ))
+                    cell.outputs.append(
+                        nbformat.v4.new_output(
+                            output_type="stream",
+                            name=out.get("name", "stdout"),
+                            text=out.get("text", ""),
+                        )
+                    )
                 elif ot in {"display_data", "execute_result"}:
-                    cell.outputs.append(nbformat.v4.new_output(
-                        output_type=ot, data=out.get("data", {}),
-                        metadata=out.get("metadata", {}),
-                        **({"execution_count": execution_count} if ot == "execute_result" else {}),
-                    ))
+                    cell.outputs.append(
+                        nbformat.v4.new_output(
+                            output_type=ot,
+                            data=out.get("data", {}),
+                            metadata=out.get("metadata", {}),
+                            **(
+                                {"execution_count": execution_count}
+                                if ot == "execute_result"
+                                else {}
+                            ),
+                        )
+                    )
                 elif ot == "error":
-                    cell.outputs.append(nbformat.v4.new_output(
-                        output_type="error",
-                        ename=out.get("ename", ""),
-                        evalue=out.get("evalue", ""),
-                        traceback=out.get("traceback", []),
-                    ))
+                    cell.outputs.append(
+                        nbformat.v4.new_output(
+                            output_type="error",
+                            ename=out.get("ename", ""),
+                            evalue=out.get("evalue", ""),
+                            traceback=out.get("traceback", []),
+                        )
+                    )
 
             err = next((o for o in cell_outputs if o["output_type"] == "error"), None)
             if err:
-                errors.append({
-                    "cell_index": cell_idx,
-                    "ename": err.get("ename", ""),
-                    "evalue": err.get("evalue", ""),
-                })
+                errors.append(
+                    {
+                        "cell_index": cell_idx,
+                        "ename": err.get("ename", ""),
+                        "evalue": err.get("evalue", ""),
+                    }
+                )
                 # KEY DIFFERENCE vs validate_run: do NOT break. Keep running so
                 # later cells still get outputs even if one fails.
 
@@ -268,7 +288,9 @@ def run_all_cells_to_disk(path: str, timeout: int = 120) -> dict:
 def validate_run(max_cells: int, timeout: int, prelude: str):
     """Run the full notebook in one persistent kernel, write outputs back, save to disk."""
     path = _get_current_path()
-    logging.info(f"TOOL CALL: validate_run path={path} max_cells={max_cells} timeout={timeout}")
+    logging.info(
+        f"TOOL CALL: validate_run path={path} max_cells={max_cells} timeout={timeout}"
+    )
 
     nb = _load_notebook()
 
@@ -345,7 +367,10 @@ def validate_run(max_cells: int, timeout: int, prelude: str):
                     break
                 if msg.get("parent_header", {}).get("msg_id") != msg_id:
                     continue
-                if msg.get("msg_type") == "status" and msg.get("content", {}).get("execution_state") == "idle":
+                if (
+                    msg.get("msg_type") == "status"
+                    and msg.get("content", {}).get("execution_state") == "idle"
+                ):
                     break
                 out = _serialize_output(msg)
                 if out is not None:
@@ -356,25 +381,39 @@ def validate_run(max_cells: int, timeout: int, prelude: str):
             for out in cell_outputs:
                 output_type = out["output_type"]
                 if output_type == "stream":
-                    cell.outputs.append(nbformat.v4.new_output(
-                        output_type="stream", name=out.get("name", "stdout"), text=out.get("text", "")
-                    ))
+                    cell.outputs.append(
+                        nbformat.v4.new_output(
+                            output_type="stream",
+                            name=out.get("name", "stdout"),
+                            text=out.get("text", ""),
+                        )
+                    )
                 elif output_type in {"display_data", "execute_result"}:
-                    cell.outputs.append(nbformat.v4.new_output(
-                        output_type=output_type,
-                        data=out.get("data", {}),
-                        metadata=out.get("metadata", {}),
-                        **({"execution_count": execution_count} if output_type == "execute_result" else {}),
-                    ))
+                    cell.outputs.append(
+                        nbformat.v4.new_output(
+                            output_type=output_type,
+                            data=out.get("data", {}),
+                            metadata=out.get("metadata", {}),
+                            **(
+                                {"execution_count": execution_count}
+                                if output_type == "execute_result"
+                                else {}
+                            ),
+                        )
+                    )
                 elif output_type == "error":
-                    cell.outputs.append(nbformat.v4.new_output(
-                        output_type="error",
-                        ename=out.get("ename", ""),
-                        evalue=out.get("evalue", ""),
-                        traceback=out.get("traceback", []),
-                    ))
+                    cell.outputs.append(
+                        nbformat.v4.new_output(
+                            output_type="error",
+                            ename=out.get("ename", ""),
+                            evalue=out.get("evalue", ""),
+                            traceback=out.get("traceback", []),
+                        )
+                    )
 
-            error_in_cell = next((o for o in cell_outputs if o["output_type"] == "error"), None)
+            error_in_cell = next(
+                (o for o in cell_outputs if o["output_type"] == "error"), None
+            )
             if error_in_cell:
                 first_error_cell = cell_idx
                 error_output = error_in_cell

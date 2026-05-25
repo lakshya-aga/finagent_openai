@@ -10,12 +10,11 @@ objects — keeps the API layer free of sqlite-specific imports.
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 import time
 from contextlib import contextmanager
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Iterable, Iterator
 
 from .schema import SCHEMA
 
@@ -27,6 +26,7 @@ def _db_path():
     stays loadable in environments where finagent.experiments isn't
     importable (CI, tests with sys.path overrides)."""
     from finagent.experiments import _DEFAULT_PATH
+
     return _DEFAULT_PATH
 
 
@@ -68,23 +68,27 @@ def _migrate_v2_trade_columns(conn: sqlite3.Connection) -> None:
     No-op on fresh DBs (CREATE TABLE already includes the columns).
     """
     # trades — v2 intraday execution + v3 triple-barrier time column
-    existing_trades = {r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
+    existing_trades = {
+        r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()
+    }
     for col, ddl in [
-        ("target_price",    "REAL"),
+        ("target_price", "REAL"),
         ("stop_loss_price", "REAL"),
-        ("opened_via",      "TEXT DEFAULT 'eod_close'"),
-        ("closed_ts",       "REAL"),
-        ("max_hold_days",   "INTEGER"),
+        ("opened_via", "TEXT DEFAULT 'eod_close'"),
+        ("closed_ts", "REAL"),
+        ("max_hold_days", "INTEGER"),
     ]:
         if col not in existing_trades:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {ddl}")
             logger.info("paper_trading: migrated trades — added column %s", col)
 
     # predictions — v3 triple-barrier columns (time_horizon + max_hold_days)
-    existing_preds = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
+    existing_preds = {
+        r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()
+    }
     for col, ddl in [
-        ("time_horizon",   "TEXT"),
-        ("max_hold_days",  "INTEGER"),
+        ("time_horizon", "TEXT"),
+        ("max_hold_days", "INTEGER"),
     ]:
         if col not in existing_preds:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {ddl}")
@@ -141,9 +145,19 @@ def upsert_prediction(
                 max_hold_days   = COALESCE(excluded.max_hold_days,   predictions.max_hold_days),
                 source          = excluded.source
             """,
-            (date, ticker, direction, confidence, reasoning,
-             target_price, stop_loss_price, time_horizon, max_hold_days,
-             source, time.time()),
+            (
+                date,
+                ticker,
+                direction,
+                confidence,
+                reasoning,
+                target_price,
+                stop_loss_price,
+                time_horizon,
+                max_hold_days,
+                source,
+                time.time(),
+            ),
         )
         return cur.lastrowid or 0
 
@@ -175,9 +189,18 @@ def upsert_portfolio_snapshot(snap: dict) -> None:
     """Idempotent. Re-running the EOD close routine overwrites the
     snapshot for that date+strategy rather than producing duplicates."""
     keys = (
-        "date", "strategy", "equity_value", "cash", "gross_exposure",
-        "net_exposure", "daily_pnl", "daily_return_pct",
-        "transaction_costs", "n_long", "n_short", "n_neutral",
+        "date",
+        "strategy",
+        "equity_value",
+        "cash",
+        "gross_exposure",
+        "net_exposure",
+        "daily_pnl",
+        "daily_return_pct",
+        "transaction_costs",
+        "n_long",
+        "n_short",
+        "n_neutral",
     )
     vals = tuple(snap[k] for k in keys) + (time.time(),)
     placeholders = ", ".join(["?"] * (len(keys) + 1))
@@ -203,9 +226,11 @@ def list_snapshots(
     sql = "SELECT * FROM portfolio_snapshots WHERE strategy = ?"
     args: list[Any] = [strategy]
     if start:
-        sql += " AND date >= ?"; args.append(start)
+        sql += " AND date >= ?"
+        args.append(start)
     if end:
-        sql += " AND date <= ?"; args.append(end)
+        sql += " AND date <= ?"
+        args.append(end)
     sql += " ORDER BY date ASC"
     with _conn() as c:
         return [_row_to_dict(r) for r in c.execute(sql, args)]
@@ -238,9 +263,18 @@ def previous_snapshot(strategy: str, before_date: str) -> dict | None:
 
 def upsert_position_snapshot(snap: dict) -> None:
     keys = (
-        "date", "strategy", "ticker", "direction", "weight",
-        "notional", "entry_date", "entry_price", "current_price",
-        "days_held", "unrealized_pnl", "unrealized_pnl_pct",
+        "date",
+        "strategy",
+        "ticker",
+        "direction",
+        "weight",
+        "notional",
+        "entry_date",
+        "entry_price",
+        "current_price",
+        "days_held",
+        "unrealized_pnl",
+        "unrealized_pnl_pct",
     )
     vals = tuple(snap[k] for k in keys)
     placeholders = ", ".join(["?"] * len(keys))
@@ -320,9 +354,19 @@ def open_trade(
                 target_price, stop_loss_price, max_hold_days, opened_via
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (strategy, ticker, direction, opened_at, open_price,
-             open_weight, transaction_cost,
-             target_price, stop_loss_price, max_hold_days, opened_via),
+            (
+                strategy,
+                ticker,
+                direction,
+                opened_at,
+                open_price,
+                open_weight,
+                transaction_cost,
+                target_price,
+                stop_loss_price,
+                max_hold_days,
+                opened_via,
+            ),
         )
         return cur.lastrowid or 0
 
@@ -347,8 +391,7 @@ def close_trade(
                    close_reason = ?, closed_ts = ?
              WHERE id = ?
             """,
-            (closed_at, close_price, realized_pnl, close_reason,
-             closed_ts, trade_id),
+            (closed_at, close_price, realized_pnl, close_reason, closed_ts, trade_id),
         )
 
 
@@ -362,7 +405,9 @@ def list_open_trades(strategy: str) -> list[dict]:
         return [_row_to_dict(r) for r in rows]
 
 
-def list_trades(strategy: str, *, limit: int = 100, only_closed: bool = False) -> list[dict]:
+def list_trades(
+    strategy: str, *, limit: int = 100, only_closed: bool = False
+) -> list[dict]:
     sql = "SELECT * FROM trades WHERE strategy = ?"
     if only_closed:
         sql += " AND closed_at IS NOT NULL"
@@ -375,7 +420,9 @@ def list_trades(strategy: str, *, limit: int = 100, only_closed: bool = False) -
 # ── market caps (Nifty 50 universe) ────────────────────────────────
 
 
-def upsert_market_cap(ticker: str, market_cap: float, sector: str | None = None) -> None:
+def upsert_market_cap(
+    ticker: str, market_cap: float, sector: str | None = None
+) -> None:
     with _conn() as c:
         c.execute(
             """
@@ -434,8 +481,13 @@ def portfolio_overview(strategy: str) -> dict:
             },
             "sharpe_30d": None,
             "max_drawdown": 0.0,
-            "exposure": {"gross": 0.0, "net": 0.0,
-                         "n_long": 0, "n_short": 0, "n_neutral": 0},
+            "exposure": {
+                "gross": 0.0,
+                "net": 0.0,
+                "n_long": 0,
+                "n_short": 0,
+                "n_neutral": 0,
+            },
             "as_of": None,
             "n_snapshots": 0,
         }
@@ -447,12 +499,15 @@ def portfolio_overview(strategy: str) -> dict:
     sharpe_30d: float | None = None
     if len(snaps) >= 5:
         tail = snaps[-30:]
-        rets = [s["daily_return_pct"] for s in tail if s["daily_return_pct"] is not None]
+        rets = [
+            s["daily_return_pct"] for s in tail if s["daily_return_pct"] is not None
+        ]
         if rets:
             import statistics
+
             mean = statistics.fmean(rets)
             std = statistics.pstdev(rets) if len(rets) > 1 else 0.0
-            sharpe_30d = (mean / std) * (252 ** 0.5) if std > 0 else None
+            sharpe_30d = (mean / std) * (252**0.5) if std > 0 else None
 
     # Max drawdown over the full history
     peak = STARTING_CAPITAL
@@ -480,9 +535,9 @@ def portfolio_overview(strategy: str) -> dict:
         "max_drawdown": max_dd,
         "exposure": {
             "gross": latest["gross_exposure"],
-            "net":   latest["net_exposure"],
-            "n_long":    latest["n_long"],
-            "n_short":   latest["n_short"],
+            "net": latest["net_exposure"],
+            "n_long": latest["n_long"],
+            "n_short": latest["n_short"],
             "n_neutral": latest["n_neutral"],
         },
         "as_of": latest["date"],

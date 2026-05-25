@@ -5,8 +5,7 @@ from __future__ import annotations
 from agents import Agent, ModelSettings
 from openai.types.shared.reasoning import Reasoning
 
-from ..mcp_connections import make_data_mcp, make_fruit_thrower, file_search
-
+from ..mcp_connections import file_search, make_data_mcp, make_fruit_thrower
 
 PLANNER_INSTRUCTIONS = """You are a quant research workflow planner.
 Your job is to convert research ideas into a COMPACT, EXECUTABLE DAG specification
@@ -81,7 +80,6 @@ PLANNING HEURISTICS
 
 
 from finagent.llm import get_model_name
-
 
 planner = Agent(
     name="Planner",

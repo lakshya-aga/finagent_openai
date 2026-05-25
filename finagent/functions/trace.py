@@ -15,9 +15,8 @@ def extract_trace_markdown(result) -> str:
                 or (raw.get("name") if isinstance(raw, dict) else None)
                 or "tool"
             )
-            args = (
-                getattr(raw, "arguments", None)
-                or (raw.get("arguments", "") if isinstance(raw, dict) else "")
+            args = getattr(raw, "arguments", None) or (
+                raw.get("arguments", "") if isinstance(raw, dict) else ""
             )
             if isinstance(args, str) and len(args) > 120:
                 args = args[:120] + "…"

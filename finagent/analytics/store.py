@@ -27,6 +27,7 @@ def _db_path():
     """Resolve the experiments DB path. Lazy-import to keep this module
     loadable without the finagent.experiments stack."""
     from finagent.experiments import _DEFAULT_PATH
+
     return _DEFAULT_PATH
 
 
@@ -61,7 +62,9 @@ _BOT_RE = re.compile(
     r"|headlesschrome|phantomjs",
     re.IGNORECASE,
 )
-_MOBILE_RE = re.compile(r"mobi|iphone|ipod|android.*mobile|blackberry|opera mini", re.IGNORECASE)
+_MOBILE_RE = re.compile(
+    r"mobi|iphone|ipod|android.*mobile|blackberry|opera mini", re.IGNORECASE
+)
 _TABLET_RE = re.compile(r"ipad|tablet|android(?!.*mobile)", re.IGNORECASE)
 
 
@@ -190,7 +193,9 @@ def summary(*, exclude_bots: bool = True) -> dict:
         ).fetchone()
         out["all_time"] = {"pageviews": row["pageviews"], "uniques": row["uniques"]}
         # Bot count (always, so the operator can see the noise level)
-        bots = c.execute("SELECT COUNT(*) AS n FROM visits WHERE ua_class = 'bot'").fetchone()
+        bots = c.execute(
+            "SELECT COUNT(*) AS n FROM visits WHERE ua_class = 'bot'"
+        ).fetchone()
         out["bot_count_all_time"] = bots["n"]
     return out
 
@@ -199,7 +204,7 @@ def timeline(*, days: int = 30, exclude_bots: bool = True) -> list[dict]:
     """One row per UTC date over the last ``days``, with pageviews +
     unique visitor count. Missing days are emitted with zeroes so the
     chart doesn't gap."""
-    from datetime import date, timedelta, datetime, timezone
+    from datetime import date, datetime, timedelta, timezone
 
     end_date = date.today()
     start_date = end_date - timedelta(days=days - 1)
@@ -216,7 +221,14 @@ def timeline(*, days: int = 30, exclude_bots: bool = True) -> list[dict]:
             GROUP BY day
             ORDER BY day
             """,
-            (datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc).timestamp(),),
+            (
+                datetime(
+                    start_date.year,
+                    start_date.month,
+                    start_date.day,
+                    tzinfo=timezone.utc,
+                ).timestamp(),
+            ),
         ).fetchall()
         observed = {r["day"]: (r["pageviews"], r["uniques"]) for r in rows}
     out: list[dict] = []
@@ -228,7 +240,9 @@ def timeline(*, days: int = 30, exclude_bots: bool = True) -> list[dict]:
     return out
 
 
-def top_pages(*, days: int = 7, limit: int = 20, exclude_bots: bool = True) -> list[dict]:
+def top_pages(
+    *, days: int = 7, limit: int = 20, exclude_bots: bool = True
+) -> list[dict]:
     """Top N most-visited paths over the last ``days``."""
     cutoff = time.time() - days * 86_400
     bot_filter = "AND ua_class != 'bot'" if exclude_bots else ""
@@ -250,7 +264,9 @@ def top_pages(*, days: int = 7, limit: int = 20, exclude_bots: bool = True) -> l
         return [_row(r) for r in rows]
 
 
-def top_referrers(*, days: int = 7, limit: int = 20, exclude_bots: bool = True) -> list[dict]:
+def top_referrers(
+    *, days: int = 7, limit: int = 20, exclude_bots: bool = True
+) -> list[dict]:
     cutoff = time.time() - days * 86_400
     bot_filter = "AND ua_class != 'bot'" if exclude_bots else ""
     with _conn() as c:

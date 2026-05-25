@@ -25,11 +25,12 @@ from typing import Any, Iterator, Optional
 
 from .recipes import plausibility
 
-
-_DEFAULT_PATH = Path(os.environ.get(
-    "FINAGENT_EXPERIMENT_DB",
-    str(Path(__file__).resolve().parents[1] / "outputs" / "experiments.db"),
-))
+_DEFAULT_PATH = Path(
+    os.environ.get(
+        "FINAGENT_EXPERIMENT_DB",
+        str(Path(__file__).resolve().parents[1] / "outputs" / "experiments.db"),
+    )
+)
 
 
 @dataclass
@@ -40,11 +41,11 @@ class Run:
     template: Optional[str]
     recipe_yaml: str
     recipe_hash: str
-    status: str               # queued | running | completed | failed
-    started_at: float         # unix
+    status: str  # queued | running | completed | failed
+    started_at: float  # unix
     finished_at: Optional[float]
     notebook_path: Optional[str]
-    metrics_json: str         # serialized dict[str, float]
+    metrics_json: str  # serialized dict[str, float]
     error: Optional[str]
     search_id: Optional[str] = None
     search_iteration: Optional[int] = None
@@ -246,10 +247,10 @@ class Search:
     id: str
     project: str
     name: str
-    submission_json: str          # full SearchSubmission as JSON
-    policy: str                   # "random" | "grid"
-    objective_json: str           # serialized Objective
-    status: str                   # queued|running|completed|stopped|failed
+    submission_json: str  # full SearchSubmission as JSON
+    policy: str  # "random" | "grid"
+    objective_json: str  # serialized Objective
+    status: str  # queued|running|completed|stopped|failed
     started_at: float
     finished_at: Optional[float]
     iterations: int
@@ -456,7 +457,9 @@ class ExperimentStore:
         except Exception:
             existing_dbates = set()
         if existing_dbates and "source" not in existing_dbates:
-            conn.execute("ALTER TABLE debates ADD COLUMN source TEXT NOT NULL DEFAULT 'user'")
+            conn.execute(
+                "ALTER TABLE debates ADD COLUMN source TEXT NOT NULL DEFAULT 'user'"
+            )
         if existing_dbates and "evidence_json" not in existing_dbates:
             conn.execute(
                 "ALTER TABLE debates ADD COLUMN evidence_json TEXT NOT NULL DEFAULT '[]'"
@@ -508,8 +511,18 @@ class ExperimentStore:
                 "INSERT INTO runs (id, project, name, template, recipe_yaml, "
                 "recipe_hash, status, started_at, metrics_json, search_id, search_iteration) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)",
-                (run_id, project, name, template, recipe_yaml,
-                 recipe_hash, "queued", now, search_id, search_iteration),
+                (
+                    run_id,
+                    project,
+                    name,
+                    template,
+                    recipe_yaml,
+                    recipe_hash,
+                    "queued",
+                    now,
+                    search_id,
+                    search_iteration,
+                ),
             )
         return run
 
@@ -614,8 +627,15 @@ class ExperimentStore:
                 "model, prompt_tokens, completion_tokens, cost_usd) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    time.time(), user, run_id, purpose, provider, model,
-                    int(prompt_tokens), int(completion_tokens), float(cost_usd),
+                    time.time(),
+                    user,
+                    run_id,
+                    purpose,
+                    provider,
+                    model,
+                    int(prompt_tokens),
+                    int(completion_tokens),
+                    float(cost_usd),
                 ),
             )
 
@@ -678,11 +698,13 @@ class ExperimentStore:
             "window_days": days,
             "total_usd": float(total["u"]),
             "total_calls": int(total["c"]),
-            "by_day": [{"date": r["d"], "calls": r["c"], "usd": r["u"]} for r in by_day],
+            "by_day": [
+                {"date": r["d"], "calls": r["c"], "usd": r["u"]} for r in by_day
+            ],
             "by_purpose": _rows(by_purpose, "purpose"),
-            "by_user":    _rows(by_user, "user"),
-            "by_model":   _rows(by_model, "model"),
-            "top_runs":   _rows(top_runs, "run_id"),
+            "by_user": _rows(by_user, "user"),
+            "by_model": _rows(by_model, "model"),
+            "top_runs": _rows(top_runs, "run_id"),
         }
 
     # ── debates ──────────────────────────────────────────────────────
@@ -733,17 +755,23 @@ class ExperimentStore:
         sets: list[str] = []
         args: list[Any] = []
         if status is not None:
-            sets.append("status = ?"); args.append(status)
+            sets.append("status = ?")
+            args.append(status)
         if transcript is not None:
-            sets.append("transcript_json = ?"); args.append(json.dumps(transcript, default=str))
+            sets.append("transcript_json = ?")
+            args.append(json.dumps(transcript, default=str))
         if verdict is not None:
-            sets.append("verdict_json = ?"); args.append(json.dumps(verdict, default=str))
+            sets.append("verdict_json = ?")
+            args.append(json.dumps(verdict, default=str))
         if evidence is not None:
-            sets.append("evidence_json = ?"); args.append(json.dumps(evidence, default=str))
+            sets.append("evidence_json = ?")
+            args.append(json.dumps(evidence, default=str))
         if error is not None:
-            sets.append("error = ?"); args.append(error)
+            sets.append("error = ?")
+            args.append(error)
         if finished:
-            sets.append("finished_at = ?"); args.append(time.time())
+            sets.append("finished_at = ?")
+            args.append(time.time())
         if not sets:
             return
         args.append(debate_id)
@@ -752,15 +780,21 @@ class ExperimentStore:
 
     def get_debate(self, debate_id: str) -> Optional[Debate]:
         with self._conn() as conn:
-            row = conn.execute("SELECT * FROM debates WHERE id = ?", (debate_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM debates WHERE id = ?", (debate_id,)
+            ).fetchone()
         return _row_to_debate(row) if row else None
 
-    def list_debates(self, ticker: Optional[str] = None, limit: int = 100) -> list[Debate]:
+    def list_debates(
+        self, ticker: Optional[str] = None, limit: int = 100
+    ) -> list[Debate]:
         sql = "SELECT * FROM debates"
         args: list[Any] = []
         if ticker:
-            sql += " WHERE ticker = ?"; args.append(ticker)
-        sql += " ORDER BY started_at DESC LIMIT ?"; args.append(limit)
+            sql += " WHERE ticker = ?"
+            args.append(ticker)
+        sql += " ORDER BY started_at DESC LIMIT ?"
+        args.append(limit)
         with self._conn() as conn:
             rows = conn.execute(sql, args).fetchall()
         return [_row_to_debate(r) for r in rows]
@@ -789,13 +823,10 @@ class ExperimentStore:
 
     def get(self, run_id: str) -> Optional[Run]:
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM runs WHERE id = ?", (run_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         return _row_to_run(row) if row else None
 
-    def list_runs(self, project: Optional[str] = None,
-                  limit: int = 200) -> list[Run]:
+    def list_runs(self, project: Optional[str] = None, limit: int = 200) -> list[Run]:
         sql = "SELECT * FROM runs"
         args: list[Any] = []
         if project:
@@ -840,8 +871,16 @@ class ExperimentStore:
                 "INSERT INTO searches (id, project, name, submission_json, policy, "
                 "objective_json, status, started_at, iterations) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
-                (sid, project, name, submission_json, policy, objective_json,
-                 "queued", now),
+                (
+                    sid,
+                    project,
+                    name,
+                    submission_json,
+                    policy,
+                    objective_json,
+                    "queued",
+                    now,
+                ),
             )
         return search
 
@@ -892,8 +931,9 @@ class ExperimentStore:
             ).fetchone()
         return _row_to_search(row) if row else None
 
-    def list_searches(self, project: Optional[str] = None,
-                      limit: int = 100) -> list[Search]:
+    def list_searches(
+        self, project: Optional[str] = None, limit: int = 100
+    ) -> list[Search]:
         sql = "SELECT * FROM searches"
         args: list[Any] = []
         if project:
@@ -921,8 +961,11 @@ class ExperimentStore:
         with self._conn() as conn:
             rows = conn.execute(sql).fetchall()
         return [
-            {"project": r["project"], "run_count": r["run_count"],
-             "last_run": r["last_run"]}
+            {
+                "project": r["project"],
+                "run_count": r["run_count"],
+                "last_run": r["last_run"],
+            }
             for r in rows
         ]
 
@@ -949,10 +992,15 @@ def _resolve_bands(template_name: Optional[str]) -> dict[str, tuple[float, float
     bands = dict(plausibility.DEFAULT_BANDS)
     if template_name:
         try:
-            from .recipes.templates import REGISTRY  # local import: avoid cycle at module load
+            from .recipes.templates import (
+                REGISTRY,  # local import: avoid cycle at module load
+            )
+
             module = REGISTRY.get(template_name)
             metadata = getattr(module, "METADATA", None) if module else None
-            declared = metadata.get("plausibility") if isinstance(metadata, dict) else None
+            declared = (
+                metadata.get("plausibility") if isinstance(metadata, dict) else None
+            )
             if isinstance(declared, dict):
                 for k, v in declared.items():
                     try:
@@ -963,7 +1011,8 @@ def _resolve_bands(template_name: Optional[str]) -> dict[str, tuple[float, float
                         continue
         except Exception:
             logging.getLogger(__name__).exception(
-                "failed to resolve plausibility bands for template %s", template_name,
+                "failed to resolve plausibility bands for template %s",
+                template_name,
             )
     _BANDS_CACHE[template_name] = bands
     return bands
@@ -998,11 +1047,21 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         metrics_json=row["metrics_json"] or "{}",
         error=row["error"],
         search_id=(row["search_id"] if "search_id" in keys else None),
-        search_iteration=(row["search_iteration"] if "search_iteration" in keys else None),
+        search_iteration=(
+            row["search_iteration"] if "search_iteration" in keys else None
+        ),
         bias_audit_json=(row["bias_audit_json"] if "bias_audit_json" in keys else None),
-        hypothesis_verdict_json=(row["hypothesis_verdict_json"] if "hypothesis_verdict_json" in keys else None),
-        fold_metrics_json=(row["fold_metrics_json"] if "fold_metrics_json" in keys else None),
-        regime_metrics_json=(row["regime_metrics_json"] if "regime_metrics_json" in keys else None),
+        hypothesis_verdict_json=(
+            row["hypothesis_verdict_json"]
+            if "hypothesis_verdict_json" in keys
+            else None
+        ),
+        fold_metrics_json=(
+            row["fold_metrics_json"] if "fold_metrics_json" in keys else None
+        ),
+        regime_metrics_json=(
+            row["regime_metrics_json"] if "regime_metrics_json" in keys else None
+        ),
         tags_json=(row["tags_json"] if "tags_json" in keys else None),
     )
 
@@ -1021,7 +1080,8 @@ def _row_to_debate(row: sqlite3.Row) -> Debate:
         verdict_json=row["verdict_json"],
         error=row["error"],
         source=(row["source"] if "source" in keys else "user") or "user",
-        evidence_json=(row["evidence_json"] if "evidence_json" in keys else "[]") or "[]",
+        evidence_json=(row["evidence_json"] if "evidence_json" in keys else "[]")
+        or "[]",
     )
 
 
@@ -1062,6 +1122,7 @@ def get_store() -> ExperimentStore:
 # signal's manifest, marking a signal as paused / archived. Keeping the
 # write path inside the SDK lets a notebook export a signal without
 # importing any of the agent stack.
+
 
 @dataclass
 class Signal:
@@ -1124,7 +1185,9 @@ def _row_to_signal(row: sqlite3.Row) -> Signal:
     )
 
 
-def list_signals_db(*, project: Optional[str] = None, status: Optional[str] = None) -> list[Signal]:
+def list_signals_db(
+    *, project: Optional[str] = None, status: Optional[str] = None
+) -> list[Signal]:
     """Read all signals from the registry, optionally filtered.
 
     The dashboard endpoint hits this once per page-load. Sort: most

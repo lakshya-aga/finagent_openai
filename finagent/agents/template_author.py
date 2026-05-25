@@ -49,9 +49,7 @@ class TemplateDraft(BaseModel):
     )
     archetype: str = Field(
         ...,
-        description=(
-            "One of: regime, pairs, trend, long_only, event, vol, custom."
-        ),
+        description=("One of: regime, pairs, trend, long_only, event, vol, custom."),
     )
     title: str = Field(..., description="Human-readable title (3-60 chars).")
     tagline: str = Field(..., description="One-line gallery pitch (≤120 chars).")
@@ -270,7 +268,6 @@ NO explanation text outside the structured output.
 
 
 from finagent.llm import get_model_name
-
 
 template_author_agent = Agent(
     name="TemplateAuthor",

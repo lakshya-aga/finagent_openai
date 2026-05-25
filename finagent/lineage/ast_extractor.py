@@ -37,9 +37,12 @@ from .types import (
     empty_lineage,
 )
 
-
 _BUILTIN_NAMES: set[str] = set(dir(builtins)) | {
-    "self", "cls", "True", "False", "None",
+    "self",
+    "cls",
+    "True",
+    "False",
+    "None",
 }
 
 
@@ -154,63 +157,75 @@ def _handle_statement(
             targets = sorted(_extract_target_names(stmt.targets))
             for tgt in targets:
                 tgt_id = next_id("var_")
-                add_node({
-                    "id": tgt_id,
-                    "label": tgt,
-                    "kind": "data",
-                    "cell_idx": cell_idx,
-                })
+                add_node(
+                    {
+                        "id": tgt_id,
+                        "label": tgt,
+                        "kind": "data",
+                        "cell_idx": cell_idx,
+                    }
+                )
                 for src in inputs:
                     if src in _BUILTIN_NAMES:
                         continue
-                    add_edge({
-                        "id": next_id("e_"),
-                        "src": get_or_create_input(src),
-                        "dst": tgt_id,
-                        "label": "alias",
-                    })
+                    add_edge(
+                        {
+                            "id": next_id("e_"),
+                            "src": get_or_create_input(src),
+                            "dst": tgt_id,
+                            "label": "alias",
+                        }
+                    )
                 symbols[tgt] = tgt_id
     elif isinstance(stmt, ast.AugAssign):
         # ``a += expr`` — same as Assign for our purposes.
         if isinstance(stmt.target, ast.Name):
             target_name = stmt.target.id
             tgt_id = next_id("var_")
-            add_node({
-                "id": tgt_id,
-                "label": target_name,
-                "kind": "data",
-                "cell_idx": cell_idx,
-            })
+            add_node(
+                {
+                    "id": tgt_id,
+                    "label": target_name,
+                    "kind": "data",
+                    "cell_idx": cell_idx,
+                }
+            )
             inputs = sorted(_collect_loaded_names(stmt.value)) + [target_name]
             for src in inputs:
                 if src in _BUILTIN_NAMES:
                     continue
-                add_edge({
-                    "id": next_id("e_"),
-                    "src": get_or_create_input(src),
-                    "dst": tgt_id,
-                    "label": type(stmt.op).__name__.lower(),
-                })
+                add_edge(
+                    {
+                        "id": next_id("e_"),
+                        "src": get_or_create_input(src),
+                        "dst": tgt_id,
+                        "label": type(stmt.op).__name__.lower(),
+                    }
+                )
             symbols[target_name] = tgt_id
     elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
         # Bare call (e.g. plotting). Capture inputs but no produced var.
         call = stmt.value
         fn = _call_label(call)
         call_id = next_id("call_")
-        add_node({
-            "id": call_id,
-            "label": fn,
-            "kind": "call",
-            "cell_idx": cell_idx,
-        })
+        add_node(
+            {
+                "id": call_id,
+                "label": fn,
+                "kind": "call",
+                "cell_idx": cell_idx,
+            }
+        )
         for src in sorted(_collect_loaded_names(call)):
             if src in _BUILTIN_NAMES or src == fn.split(".")[0]:
                 continue
-            add_edge({
-                "id": next_id("e_"),
-                "src": get_or_create_input(src),
-                "dst": call_id,
-            })
+            add_edge(
+                {
+                    "id": next_id("e_"),
+                    "src": get_or_create_input(src),
+                    "dst": call_id,
+                }
+            )
     # else: import / def / class / control flow — ignored on purpose.
 
 
@@ -229,12 +244,14 @@ def _emit_call_assign(
 ) -> None:
     fn = _call_label(call)
     call_id = next_id("call_")
-    add_node({
-        "id": call_id,
-        "label": fn,
-        "kind": "call",
-        "cell_idx": cell_idx,
-    })
+    add_node(
+        {
+            "id": call_id,
+            "label": fn,
+            "kind": "call",
+            "cell_idx": cell_idx,
+        }
+    )
 
     # Inputs: every Name(Load) referenced in the call subtree, minus the
     # callable's own attribute-chain root (so ``df.method(x)`` doesn't
@@ -246,11 +263,13 @@ def _emit_call_assign(
             continue
         # Method-call: still record the bound object as a source — it's
         # the variable the call mutates / reads.
-        add_edge({
-            "id": next_id("e_"),
-            "src": get_or_create_input(src),
-            "dst": call_id,
-        })
+        add_edge(
+            {
+                "id": next_id("e_"),
+                "src": get_or_create_input(src),
+                "dst": call_id,
+            }
+        )
         if src == callable_root:
             # don't duplicate
             pass
@@ -259,18 +278,22 @@ def _emit_call_assign(
     for target in targets:
         for tname in _extract_target_names_one(target):
             var_id = next_id("var_")
-            add_node({
-                "id": var_id,
-                "label": tname,
-                "kind": "data",
-                "cell_idx": cell_idx,
-            })
-            add_edge({
-                "id": next_id("e_"),
-                "src": call_id,
-                "dst": var_id,
-                "label": tname,
-            })
+            add_node(
+                {
+                    "id": var_id,
+                    "label": tname,
+                    "kind": "data",
+                    "cell_idx": cell_idx,
+                }
+            )
+            add_edge(
+                {
+                    "id": next_id("e_"),
+                    "src": call_id,
+                    "dst": var_id,
+                    "label": tname,
+                }
+            )
             symbols[tname] = var_id
 
 

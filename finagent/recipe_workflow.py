@@ -27,12 +27,11 @@ import nbformat
 from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook
 
 from .experiments import get_store
-from .functions.notebook_io import _OUTPUTS_DIR, _get_latest_path, _path_for_recipe
+from .functions.notebook_io import _path_for_recipe
 from .functions.notebook_tools import run_all_cells_to_disk
 from .lineage import extract_lineage_ast
 from .recipes.compiler import compile_recipe
 from .recipes.types import Recipe, recipe_from_yaml
-
 
 _SUMMARY_RE = re.compile(r"^FINAGENT_RUN_SUMMARY\s+(\{.*\})\s*$", re.MULTILINE)
 
@@ -62,20 +61,23 @@ def run_recipe(
         search_id=search_id,
         search_iteration=search_iteration,
     )
-    logging.info("recipe run created id=%s project=%s name=%s",
-                 run.id, recipe.project, recipe.name)
+    logging.info(
+        "recipe run created id=%s project=%s name=%s",
+        run.id,
+        recipe.project,
+        recipe.name,
+    )
 
     try:
         cells = compile_recipe(recipe)
         if cells is None:
             raise ValueError(
-                f"recipe has no template; cannot compile deterministically. "
-                f"Set `template:` to one of: regime_modeling"
+                "recipe has no template; cannot compile deterministically. "
+                "Set `template:` to one of: regime_modeling"
             )
 
         notebook_path = _materialise_notebook(recipe, cells)
-        store.update_run(run.id, status="running",
-                         notebook_path=str(notebook_path))
+        store.update_run(run.id, status="running", notebook_path=str(notebook_path))
 
         result = run_all_cells_to_disk(str(notebook_path), timeout=180)
 
@@ -98,7 +100,8 @@ def run_recipe(
                 f"cell {e['cell_index']}: {e.get('ename')}: {e.get('evalue')}"
                 for e in result.get("errors", [])
             )
-            if result.get("errors") else None
+            if result.get("errors")
+            else None
         )
         store.update_run(
             run.id,
@@ -109,12 +112,16 @@ def run_recipe(
         )
         if fold_metrics:
             try:
-                store.update_run_fold_metrics(run.id, json.dumps(fold_metrics, default=str))
+                store.update_run_fold_metrics(
+                    run.id, json.dumps(fold_metrics, default=str)
+                )
             except Exception:
                 logging.exception("could not persist fold_metrics run_id=%s", run.id)
         if regime_metrics:
             try:
-                store.update_run_regime_metrics(run.id, json.dumps(regime_metrics, default=str))
+                store.update_run_regime_metrics(
+                    run.id, json.dumps(regime_metrics, default=str)
+                )
             except Exception:
                 logging.exception("could not persist regime_metrics run_id=%s", run.id)
 
@@ -176,9 +183,18 @@ def run_recipe(
 # ``null`` rather than crashing, so the metadata stamping never fails a
 # run.
 _PINNED_LIBS = (
-    "pandas", "numpy", "scipy", "scikit-learn", "statsmodels",
-    "hmmlearn", "xgboost", "matplotlib", "yfinance", "findata",
-    "openai", "fastapi",
+    "pandas",
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "statsmodels",
+    "hmmlearn",
+    "xgboost",
+    "matplotlib",
+    "yfinance",
+    "findata",
+    "openai",
+    "fastapi",
 )
 
 
@@ -196,6 +212,7 @@ def _stringify_date(v):
         # Both date and datetime carry isoformat(). isinstance is cheaper
         # than try/except but gets us the same coverage with fewer imports.
         from datetime import date, datetime
+
         if isinstance(v, (date, datetime)):
             return v.isoformat()
     except Exception:
@@ -206,7 +223,7 @@ def _stringify_date(v):
 def _capture_library_versions() -> dict[str, str | None]:
     """Snapshot the exact versions of every pinned library at compile time."""
     try:
-        from importlib.metadata import version, PackageNotFoundError
+        from importlib.metadata import PackageNotFoundError, version
     except Exception:
         return {}
     out: dict[str, str | None] = {}
@@ -292,8 +309,11 @@ def _materialise_notebook(recipe: Recipe, cells) -> Path:
 def _extract_metrics_from_notebook(path: Path) -> dict[str, float]:
     """Tail the saved notebook for the FINAGENT_RUN_SUMMARY stream output."""
     summary = _read_summary(path)
-    return {k: float(v) for k, v in (summary.get("metrics") or {}).items()
-            if isinstance(v, (int, float))}
+    return {
+        k: float(v)
+        for k, v in (summary.get("metrics") or {}).items()
+        if isinstance(v, (int, float))
+    }
 
 
 def _extract_fold_metrics_from_notebook(path: Path) -> list[dict]:
@@ -366,12 +386,18 @@ def _check_one(actual: float | None, op: str, target: float) -> bool:
         return False
     if a != a:  # NaN
         return False
-    if op == ">=": return a >= target
-    if op == ">":  return a >  target
-    if op == "<=": return a <= target
-    if op == "<":  return a <  target
-    if op == "==": return a == target
-    if op == "!=": return a != target
+    if op == ">=":
+        return a >= target
+    if op == ">":
+        return a > target
+    if op == "<=":
+        return a <= target
+    if op == "<":
+        return a < target
+    if op == "==":
+        return a == target
+    if op == "!=":
+        return a != target
     return False
 
 
@@ -398,12 +424,14 @@ def _evaluate_hypothesis(hypothesis, metrics: dict) -> dict:
         passed = _check_one(actual, c.op, c.value)
         if passed:
             cancel_hit = True
-        checks.append({
-            "criterion": c.model_dump(),
-            "actual": actual,
-            "passed": passed,
-            "kind": "cancel",
-        })
+        checks.append(
+            {
+                "criterion": c.model_dump(),
+                "actual": actual,
+                "passed": passed,
+                "kind": "cancel",
+            }
+        )
 
     success_all = bool(hypothesis.success_criteria)
     for c in hypothesis.success_criteria:
@@ -411,12 +439,14 @@ def _evaluate_hypothesis(hypothesis, metrics: dict) -> dict:
         passed = _check_one(actual, c.op, c.value)
         if not passed:
             success_all = False
-        checks.append({
-            "criterion": c.model_dump(),
-            "actual": actual,
-            "passed": passed,
-            "kind": "success",
-        })
+        checks.append(
+            {
+                "criterion": c.model_dump(),
+                "actual": actual,
+                "passed": passed,
+                "kind": "success",
+            }
+        )
 
     if cancel_hit:
         verdict = "CANCEL"
@@ -426,7 +456,9 @@ def _evaluate_hypothesis(hypothesis, metrics: dict) -> dict:
         summary = "Hypothesis confirmed — every pre-registered success criterion held."
     else:
         verdict = "FAIL"
-        summary = "Hypothesis not confirmed — at least one success criterion did not hold."
+        summary = (
+            "Hypothesis not confirmed — at least one success criterion did not hold."
+        )
 
     return {
         "verdict": verdict,
@@ -468,9 +500,7 @@ def _spawn_bias_audit(
 
     def _thread_target() -> None:
         try:
-            asyncio.run(
-                _run_bias_audit_for(run_id, notebook_path, recipe, metrics)
-            )
+            asyncio.run(_run_bias_audit_for(run_id, notebook_path, recipe, metrics))
         except Exception:
             logging.exception("bias audit thread crashed run_id=%s", run_id)
 
@@ -516,9 +546,7 @@ async def _run_bias_audit_for(
             metrics=metrics or {},
             template_name=template_name,
         )
-        get_store().update_run_bias_audit(
-            run_id, json.dumps(verdict.model_dump())
-        )
+        get_store().update_run_bias_audit(run_id, json.dumps(verdict.model_dump()))
         logging.info(
             "bias audit complete run_id=%s verdict=%s", run_id, verdict.verdict
         )
@@ -533,5 +561,6 @@ async def _run_bias_audit_for(
             get_store().update_run_bias_audit(run_id, json.dumps(fallback))
         except Exception:
             logging.exception(
-                "could not persist PENDING fallback for run_id=%s", run_id,
+                "could not persist PENDING fallback for run_id=%s",
+                run_id,
             )

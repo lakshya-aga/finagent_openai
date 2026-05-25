@@ -20,15 +20,13 @@ Event shape (each call to ``emit``):
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
-from agents import Agent, Runner, RunConfig
+from agents import RunConfig, Runner
 from agents.mcp import MCPServerManager
 
 from .agents.debate.agents import (
@@ -38,7 +36,6 @@ from .agents.debate.agents import (
     moderator_agent,
 )
 from .mcp_connections import make_data_mcp
-
 
 EmitFn = Callable[[dict], Awaitable[None]]
 
@@ -51,8 +48,8 @@ async def _noop_emit(_: dict) -> None:
 # real article titles + URLs + values; charts (~50KB base64 per call)
 # are the only outputs that warrant truncation here. The truncated path
 # strips the base64 so we keep title + summary but drop the bytes.
-_OUTPUT_CAP_DEFAULT = 64_000   # ~64 KB per tool output, plenty for news/fundamentals
-_OUTPUT_CAP_CHART = 1_000      # chart base64 stripped — bytes already shown inline
+_OUTPUT_CAP_DEFAULT = 64_000  # ~64 KB per tool output, plenty for news/fundamentals
+_OUTPUT_CAP_CHART = 1_000  # chart base64 stripped — bytes already shown inline
 
 
 def _trim_chart_output(raw: str) -> str:
@@ -75,9 +72,7 @@ def _trim_chart_output(raw: str) -> str:
     return raw[:_OUTPUT_CAP_CHART]
 
 
-def _extract_tool_evidence(
-    result: Any, *, phase: str, speaker: str
-) -> list[dict]:
+def _extract_tool_evidence(result: Any, *, phase: str, speaker: str) -> list[dict]:
     """Walk Runner.run() result.new_items and pair tool-call → tool-output.
 
     Each pair becomes one evidence record with the tool name, arguments,
@@ -100,9 +95,7 @@ def _extract_tool_evidence(
 
         # Tool call (the model decided to invoke a function tool).
         if cls_name == "ToolCallItem" or ri_type in ("function_call", "tool_call"):
-            call_id = (
-                getattr(ri, "call_id", None) or getattr(ri, "id", None) or ""
-            )
+            call_id = getattr(ri, "call_id", None) or getattr(ri, "id", None) or ""
             name = getattr(ri, "name", "") or "tool"
             args = getattr(ri, "arguments", "") or ""
             if isinstance(args, (dict, list)):
@@ -114,7 +107,7 @@ def _extract_tool_evidence(
                 "phase": phase,
                 "speaker": speaker,
                 "tool": str(name),
-                "args": str(args)[:4_000],   # arg blobs are small; 4K cap is generous
+                "args": str(args)[:4_000],  # arg blobs are small; 4K cap is generous
                 "call_id": str(call_id),
                 "ts": now,
             }
@@ -125,9 +118,12 @@ def _extract_tool_evidence(
             base = pending.pop(
                 call_id,
                 {
-                    "phase": phase, "speaker": speaker,
-                    "tool": "unknown", "args": "",
-                    "call_id": str(call_id), "ts": now,
+                    "phase": phase,
+                    "speaker": speaker,
+                    "tool": "unknown",
+                    "args": "",
+                    "call_id": str(call_id),
+                    "ts": now,
                 },
             )
             raw_output = str(getattr(ri, "output", "") or "")
@@ -189,6 +185,7 @@ async def run_debate(
     own_row = debate_id is None
     if own_row:
         from .experiments import get_store
+
         _store = get_store()
         _row = _store.create_debate(
             ticker=ticker,
@@ -221,18 +218,22 @@ async def run_debate(
         """Stream each tool call as its own event so live UIs can append
         them under the right speaker without waiting for the turn to end."""
         for rec in records:
-            await emit({
-                "type": "tool_call",
-                **rec,
-            })
+            await emit(
+                {
+                    "type": "tool_call",
+                    **rec,
+                }
+            )
 
     async def _emit_phase(phase: str, speaker: Optional[str] = None) -> None:
-        await emit({
-            "type": "phase",
-            "phase": phase,
-            "speaker": speaker,
-            "ts": time.time(),
-        })
+        await emit(
+            {
+                "type": "phase",
+                "phase": phase,
+                "speaker": speaker,
+                "ts": time.time(),
+            }
+        )
 
     async def _emit_message(speaker: str, phase: str, text: str) -> None:
         msg = {
@@ -265,12 +266,16 @@ async def run_debate(
             # ─── Bull turn ─────────────────────────────────────────
             phase = f"bull_round_{round_i}"
             await _emit_phase(phase, "bull_analyst")
-            bull_input = opening if round_i == 1 else (
-                f"{opening}\n\n"
-                f"Round {round_i}. Your previous opening was:\n\n{last_bull_text}\n\n"
-                f"The bear's reply was:\n\n{last_bear_text}\n\n"
-                f"Now respond — engage with the bear's specific points, sharpen "
-                f"your thesis, refine the levels."
+            bull_input = (
+                opening
+                if round_i == 1
+                else (
+                    f"{opening}\n\n"
+                    f"Round {round_i}. Your previous opening was:\n\n{last_bull_text}\n\n"
+                    f"The bear's reply was:\n\n{last_bear_text}\n\n"
+                    f"Now respond — engage with the bear's specific points, sharpen "
+                    f"your thesis, refine the levels."
+                )
             )
             async with MCPServerManager([make_data_mcp()]) as mgr:
                 _bull = bull_agent(now_iso, today_str).clone(
@@ -284,7 +289,9 @@ async def run_debate(
                 )
             last_bull_text = bull_result.final_output_as(str)
             bull_ev = _extract_tool_evidence(
-                bull_result, phase=phase, speaker="bull_analyst",
+                bull_result,
+                phase=phase,
+                speaker="bull_analyst",
             )
             evidence.extend(bull_ev)
             await _emit_evidence_batch(bull_ev)
@@ -311,7 +318,9 @@ async def run_debate(
                 )
             last_bear_text = bear_result.final_output_as(str)
             bear_ev = _extract_tool_evidence(
-                bear_result, phase=phase, speaker="bear_analyst",
+                bear_result,
+                phase=phase,
+                speaker="bear_analyst",
             )
             evidence.extend(bear_ev)
             await _emit_evidence_batch(bear_ev)
@@ -331,30 +340,38 @@ async def run_debate(
         )
         _mod = moderator_agent(now_iso, today_str)
         mod_result = await Runner.run(
-            _mod, input=mod_input, run_config=RunConfig(), max_turns=4,
+            _mod,
+            input=mod_input,
+            run_config=RunConfig(),
+            max_turns=4,
         )
         verdict_obj: DebateVerdict = mod_result.final_output_as(DebateVerdict)
         verdict_dict = verdict_obj.model_dump()
         # Moderator typically has no tools (just synthesises), but capture
         # any anyway — keeps the contract consistent for future variants.
         mod_ev = _extract_tool_evidence(
-            mod_result, phase="verdict", speaker="moderator",
+            mod_result,
+            phase="verdict",
+            speaker="moderator",
         )
         if mod_ev:
             evidence.extend(mod_ev)
             await _emit_evidence_batch(mod_ev)
-        await emit({
-            "type": "verdict",
-            "phase": "verdict",
-            "speaker": "moderator",
-            "data": verdict_dict,
-            "ts": time.time(),
-        })
+        await emit(
+            {
+                "type": "verdict",
+                "phase": "verdict",
+                "speaker": "moderator",
+                "data": verdict_dict,
+                "ts": time.time(),
+            }
+        )
         # Persist completion when we own the row (no streaming caller is
         # already doing so).
         if own_row:
             try:
                 from .experiments import get_store
+
                 get_store().update_debate(
                     debate_id,
                     status="completed",
@@ -368,15 +385,18 @@ async def run_debate(
 
     except Exception as exc:
         logging.exception("debate %s failed (ticker=%s)", debate_id, ticker)
-        await emit({
-            "type": "error",
-            "phase": "error",
-            "text": f"{type(exc).__name__}: {exc}",
-            "ts": time.time(),
-        })
+        await emit(
+            {
+                "type": "error",
+                "phase": "error",
+                "text": f"{type(exc).__name__}: {exc}",
+                "ts": time.time(),
+            }
+        )
         if own_row:
             try:
                 from .experiments import get_store
+
                 get_store().update_debate(
                     debate_id,
                     status="failed",

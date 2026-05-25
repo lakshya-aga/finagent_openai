@@ -14,7 +14,6 @@ PortfolioDecision projected to DebateVerdict shape for back-compat).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 import uuid
@@ -23,9 +22,8 @@ from typing import Any, Awaitable, Callable, Optional
 
 from . import nodes
 from .graph import build_panel_graph
-from .schemas import PortfolioDecision, PortfolioRating
+from .schemas import PortfolioRating
 from .state import initial_state
-
 
 logger = logging.getLogger(__name__)
 
@@ -77,19 +75,22 @@ async def run_panel(
 
     nodes.set_emit(emit)
     try:
-        await emit({
-            "type": "started",
-            "panel_id": panel_id,
-            "ticker": ticker,
-            "asset_class": asset_class,
-            "rounds": rounds,
-            "ts": started_at,
-        })
+        await emit(
+            {
+                "type": "started",
+                "panel_id": panel_id,
+                "ticker": ticker,
+                "asset_class": asset_class,
+                "rounds": rounds,
+                "ts": started_at,
+            }
+        )
 
         # ── Optional persistence: create the row up front ──
         if persist:
             try:
                 from finagent.experiments import get_store
+
                 store = get_store()
                 # Reuse the debates table — same UI / API path. The
                 # 'panel' source value lets us filter later.
@@ -109,8 +110,11 @@ async def run_panel(
         # ── Build initial state ──
         today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         state = initial_state(
-            ticker=ticker, asset_class=asset_class,
-            today_iso=today_iso, panel_id=panel_id, rounds=rounds,
+            ticker=ticker,
+            asset_class=asset_class,
+            today_iso=today_iso,
+            panel_id=panel_id,
+            rounds=rounds,
         )
 
         # ── Run the graph ──
@@ -150,25 +154,29 @@ async def run_panel(
             "evidence": final_state.get("evidence", []),
         }
 
-        await emit({
-            "type": "verdict",
-            "phase": "verdict",
-            "speaker": "portfolio_manager",
-            "data": verdict,
-            "ts": finished_at,
-        })
+        await emit(
+            {
+                "type": "verdict",
+                "phase": "verdict",
+                "speaker": "portfolio_manager",
+                "data": verdict,
+                "ts": finished_at,
+            }
+        )
         await emit({"type": "done", "ts": finished_at})
 
         return result
 
     except Exception as exc:
         logger.exception("run_panel failed for %s", ticker)
-        await emit({
-            "type": "error",
-            "phase": "error",
-            "text": f"{type(exc).__name__}: {exc}",
-            "ts": time.time(),
-        })
+        await emit(
+            {
+                "type": "error",
+                "phase": "error",
+                "text": f"{type(exc).__name__}: {exc}",
+                "ts": time.time(),
+            }
+        )
         raise
     finally:
         # Always uninstall the emit hook so a future panel run with a
@@ -181,11 +189,11 @@ async def run_panel(
 
 
 _RATING_TO_ACTION = {
-    PortfolioRating.BUY.value:         "buy",
-    PortfolioRating.OVERWEIGHT.value:  "buy",
-    PortfolioRating.HOLD.value:        "avoid",
+    PortfolioRating.BUY.value: "buy",
+    PortfolioRating.OVERWEIGHT.value: "buy",
+    PortfolioRating.HOLD.value: "avoid",
     PortfolioRating.UNDERWEIGHT.value: "sell",
-    PortfolioRating.SELL.value:        "sell",
+    PortfolioRating.SELL.value: "sell",
 }
 
 
@@ -201,9 +209,13 @@ def _project_to_verdict(decision: dict[str, Any]) -> dict[str, Any]:
     """
     if not decision:
         return {
-            "action": "avoid", "target_price": None, "stoploss": None,
-            "time_horizon": "unknown", "key_metrics": [],
-            "rationale": "Panel produced no decision.", "confidence": 0.0,
+            "action": "avoid",
+            "target_price": None,
+            "stoploss": None,
+            "time_horizon": "unknown",
+            "key_metrics": [],
+            "rationale": "Panel produced no decision.",
+            "confidence": 0.0,
         }
     rating = decision.get("rating") or PortfolioRating.HOLD.value
     return {
@@ -212,9 +224,19 @@ def _project_to_verdict(decision: dict[str, Any]) -> dict[str, Any]:
         "stoploss": decision.get("stop_loss"),
         "time_horizon": decision.get("time_horizon") or "unspecified",
         "key_metrics": [
-            {"name": "rating", "value": rating, "why_it_matters": "5-tier panel rating"},
-            *[{"name": "risk", "value": r[:80], "why_it_matters": "Identified by panel"}
-              for r in (decision.get("key_risks") or [])[:4]],
+            {
+                "name": "rating",
+                "value": rating,
+                "why_it_matters": "5-tier panel rating",
+            },
+            *[
+                {
+                    "name": "risk",
+                    "value": r[:80],
+                    "why_it_matters": "Identified by panel",
+                }
+                for r in (decision.get("key_risks") or [])[:4]
+            ],
         ],
         "rationale": (decision.get("executive_summary") or "")[:600],
         "confidence": float(decision.get("confidence") or 0.0),

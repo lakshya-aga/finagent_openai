@@ -28,18 +28,17 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-
 # Per-1M-token prices in USD. Update when the provider changes their
 # rate card. Source: openai.com/api/pricing (snapshotted 2026-04).
 _PRICING_USD_PER_1M: dict[str, tuple[float, float]] = {
     # model_name : (input, output)
-    "gpt-4o-mini":    (0.150, 0.600),
-    "gpt-4o":         (2.500, 10.000),
-    "gpt-4":          (30.000, 60.000),
-    "gpt-3.5-turbo":  (0.500, 1.500),
+    "gpt-4o-mini": (0.150, 0.600),
+    "gpt-4o": (2.500, 10.000),
+    "gpt-4": (30.000, 60.000),
+    "gpt-3.5-turbo": (0.500, 1.500),
     # gpt-5 is in beta as of this snapshot; pricing is best-known estimate
-    "gpt-5":          (5.000, 20.000),
-    "gpt-5-mini":     (0.250, 1.000),
+    "gpt-5": (5.000, 20.000),
+    "gpt-5-mini": (0.250, 1.000),
 }
 
 
@@ -63,10 +62,9 @@ def estimate_cost_usd(
     if rates is None:
         return 0.0
     in_rate, out_rate = rates
-    return (
-        (prompt_tokens / 1_000_000.0) * in_rate
-        + (completion_tokens / 1_000_000.0) * out_rate
-    )
+    return (prompt_tokens / 1_000_000.0) * in_rate + (
+        completion_tokens / 1_000_000.0
+    ) * out_rate
 
 
 def record_cost_event(
@@ -96,10 +94,14 @@ def record_cost_event(
         prompt_tokens = 0
         completion_tokens = 0
         if usage is not None:
-            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or
-                                (usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0))
-            completion_tokens = int(getattr(usage, "completion_tokens", 0) or
-                                    (usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0))
+            prompt_tokens = int(
+                getattr(usage, "prompt_tokens", 0)
+                or (usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0)
+            )
+            completion_tokens = int(
+                getattr(usage, "completion_tokens", 0)
+                or (usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0)
+            )
         cost_usd = estimate_cost_usd(model, prompt_tokens, completion_tokens)
 
         # Defer the DB import: experiments.py imports finagent.recipes,
@@ -107,6 +109,7 @@ def record_cost_event(
         # the cost_tracking module cheap to import from agents that may
         # not always end up recording.
         from .experiments import get_store
+
         get_store().record_cost_event(
             purpose=purpose,
             provider=provider,
@@ -120,4 +123,6 @@ def record_cost_event(
     except Exception:
         # Never propagate. A misbehaving cost layer must not be allowed
         # to fail the underlying agent run.
-        logging.exception("record_cost_event failed (purpose=%s model=%s)", purpose, model)
+        logging.exception(
+            "record_cost_event failed (purpose=%s model=%s)", purpose, model
+        )

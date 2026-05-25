@@ -37,6 +37,7 @@ def _can_import(name: str) -> bool:
 def _kernel_installed(name: str) -> bool:
     try:
         from jupyter_client.kernelspec import KernelSpecManager
+
         return name in KernelSpecManager().find_kernel_specs()
     except Exception:
         return False
@@ -55,9 +56,16 @@ def _url_reachable(url: str, timeout: float = 0.5) -> bool:
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "needs_yfinance: requires yfinance importable")
-    config.addinivalue_line("markers", "needs_openai: requires openai importable + OPENAI_API_KEY env var")
-    config.addinivalue_line("markers", "needs_finagent_kernel: requires the 'finagent-python' kernelspec installed")
-    config.addinivalue_line("markers", "needs_mcp: requires the data-mcp / fruit-thrower URLs reachable")
+    config.addinivalue_line(
+        "markers", "needs_openai: requires openai importable + OPENAI_API_KEY env var"
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_finagent_kernel: requires the 'finagent-python' kernelspec installed",
+    )
+    config.addinivalue_line(
+        "markers", "needs_mcp: requires the data-mcp / fruit-thrower URLs reachable"
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -75,10 +83,13 @@ def pytest_collection_modifyitems(config, items):
             "'finagent-python' Jupyter kernel not installed",
         ),
         "needs_mcp": (
-            not all(_url_reachable(u) for u in (
-                os.environ.get("FRUIT_THROWER_URL", "http://localhost:8090/mcp/"),
-                os.environ.get("DATA_MCP_URL", "http://localhost:8000/sse"),
-            )),
+            not all(
+                _url_reachable(u)
+                for u in (
+                    os.environ.get("FRUIT_THROWER_URL", "http://localhost:8090/mcp/"),
+                    os.environ.get("DATA_MCP_URL", "http://localhost:8000/sse"),
+                )
+            ),
             "MCP servers not reachable",
         ),
     }
@@ -100,7 +111,9 @@ def isolated_outputs(tmp_path, monkeypatch):
     monkeypatch.setenv("FINAGENT_DB", db_path)
     # Reset any cached panel._store paths so re-importing in a test sees
     # the new env vars.
-    import importlib, sys
+    import importlib
+    import sys
+
     for modname in list(sys.modules):
         if modname.startswith("panel"):
             importlib.reload(sys.modules[modname])

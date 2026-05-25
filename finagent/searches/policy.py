@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import random
 from abc import ABC, abstractmethod
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 from .types import (
     ChoiceDimension,
@@ -37,8 +37,7 @@ class Policy(ABC):
     @abstractmethod
     def propose(
         self, history: list[SearchHistoryEntry]
-    ) -> Optional[dict[str, Any]]:
-        ...
+    ) -> Optional[dict[str, Any]]: ...
 
 
 def _sample_one(rng: random.Random, dim: Dimension) -> Any:
@@ -65,9 +64,7 @@ class RandomPolicy(Policy):
         self.space = space
         self._rng = random.Random(seed)
 
-    def propose(
-        self, history: list[SearchHistoryEntry]
-    ) -> Optional[dict[str, Any]]:
+    def propose(self, history: list[SearchHistoryEntry]) -> Optional[dict[str, Any]]:
         return {dim.path: _sample_one(self._rng, dim) for dim in self.space}
 
 
@@ -86,9 +83,7 @@ class GridPolicy(Policy):
         random.Random(seed).shuffle(cells)
         self._cells = iter(cells)
 
-    def propose(
-        self, history: list[SearchHistoryEntry]
-    ) -> Optional[dict[str, Any]]:
+    def propose(self, history: list[SearchHistoryEntry]) -> Optional[dict[str, Any]]:
         return next(self._cells, None)
 
 
