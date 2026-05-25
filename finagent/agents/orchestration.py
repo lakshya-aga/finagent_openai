@@ -11,9 +11,8 @@ from __future__ import annotations
 from agents import Agent, ModelSettings
 from openai.types.shared.reasoning import Reasoning
 
-from ..mcp_connections import make_data_mcp, make_fruit_thrower, file_search
 from ..functions import add_cell, create_notebook
-
+from ..mcp_connections import file_search, make_data_mcp, make_fruit_thrower
 
 ORCHESTRATION_INSTRUCTIONS = """You are a NOTEBOOK ASSEMBLY AGENT.
 Your responsibility is to assemble and execute a Jupyter notebook
@@ -131,7 +130,6 @@ GENERAL RULES
 
 
 from finagent.llm import get_model_name
-
 
 orchestration_agent = Agent(
     name="Orchestration Agent",

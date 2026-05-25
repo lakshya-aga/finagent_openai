@@ -10,7 +10,7 @@ workflow. Adds a small set of news / web-search function tools so the
 analysts can ground their arguments in live information.
 """
 
-from .agents import bull_agent, bear_agent, moderator_agent
+from .agents import bear_agent, bull_agent, moderator_agent
 from .tools import fetch_gdelt_news, fetch_yfinance_news
 
 __all__ = [

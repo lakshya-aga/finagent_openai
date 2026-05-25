@@ -9,7 +9,6 @@ from typing import Any, Dict, List
 
 from agents import function_tool
 
-
 PROTECTED_PACKAGES = {"findata", "mlfinlab"}
 
 
@@ -46,13 +45,10 @@ def install_packages(packages: List[str]) -> Dict[str, Any]:
     # the validator stops retrying and can take the rewrite-or-escalate path.
     # We deliberately don't try to predict which names are "fake" — only act
     # on what pip actually told us.
-    not_on_pypi = (
-        proc.returncode != 0
-        and (
-            "No matching distribution found" in (proc.stderr or "")
-            or "Could not find a version that satisfies the requirement"
-            in (proc.stderr or "")
-        )
+    not_on_pypi = proc.returncode != 0 and (
+        "No matching distribution found" in (proc.stderr or "")
+        or "Could not find a version that satisfies the requirement"
+        in (proc.stderr or "")
     )
 
     out: Dict[str, Any] = {

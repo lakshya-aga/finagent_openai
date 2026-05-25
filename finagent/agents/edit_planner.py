@@ -5,7 +5,6 @@ from __future__ import annotations
 from agents import Agent, ModelSettings
 from openai.types.shared.reasoning import Reasoning
 
-
 EDIT_PLANNER_INSTRUCTIONS = """You are a NOTEBOOK EDIT PLANNER.
 
 You receive the content of an existing research notebook and a user request for changes.
@@ -43,7 +42,6 @@ RULES
 
 
 from finagent.llm import get_model_name
-
 
 edit_planner = Agent(
     name="EditPlanner",

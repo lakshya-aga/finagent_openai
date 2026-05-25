@@ -74,22 +74,31 @@ class YFinanceSource:
 
         def _fetch() -> dict[str, float]:
             import yfinance as yf
+
             # period='1d', interval='1m' returns intraday bars; we
             # take the last close. Falls back to period='5d' if the
             # intraday call returns empty (after-hours, holiday).
             out: dict[str, float] = {}
             try:
                 df = yf.download(
-                    tickers=tickers, period="1d", interval="1m",
-                    progress=False, auto_adjust=False, group_by="ticker",
+                    tickers=tickers,
+                    period="1d",
+                    interval="1m",
+                    progress=False,
+                    auto_adjust=False,
+                    group_by="ticker",
                     threads=True,
                 )
                 if df is None or df.empty:
                     raise RuntimeError("yfinance returned empty intraday frame")
             except Exception:
                 df = yf.download(
-                    tickers=tickers, period="5d", interval="1d",
-                    progress=False, auto_adjust=False, group_by="ticker",
+                    tickers=tickers,
+                    period="5d",
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=False,
+                    group_by="ticker",
                     threads=True,
                 )
                 if df is None or df.empty:
@@ -111,15 +120,21 @@ class YFinanceSource:
 
     async def get_day_open(self, ticker: str, date: str) -> float | None:
         def _fetch() -> float | None:
-            import yfinance as yf
             import pandas as pd
+            import yfinance as yf
+
             # Pull a slim window around the date so we get the open
             # bar even when the market opened late or had a gap.
             try:
                 df = yf.download(
-                    tickers=ticker, start=date,
-                    end=(pd.Timestamp(date) + pd.Timedelta(days=2)).strftime("%Y-%m-%d"),
-                    interval="1d", progress=False, auto_adjust=False,
+                    tickers=ticker,
+                    start=date,
+                    end=(pd.Timestamp(date) + pd.Timedelta(days=2)).strftime(
+                        "%Y-%m-%d"
+                    ),
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=False,
                 )
                 if df is None or df.empty:
                     return None
@@ -175,6 +190,7 @@ class GrowwSource:
         self._GrowwAPI = GrowwAPI
 
         from . import groww_auth
+
         self._auth = groww_auth
         token = groww_auth.get_token()  # may raise — caller handles
         self._client = GrowwAPI(token)
@@ -211,14 +227,17 @@ class GrowwSource:
             re-mints the token and retries exactly once."""
             try:
                 resp = self._client.get_ltp(
-                    exchange_trading_symbols=bare, segment=self._SEGMENT_CASH,
+                    exchange_trading_symbols=bare,
+                    segment=self._SEGMENT_CASH,
                     timeout=10,
                 )
             except Exception as e:
                 msg = str(e).lower()
                 auth_failed = (
-                    "unauthorized" in msg or "401" in msg
-                    or "invalid token" in msg or "forbidden" in msg
+                    "unauthorized" in msg
+                    or "401" in msg
+                    or "invalid token" in msg
+                    or "forbidden" in msg
                     or "expired" in msg
                 )
                 if not auth_failed:
@@ -235,7 +254,9 @@ class GrowwSource:
 
         ltps, auth_failed = await asyncio.to_thread(_fetch_once)
         if auth_failed:
-            logger.info("paper_trading: GROWW token rejected — re-minting and retrying once")
+            logger.info(
+                "paper_trading: GROWW token rejected — re-minting and retrying once"
+            )
             self._rebuild_after_refresh()
             ltps, _ = await asyncio.to_thread(_fetch_once)
         return ltps
@@ -256,12 +277,16 @@ class GrowwSource:
             except Exception as e:
                 msg = str(e).lower()
                 auth_failed = (
-                    "unauthorized" in msg or "401" in msg
-                    or "invalid token" in msg or "forbidden" in msg
+                    "unauthorized" in msg
+                    or "401" in msg
+                    or "invalid token" in msg
+                    or "forbidden" in msg
                     or "expired" in msg
                 )
                 if not auth_failed:
-                    logger.warning("paper_trading: GROWW get_ohlc failed for %s (%s)", ticker, e)
+                    logger.warning(
+                        "paper_trading: GROWW get_ohlc failed for %s (%s)", ticker, e
+                    )
                 return None, auth_failed
             for _, ohlc in (resp or {}).items():
                 op = ohlc.get("open") if isinstance(ohlc, dict) else None
@@ -320,7 +345,7 @@ def get_quote_source() -> QuoteSource:
         return _singleton
 
     # auto: prefer GROWW when creds are present.
-    has_token  = bool(os.environ.get("GROWW_ACCESS_TOKEN", "").strip())
+    has_token = bool(os.environ.get("GROWW_ACCESS_TOKEN", "").strip())
     has_totp_pair = bool(
         os.environ.get("GROWW_API_KEY", "").strip()
         and os.environ.get("GROWW_TOTP_SECRET", "").strip()
@@ -336,7 +361,8 @@ def get_quote_source() -> QuoteSource:
         except Exception as e:
             logger.warning(
                 "paper_trading: GROWW quote source unavailable (%s) — "
-                "falling back to yfinance", e,
+                "falling back to yfinance",
+                e,
             )
     _singleton = YFinanceSource()
     logger.info("paper_trading: quote source = yfinance (auto; no GROWW creds)")

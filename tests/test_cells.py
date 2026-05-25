@@ -13,9 +13,9 @@ from pathlib import Path
 import nbformat
 import pytest
 
-
 # Load classifier + splitter via importlib so we don't drag in the full
 # finagent.__init__ chain (which eagerly imports the OpenAI SDK).
+
 
 def _load_module(rel_path: str, modname: str):
     spec = importlib.util.spec_from_file_location(modname, rel_path)
@@ -38,26 +38,31 @@ def splitter():
 # ── classifier — single-role detection ─────────────────────────────────
 
 
-@pytest.mark.parametrize("source,expected", [
-    # imports
-    ("import pandas as pd\nimport numpy as np", {"imports"}),
-    ("from sklearn.linear_model import LinearRegression", {"imports"}),
-    # data_load
-    ("df = yf.download('SPY', start='2020-01-01')", {"data_load"}),
-    ("df = pd.read_csv('foo.csv')", {"data_load"}),
-    ("df = panel.load_signal('spy-momentum-252d')", {"data_load"}),
-    # train
-    ("from sklearn.linear_model import LinearRegression\nm = LinearRegression()\nm.fit(X, y)",
-     {"train"}),  # imports inside, but mostly fit
-    ("model = OLS(y, X).fit()", {"train"}),
-    # signal_export
-    ("panel.export_signal('foo', s, metadata={})", {"signal_export"}),
-    ("panel.save_model('foo', m, metadata={})", {"signal_export"}),
-    # chart
-    ("import matplotlib.pyplot as plt\nplt.plot(s)", {"chart"}),
-    # summary
-    ("print('FINAGENT_RUN_SUMMARY ' + json.dumps(s))", {"summary"}),
-])
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        # imports
+        ("import pandas as pd\nimport numpy as np", {"imports"}),
+        ("from sklearn.linear_model import LinearRegression", {"imports"}),
+        # data_load
+        ("df = yf.download('SPY', start='2020-01-01')", {"data_load"}),
+        ("df = pd.read_csv('foo.csv')", {"data_load"}),
+        ("df = panel.load_signal('spy-momentum-252d')", {"data_load"}),
+        # train
+        (
+            "from sklearn.linear_model import LinearRegression\nm = LinearRegression()\nm.fit(X, y)",
+            {"train"},
+        ),  # imports inside, but mostly fit
+        ("model = OLS(y, X).fit()", {"train"}),
+        # signal_export
+        ("panel.export_signal('foo', s, metadata={})", {"signal_export"}),
+        ("panel.save_model('foo', m, metadata={})", {"signal_export"}),
+        # chart
+        ("import matplotlib.pyplot as plt\nplt.plot(s)", {"chart"}),
+        # summary
+        ("print('FINAGENT_RUN_SUMMARY ' + json.dumps(s))", {"summary"}),
+    ],
+)
 def test_classifier_single_role(classifier, source, expected):
     assert expected.issubset(classifier.classify_cell(source))
 
@@ -112,8 +117,7 @@ def test_needs_split_single_role_is_ok(classifier):
 def _build_notebook(cells, path: Path):
     nb = nbformat.v4.new_notebook()
     nb.cells = [
-        nbformat.v4.new_code_cell(c) if isinstance(c, str) else c
-        for c in cells
+        nbformat.v4.new_code_cell(c) if isinstance(c, str) else c for c in cells
     ]
     nbformat.write(nb, str(path))
     return path
@@ -153,15 +157,15 @@ def test_tag_notebook_is_idempotent(classifier, tmp_path):
 
 def test_split_emits_two_scripts(classifier, splitter, tmp_path):
     cells = [
-        "import pandas as pd\nimport panel",                            # imports
-        "df = yf.download('SPY', start='2020-01-01')",                  # data_load
-        "df = df.dropna()",                                             # preprocess
-        "model = OLS(df['y'], df[['x']]).fit()",                        # train
-        "panel.save_model('m', model, metadata={})",                    # signal_export
-        "preds = model.predict(df[['x']])",                             # eval
-        "import matplotlib.pyplot as plt\nplt.plot(preds)",             # chart
+        "import pandas as pd\nimport panel",  # imports
+        "df = yf.download('SPY', start='2020-01-01')",  # data_load
+        "df = df.dropna()",  # preprocess
+        "model = OLS(df['y'], df[['x']]).fit()",  # train
+        "panel.save_model('m', model, metadata={})",  # signal_export
+        "preds = model.predict(df[['x']])",  # eval
+        "import matplotlib.pyplot as plt\nplt.plot(preds)",  # chart
         "panel.export_signal('foo', preds, metadata={'frequency':'daily'})",  # signal_export
-        "print('FINAGENT_RUN_SUMMARY ' + json.dumps({'sharpe': 1.0}))", # summary
+        "print('FINAGENT_RUN_SUMMARY ' + json.dumps({'sharpe': 1.0}))",  # summary
     ]
     nb_path = _build_notebook(cells, tmp_path / "split.ipynb")
     classifier.tag_notebook(nb_path)
@@ -188,7 +192,9 @@ def test_split_emits_two_scripts(classifier, splitter, tmp_path):
     assert "plt.plot" not in infer_src
 
 
-def test_split_emits_load_model_reminder_for_train_only_cell(classifier, splitter, tmp_path):
+def test_split_emits_load_model_reminder_for_train_only_cell(
+    classifier, splitter, tmp_path
+):
     cells = [
         "import pandas as pd",
         "df = pd.DataFrame({'x':[1,2,3],'y':[4,5,6]})",

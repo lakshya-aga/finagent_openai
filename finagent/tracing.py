@@ -65,7 +65,9 @@ def init_tracing() -> bool:
             auto_instrument=True,
         )
     except Exception:
-        logging.exception("phoenix tracing: register() failed; spans will not be exported")
+        logging.exception(
+            "phoenix tracing: register() failed; spans will not be exported"
+        )
         return False
 
     logging.info("phoenix tracing active: project=%s endpoint=%s", project, endpoint)

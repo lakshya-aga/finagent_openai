@@ -41,7 +41,6 @@ Three metrics (Appendix A):
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -52,8 +51,8 @@ logger = logging.getLogger(__name__)
 
 
 # Constants — match the paper.
-TRADE_THRESHOLD = 0.5    # |TMV| trigger
-INIT_CAPITAL    = 1.0    # arbitrary unit notional
+TRADE_THRESHOLD = 0.5  # |TMV| trigger
+INIT_CAPITAL = 1.0  # arbitrary unit notional
 
 
 # ── enriched event frame ───────────────────────────────────────────
@@ -108,7 +107,7 @@ def build_event_frame(
             move = df["price"].iloc[i] - last_ext_price
             tmv[i] = move / (last_ext_price * theta)
             trend[i] = int(np.sign(move))
-    df["TMV"]   = tmv
+    df["TMV"] = tmv
     df["trend"] = trend
 
     # Forward-fill regime; -1 before the first prediction is available.
@@ -134,7 +133,7 @@ def build_event_frame(
 def _run_strategy(
     df: pd.DataFrame,
     *,
-    mode: str,                       # "mean_reverting" | "momentum" | "regime_dependent"
+    mode: str,  # "mean_reverting" | "momentum" | "regime_dependent"
     init_cap: float = INIT_CAPITAL,
     threshold: float = TRADE_THRESHOLD,
 ) -> pd.DataFrame:
@@ -149,27 +148,28 @@ def _run_strategy(
     optimal sizing.
     """
     n = len(df)
-    price  = df["price"].to_numpy(dtype=float)
-    tmv    = df["TMV"].to_numpy(dtype=float)
-    typ    = df["type"].to_numpy(dtype=object)
+    price = df["price"].to_numpy(dtype=float)
+    tmv = df["TMV"].to_numpy(dtype=float)
+    typ = df["type"].to_numpy(dtype=object)
     regime = df["regime"].to_numpy(dtype=int)
 
-    position  = np.zeros(n, dtype=float)
+    position = np.zeros(n, dtype=float)
     asset_cap = np.zeros(n, dtype=float)
-    bank_cap  = np.zeros(n, dtype=float)
+    bank_cap = np.zeros(n, dtype=float)
     total_cap = np.zeros(n, dtype=float)
     daily_ret = np.zeros(n, dtype=float)
     bank_cap[0] = init_cap
     total_cap[0] = init_cap
 
-    is_dcc_event = lambda t: t in ("DCC", "EXT_DCC")
+    def is_dcc_event(t: str) -> bool:
+        return t in ("DCC", "EXT_DCC")
 
     for i in range(1, n):
         if regime[i] == -1:
             # No regime info yet — sit on cash, mirroring the paper.
-            position[i]  = position[i - 1]
+            position[i] = position[i - 1]
             asset_cap[i] = asset_cap[i - 1]
-            bank_cap[i]  = bank_cap[i - 1]
+            bank_cap[i] = bank_cap[i - 1]
         else:
             if position[i - 1] == 0 and abs(tmv[i]) >= threshold:
                 # Open a new position.
@@ -182,37 +182,38 @@ def _run_strategy(
                     direction = -np.sign(tmv[i]) if regime[i] == 0 else +np.sign(tmv[i])
                 else:
                     raise ValueError(f"unknown mode {mode!r}")
-                position[i]  = direction * (total_cap[i - 1] / price[i])
+                position[i] = direction * (total_cap[i - 1] / price[i])
                 asset_cap[i] = position[i] * price[i]
-                bank_cap[i]  = total_cap[i - 1] - asset_cap[i]
+                bank_cap[i] = total_cap[i - 1] - asset_cap[i]
             elif position[i - 1] == 0:
                 # No position, threshold not breached.
-                position[i]  = position[i - 1]
+                position[i] = position[i - 1]
                 asset_cap[i] = position[i] * price[i]
-                bank_cap[i]  = bank_cap[i - 1]
+                bank_cap[i] = bank_cap[i - 1]
             else:
                 # Already in a position — check close conditions.
-                regime_flip = (mode == "regime_dependent"
-                               and regime[i - 1] != regime[i])
+                regime_flip = mode == "regime_dependent" and regime[i - 1] != regime[i]
                 if not regime_flip and not is_dcc_event(typ[i]):
                     # Hold.
-                    position[i]  = position[i - 1]
+                    position[i] = position[i - 1]
                     asset_cap[i] = position[i] * price[i]
-                    bank_cap[i]  = bank_cap[i - 1]
+                    bank_cap[i] = bank_cap[i - 1]
                 else:
                     # Close → all cash.
-                    position[i]  = 0.0
+                    position[i] = 0.0
                     asset_cap[i] = 0.0
-                    bank_cap[i]  = abs(position[i - 1]) * price[i]
+                    bank_cap[i] = abs(position[i - 1]) * price[i]
 
         total_cap[i] = bank_cap[i] + asset_cap[i]
         prev_total = total_cap[i - 1]
-        daily_ret[i] = (total_cap[i] - prev_total) / prev_total if prev_total != 0 else 0.0
+        daily_ret[i] = (
+            (total_cap[i] - prev_total) / prev_total if prev_total != 0 else 0.0
+        )
 
     out = df.copy()
-    out["position"]  = position
+    out["position"] = position
     out["asset_cap"] = asset_cap
-    out["bank_cap"]  = bank_cap
+    out["bank_cap"] = bank_cap
     out["total_cap"] = total_cap
     out["daily_ret"] = daily_ret
     return out
@@ -241,7 +242,7 @@ def profit(total_cap: pd.Series) -> float:
     """(end_capital - start_capital) / start_capital. The paper
     quotes this as the headline "profit" in Table 4."""
     start = float(total_cap.iloc[0])
-    end   = float(total_cap.iloc[-1])
+    end = float(total_cap.iloc[-1])
     return (end - start) / start if start != 0 else 0.0
 
 
@@ -307,9 +308,9 @@ def metrics_summary(out: pd.DataFrame, *, name: str = "strategy") -> dict:
     pos = out["position"].to_numpy()
     entries = int(((np.abs(pos) > 0) & (np.roll(np.abs(pos), 1) == 0)).sum())
     return {
-        "name":    name,
-        "profit":  round(profit(total), 4),
-        "sharpe":  round(sharpe(daily, regime_mask=regime_mask), 2),
-        "mdd":     round(max_drawdown(daily), 4),
+        "name": name,
+        "profit": round(profit(total), 4),
+        "sharpe": round(sharpe(daily, regime_mask=regime_mask), 2),
+        "mdd": round(max_drawdown(daily), 4),
         "n_trades": entries,
     }

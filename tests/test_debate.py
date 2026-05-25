@@ -27,12 +27,10 @@ fetcher SLAs.
 from __future__ import annotations
 
 import base64
-import importlib
 import os
 import sys
 
 import pytest
-
 
 # Make sure data-mcp's findata is importable. The conda env that runs
 # these tests has it installed editable, but on a vanilla host we add
@@ -64,10 +62,15 @@ needs_findata = pytest.mark.skipif(
 @pytest.mark.needs_yfinance
 def test_findata_equity_prices_fetches_known_ticker():
     from findata.equity_prices import get_equity_prices
-    df = get_equity_prices(tickers=["AAPL"], start_date="2026-01-01", end_date="2026-04-01")
+
+    df = get_equity_prices(
+        tickers=["AAPL"], start_date="2026-01-01", end_date="2026-04-01"
+    )
     assert df is not None and not df.empty, "no rows returned for AAPL"
     # Either MultiIndex (ticker × ohlc) or flat ohlc
-    cols = set(c.lower() if not isinstance(c, tuple) else c[0].lower() for c in df.columns)
+    cols = set(
+        c.lower() if not isinstance(c, tuple) else c[0].lower() for c in df.columns
+    )
     assert {"open", "high", "low", "close"} & cols, f"missing OHLC columns, got {cols}"
 
 
@@ -126,18 +129,19 @@ def test_aapl_candlestick_full_yfinance_to_patterns_path():
     so docker invalidates the layer.
     """
     import yfinance as yf
-
     from findata.candlestick_patterns import detect_candlestick_patterns
 
     # 1. Direct yfinance fetch — sanity-check the upstream so a
     #    yfinance-side regression doesn't masquerade as a candlestick bug.
     raw = yf.download(
-        "AAPL", period="3mo", progress=False, auto_adjust=False,
+        "AAPL",
+        period="3mo",
+        progress=False,
+        auto_adjust=False,
     )
     assert raw is not None and not raw.empty, "yfinance returned empty for AAPL"
     cols_lower = {
-        (c.lower() if not isinstance(c, tuple) else c[0].lower())
-        for c in raw.columns
+        (c.lower() if not isinstance(c, tuple) else c[0].lower()) for c in raw.columns
     }
     assert {"open", "high", "low", "close"} & cols_lower, (
         f"missing OHLC columns from yfinance: got {cols_lower}"
@@ -181,12 +185,21 @@ def test_aapl_candlestick_full_yfinance_to_patterns_path():
 @pytest.mark.needs_yfinance
 def test_findata_trend_indicators_returns_features():
     from findata.trend_indicators import compute_trend_indicators
+
     out = compute_trend_indicators("AAPL", window_days=180)
     assert isinstance(out, dict)
     # Trend indicators emit a few well-known fields; we only assert one
     # is present so a vendor field renaming doesn't fail the test.
     keys = set(out.keys())
-    expected_one_of = {"sma_20", "sma_50", "rsi_14", "macd", "atr_14", "summary", "indicators"}
+    expected_one_of = {
+        "sma_20",
+        "sma_50",
+        "rsi_14",
+        "macd",
+        "atr_14",
+        "summary",
+        "indicators",
+    }
     assert keys & expected_one_of, f"no expected indicator keys in {keys}"
 
 
@@ -198,8 +211,8 @@ def test_findata_news_yfinance_returns_records():
     hallucination bug). Either shape is acceptable; we just verify
     it's structured data with the title field present."""
     import pandas as pd
-
     from findata.news_yfinance import get_yfinance_news
+
     news = get_yfinance_news("AAPL", max_records=3)
     assert news is not None
     if isinstance(news, pd.DataFrame):
@@ -208,7 +221,11 @@ def test_findata_news_yfinance_returns_records():
             f"news DataFrame missing title column, got {list(news.columns)}"
         )
     else:
-        records = news.get("news") or news.get("records") or [] if isinstance(news, dict) else news
+        records = (
+            news.get("news") or news.get("records") or []
+            if isinstance(news, dict)
+            else news
+        )
         assert isinstance(records, list)
         if records:
             rec = records[0]
@@ -220,9 +237,12 @@ def test_findata_news_yfinance_returns_records():
 @pytest.mark.needs_yfinance
 def test_findata_factor_loadings_us_ticker():
     from findata.factor_loadings import get_factor_loadings
+
     out = get_factor_loadings("AAPL", factor_model="5", window_days=252)
     assert isinstance(out, dict)
-    assert "loadings" in out or "alpha_daily_pct" in out, f"unexpected shape: {list(out.keys())}"
+    assert "loadings" in out or "alpha_daily_pct" in out, (
+        f"unexpected shape: {list(out.keys())}"
+    )
 
 
 # ── Chart generation ──────────────────────────────────────────────────
@@ -232,6 +252,7 @@ def test_findata_factor_loadings_us_ticker():
 @pytest.mark.needs_yfinance
 def test_findata_ohlc_chart_produces_valid_png():
     from findata.ohlc_chart import plot_ohlc_chart
+
     out = plot_ohlc_chart("AAPL", lookback_days=90)
     assert isinstance(out, dict)
     # plot_ohlc_chart returns {ticker, lookback_days, title, summary,
@@ -266,11 +287,13 @@ def test_trading_panel_runs_for_known_ticker():
     from finagent.agents.trading_panel import run_panel
 
     events = []
+
     async def collect():
         async for ev in run_panel(ticker="AAPL", asset_class="us_equity", rounds=1):
             events.append(ev)
 
     import asyncio
+
     asyncio.run(collect())
 
     # Smoke: at least one phase event + a final verdict.

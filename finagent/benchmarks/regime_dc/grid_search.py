@@ -31,17 +31,17 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import ParameterGrid
 
-from .pipeline import Pipeline, Splits
 from .directional_change import get_data
+from .pipeline import Pipeline, Splits
 
 logger = logging.getLogger(__name__)
 
 
 # Paper's grid (Table 2).
 DEFAULT_GRID: dict = {
-    "theta":        [0.01, 0.015, 0.02],
+    "theta": [0.01, 0.015, 0.02],
     "dc_indicator": ["TMV", "T", "R"],
-    "epsilon":      [0.6, 0.65, 0.7, 0.75, 0.8],
+    "epsilon": [0.6, 0.65, 0.7, 0.75, 0.8],
 }
 
 
@@ -81,7 +81,7 @@ class CustomCrossValidation:
     # Filled by .fit()
     losses: list[dict] = field(init=False, default_factory=list)
     optimal_params: dict | None = field(init=False, default=None)
-    optimal_loss:   dict | None = field(init=False, default=None)
+    optimal_loss: dict | None = field(init=False, default=None)
 
     def fit(self) -> "CustomCrossValidation":
         """Sweep the grid, score each cell on the validation set's
@@ -106,7 +106,9 @@ class CustomCrossValidation:
             except Exception as e:
                 logger.warning(
                     "regime_dc grid: %s %s failed (%s)",
-                    self.classifier, params, e,
+                    self.classifier,
+                    params,
+                    e,
                 )
                 metrics = {"profit": -np.inf, "sharpe": 0.0, "mdd": 0.0, "n_trades": 0}
 
@@ -136,7 +138,11 @@ class CustomCrossValidation:
 
     # Convenience accessor.
     def results_df(self) -> pd.DataFrame:
-        return pd.DataFrame(self.losses).sort_values("profit", ascending=False).reset_index(drop=True)
+        return (
+            pd.DataFrame(self.losses)
+            .sort_values("profit", ascending=False)
+            .reset_index(drop=True)
+        )
 
 
 # ── end-to-end benchmark ───────────────────────────────────────────
@@ -176,7 +182,9 @@ def run_benchmark(
     splits = splits or Splits()
     if prices is None:
         if verbose:
-            print(f"regime_dc.run_benchmark: pulling ^GSPC {splits.train_start} → {splits.test_end}")
+            print(
+                f"regime_dc.run_benchmark: pulling ^GSPC {splits.train_start} → {splits.test_end}"
+            )
         prices = get_data(
             tickers=["^GSPC"],
             start_date=splits.train_start,
@@ -186,15 +194,18 @@ def run_benchmark(
         if verbose:
             print(f"  pulled {len(prices)} semi-daily observations")
 
-    optimal:  dict[str, dict] = {}
-    grids:    dict[str, pd.DataFrame] = {}
+    optimal: dict[str, dict] = {}
+    grids: dict[str, pd.DataFrame] = {}
     table4_rows: list[dict] = []
 
     for c in classifiers:
         if verbose:
             print(f"\nregime_dc.run_benchmark: grid sweep — {c}")
         cv = CustomCrossValidation(
-            prices=prices, classifier=c, splits=splits, verbose=verbose,
+            prices=prices,
+            classifier=c,
+            splits=splits,
+            verbose=verbose,
         ).fit()
         optimal[c] = dict(cv.optimal_params or {})
         grids[c] = cv.results_df()
@@ -203,29 +214,34 @@ def run_benchmark(
         if verbose:
             print(f"  refitting {c} on {optimal[c]} and evaluating on TEST split")
         pipe = Pipeline(
-            prices=prices, splits=splits, classifier=c, eval_on="test",
+            prices=prices,
+            splits=splits,
+            classifier=c,
+            eval_on="test",
             **optimal[c],
         ).fit()
         test_metrics = pipe.evaluate_test()
-        table4_rows.append({
-            "classifier":           c,
-            **{f"opt_{k}": v for k, v in optimal[c].items()},
-            "regime_profit":        test_metrics["regime_dependent"]["profit"],
-            "regime_sharpe":        test_metrics["regime_dependent"]["sharpe"],
-            "regime_mdd":           test_metrics["regime_dependent"]["mdd"],
-            "regime_trades":        test_metrics["regime_dependent"]["n_trades"],
-            "mean_reverting_profit": test_metrics["mean_reverting"]["profit"],
-            "mean_reverting_sharpe": test_metrics["mean_reverting"]["sharpe"],
-            "mean_reverting_mdd":    test_metrics["mean_reverting"]["mdd"],
-            "momentum_profit":       test_metrics["momentum"]["profit"],
-            "momentum_sharpe":       test_metrics["momentum"]["sharpe"],
-            "momentum_mdd":          test_metrics["momentum"]["mdd"],
-        })
+        table4_rows.append(
+            {
+                "classifier": c,
+                **{f"opt_{k}": v for k, v in optimal[c].items()},
+                "regime_profit": test_metrics["regime_dependent"]["profit"],
+                "regime_sharpe": test_metrics["regime_dependent"]["sharpe"],
+                "regime_mdd": test_metrics["regime_dependent"]["mdd"],
+                "regime_trades": test_metrics["regime_dependent"]["n_trades"],
+                "mean_reverting_profit": test_metrics["mean_reverting"]["profit"],
+                "mean_reverting_sharpe": test_metrics["mean_reverting"]["sharpe"],
+                "mean_reverting_mdd": test_metrics["mean_reverting"]["mdd"],
+                "momentum_profit": test_metrics["momentum"]["profit"],
+                "momentum_sharpe": test_metrics["momentum"]["sharpe"],
+                "momentum_mdd": test_metrics["momentum"]["mdd"],
+            }
+        )
 
     table4 = pd.DataFrame(table4_rows)
     return {
-        "optimal":  optimal,
-        "table4":   table4,
-        "grids":    grids,
-        "prices":   prices,
+        "optimal": optimal,
+        "table4": table4,
+        "grids": grids,
+        "prices": prices,
     }

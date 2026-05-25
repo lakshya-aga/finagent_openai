@@ -34,7 +34,7 @@ from typing import Any
 
 import nbformat
 
-from .ast_extractor import _call_label, _collect_loaded_names, _BUILTIN_NAMES
+from .ast_extractor import _BUILTIN_NAMES, _call_label, _collect_loaded_names
 from .types import (
     MAX_EDGES,
     MAX_NODES,
@@ -43,7 +43,6 @@ from .types import (
     LineageNode,
     empty_lineage,
 )
-
 
 # Time cap so a runaway notebook doesn't pin the server. Configurable via
 # env so users debugging long-running cells can extend it.
@@ -239,36 +238,44 @@ def _build_graph_from_timeline(
         for var in new_vars:
             attr = call_attribution.get(var)
             var_id = next_id("var_")
-            add_node({
-                "id": var_id,
-                "label": var,
-                "kind": "data",
-                "cell_idx": cell_idx,
-                "details": details.get(var, ""),
-            })
+            add_node(
+                {
+                    "id": var_id,
+                    "label": var,
+                    "kind": "data",
+                    "cell_idx": cell_idx,
+                    "details": details.get(var, ""),
+                }
+            )
             if attr is not None:
                 fn_name, input_names = attr
                 call_id = next_id("call_")
-                add_node({
-                    "id": call_id,
-                    "label": fn_name,
-                    "kind": "call",
-                    "cell_idx": cell_idx,
-                })
+                add_node(
+                    {
+                        "id": call_id,
+                        "label": fn_name,
+                        "kind": "call",
+                        "cell_idx": cell_idx,
+                    }
+                )
                 for src in input_names:
                     if src in _BUILTIN_NAMES:
                         continue
-                    add_edge({
+                    add_edge(
+                        {
+                            "id": next_id("e_"),
+                            "src": get_or_create_input(src),
+                            "dst": call_id,
+                        }
+                    )
+                add_edge(
+                    {
                         "id": next_id("e_"),
-                        "src": get_or_create_input(src),
-                        "dst": call_id,
-                    })
-                add_edge({
-                    "id": next_id("e_"),
-                    "src": call_id,
-                    "dst": var_id,
-                    "label": var,
-                })
+                        "src": call_id,
+                        "dst": var_id,
+                        "label": var,
+                    }
+                )
             symbols[var] = var_id
 
         for var in mutated_vars:
@@ -276,34 +283,42 @@ def _build_graph_from_timeline(
             # the variable as input + output. Preserves continuity.
             attr = call_attribution.get(var)
             call_id = next_id("call_")
-            add_node({
-                "id": call_id,
-                "label": (attr[0] if attr else "<mutation>"),
-                "kind": "call",
-                "cell_idx": cell_idx,
-            })
+            add_node(
+                {
+                    "id": call_id,
+                    "label": (attr[0] if attr else "<mutation>"),
+                    "kind": "call",
+                    "cell_idx": cell_idx,
+                }
+            )
             old_id = symbols.get(var)
             if old_id is None:
                 old_id = get_or_create_input(var)
-            add_edge({
-                "id": next_id("e_"),
-                "src": old_id,
-                "dst": call_id,
-            })
+            add_edge(
+                {
+                    "id": next_id("e_"),
+                    "src": old_id,
+                    "dst": call_id,
+                }
+            )
             new_id = next_id("var_")
-            add_node({
-                "id": new_id,
-                "label": var,
-                "kind": "data",
-                "cell_idx": cell_idx,
-                "details": details.get(var, ""),
-            })
-            add_edge({
-                "id": next_id("e_"),
-                "src": call_id,
-                "dst": new_id,
-                "label": "mutated",
-            })
+            add_node(
+                {
+                    "id": new_id,
+                    "label": var,
+                    "kind": "data",
+                    "cell_idx": cell_idx,
+                    "details": details.get(var, ""),
+                }
+            )
+            add_edge(
+                {
+                    "id": next_id("e_"),
+                    "src": call_id,
+                    "dst": new_id,
+                    "label": "mutated",
+                }
+            )
             symbols[var] = new_id
 
     src_set = {e.get("src") for e in edges}

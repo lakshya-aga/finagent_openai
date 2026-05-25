@@ -41,19 +41,31 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterable
 
 import nbformat
-
 
 logger = logging.getLogger(__name__)
 
 
 # Cells with at least one of these roles go into train.py.
-_TRAIN_ROLES = {"imports", "data_load", "preprocess", "train", "signal_export", "summary"}
+_TRAIN_ROLES = {
+    "imports",
+    "data_load",
+    "preprocess",
+    "train",
+    "signal_export",
+    "summary",
+}
 
 # Cells with at least one of these roles go into infer.py.
-_INFER_ROLES = {"imports", "data_load", "preprocess", "eval", "signal_export", "summary"}
+_INFER_ROLES = {
+    "imports",
+    "data_load",
+    "preprocess",
+    "eval",
+    "signal_export",
+    "summary",
+}
 
 
 def _cell_roles(cell) -> set[str]:
@@ -68,7 +80,9 @@ def _is_executable_code(cell) -> bool:
     return True
 
 
-def split_notebook(notebook_path: Path, *, output_dir: Path | None = None) -> dict[str, Path]:
+def split_notebook(
+    notebook_path: Path, *, output_dir: Path | None = None
+) -> dict[str, Path]:
     """Walk ``notebook_path`` and emit ``train.py`` + ``infer.py``.
 
     Parameters
@@ -134,7 +148,8 @@ def split_notebook(notebook_path: Path, *, output_dir: Path | None = None) -> di
         logger.warning(
             "split_notebook: %d cells in %s had no role tags — re-run "
             "classifier.tag_notebook(...) first",
-            untagged, notebook_path.name,
+            untagged,
+            notebook_path.name,
         )
 
     train_path = output_dir / "train.py"

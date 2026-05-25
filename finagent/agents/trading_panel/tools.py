@@ -20,10 +20,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 
 from langchain_core.tools import tool
-
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +37,12 @@ def _safe_call(fn_name: str, fn, **kwargs) -> str:
         result = fn(**kwargs)
     except Exception as exc:
         logger.exception("trading_panel tool %s failed", fn_name)
-        return json.dumps({
-            "error": f"{type(exc).__name__}: {exc}",
-            "tool": fn_name,
-        })
+        return json.dumps(
+            {
+                "error": f"{type(exc).__name__}: {exc}",
+                "tool": fn_name,
+            }
+        )
     return json.dumps(result, default=str)
 
 
@@ -73,8 +73,9 @@ def fetch_yfinance_news(ticker: str, max_records: int = 15) -> str:
             "articles": df.reset_index().to_dict(orient="records"),
         }
 
-    return _safe_call("fetch_yfinance_news", _call,
-                      ticker=ticker, max_records=max_records)
+    return _safe_call(
+        "fetch_yfinance_news", _call, ticker=ticker, max_records=max_records
+    )
 
 
 @tool
@@ -115,11 +116,14 @@ def fetch_gdelt_news(
         return out
 
     sector = sector_query if sector_query else None
-    return _safe_call("fetch_gdelt_news", _call,
-                      company_query=company_query,
-                      sector_query=sector,
-                      days=days,
-                      max_records=max_records)
+    return _safe_call(
+        "fetch_gdelt_news",
+        _call,
+        company_query=company_query,
+        sector_query=sector,
+        days=days,
+        max_records=max_records,
+    )
 
 
 # ── Fundamentals ────────────────────────────────────────────────────
@@ -134,12 +138,15 @@ def fetch_equity_fundamentals(ticker: str) -> str:
     free_cash_flow, operating_cash, dividend_yield, payout_ratio, beta,
     current_price, 52w high/low. JSON."""
     from findata.fundamentals import get_equity_fundamentals
+
     # findata.get_equity_fundamentals takes a LIST of tickers and returns
     # a DataFrame; one row per ticker. Wrap the singular @tool param into
     # a list and convert the row-frame to a dict for the agent.
     return _safe_call(
         "fetch_equity_fundamentals",
-        lambda **kw: get_equity_fundamentals(tickers=[kw["ticker"]]).to_dict(orient="index"),
+        lambda **kw: get_equity_fundamentals(tickers=[kw["ticker"]]).to_dict(
+            orient="index"
+        ),
         ticker=ticker,
     )
 
@@ -150,9 +157,12 @@ def fetch_analyst_consensus(ticker: str) -> str:
     implied upside %, recommendation key (strong_buy/buy/hold/.../sell),
     recommendation mean (1=strong_buy, 5=sell), # analysts. JSON."""
     from findata.analyst_consensus import get_analyst_consensus
+
     return _safe_call(
         "fetch_analyst_consensus",
-        lambda **kw: get_analyst_consensus(tickers=[kw["ticker"]]).to_dict(orient="index"),
+        lambda **kw: get_analyst_consensus(tickers=[kw["ticker"]]).to_dict(
+            orient="index"
+        ),
         ticker=ticker,
     )
 
@@ -162,9 +172,14 @@ def fetch_earnings_calendar(ticker: str) -> str:
     """Past + upcoming earnings rows. Each row: date, EPS estimate,
     EPS actual, surprise %, is_past flag. JSON."""
     from findata.earnings_calendar import get_earnings_calendar
+
     return _safe_call(
         "fetch_earnings_calendar",
-        lambda **kw: get_earnings_calendar(ticker=kw["ticker"]).reset_index().to_dict(orient="records"),
+        lambda **kw: (
+            get_earnings_calendar(ticker=kw["ticker"])
+            .reset_index()
+            .to_dict(orient="records")
+        ),
         ticker=ticker,
     )
 
@@ -175,12 +190,15 @@ def fetch_returns_stats(ticker: str, window_days: int = 252) -> str:
     rolling window. window_days default 252 (~1y trading days). JSON.
     Note: parameter is ``window_days`` (matches findata signature)."""
     from findata.returns_stats import compute_returns_stats
+
     return _safe_call(
         "fetch_returns_stats",
         lambda **kw: compute_returns_stats(
-            ticker=kw["ticker"], window_days=kw["window_days"],
+            ticker=kw["ticker"],
+            window_days=kw["window_days"],
         ).to_dict(),
-        ticker=ticker, window_days=window_days,
+        ticker=ticker,
+        window_days=window_days,
     )
 
 
@@ -224,9 +242,13 @@ def fetch_factor_loadings(
     summary, disclaimer, status}.
     """
     from findata.factor_loadings import get_factor_loadings
+
     return _safe_call(
-        "fetch_factor_loadings", get_factor_loadings,
-        ticker=ticker, factor_model=factor_model, window_days=window_days,
+        "fetch_factor_loadings",
+        get_factor_loadings,
+        ticker=ticker,
+        factor_model=factor_model,
+        window_days=window_days,
     )
 
 
@@ -239,8 +261,10 @@ def compute_trend_indicators(ticker: str, window_days: int = 252) -> str:
     Includes semantic flags (golden_cross, oversold, etc.). JSON.
     Note: parameter is ``window_days`` (matches findata signature)."""
     from findata.trend_indicators import compute_trend_indicators as _ti
-    return _safe_call("compute_trend_indicators", _ti,
-                      ticker=ticker, window_days=window_days)
+
+    return _safe_call(
+        "compute_trend_indicators", _ti, ticker=ticker, window_days=window_days
+    )
 
 
 @tool
@@ -252,9 +276,14 @@ def compute_support_resistance(
     """Algorithmic S/R levels with touch counts + nearest support / resistance
     for the current price. Uses scipy.signal.find_peaks + KMeans. JSON."""
     from findata.support_resistance import compute_support_resistance as _sr
-    return _safe_call("compute_support_resistance", _sr,
-                      ticker=ticker, lookback_days=lookback_days,
-                      n_levels=n_levels)
+
+    return _safe_call(
+        "compute_support_resistance",
+        _sr,
+        ticker=ticker,
+        lookback_days=lookback_days,
+        n_levels=n_levels,
+    )
 
 
 @tool
@@ -262,8 +291,13 @@ def detect_candlestick_patterns(ticker: str, lookback_days: int = 60) -> str:
     """pandas-ta cdl_pattern("all"): all ~60 patterns with bullish/bearish
     flags + dates. JSON."""
     from findata.candlestick_patterns import detect_candlestick_patterns as _detect
-    return _safe_call("detect_candlestick_patterns", _detect,
-                      ticker=ticker, lookback_days=lookback_days)
+
+    return _safe_call(
+        "detect_candlestick_patterns",
+        _detect,
+        ticker=ticker,
+        lookback_days=lookback_days,
+    )
 
 
 @tool
@@ -271,8 +305,10 @@ def compute_trend_regime(ticker: str, window_days: int = 252) -> str:
     """Hurst exponent (R/S) + linear-regression drift over the window.
     Classifies regime as trending / mean-reverting / random. JSON."""
     from findata.trend_regime import compute_trend_regime as _tr
-    return _safe_call("compute_trend_regime", _tr,
-                      ticker=ticker, window_days=window_days)
+
+    return _safe_call(
+        "compute_trend_regime", _tr, ticker=ticker, window_days=window_days
+    )
 
 
 @tool
@@ -285,9 +321,14 @@ def arima_forecast(
     neutral signal. Returns JSON {best_order, signal, forecast_return_pct,
     summary, ...}. Use as a quantitative anchor in your KEY DATA section."""
     from findata.arima_forecast import fit_arima_forecast as _fit
-    return _safe_call("arima_forecast", _fit,
-                      ticker=ticker, lookback_days=lookback_days,
-                      forecast_days=forecast_days)
+
+    return _safe_call(
+        "arima_forecast",
+        _fit,
+        ticker=ticker,
+        lookback_days=lookback_days,
+        forecast_days=forecast_days,
+    )
 
 
 @tool
@@ -307,6 +348,7 @@ def fetch_macro_snapshot(country: str = "US") -> str:
     groups (theme → [labels]), summary (one-line regime read), as_of.
     """
     from findata.macro_indicators import get_macro_snapshot
+
     return _safe_call("fetch_macro_snapshot", get_macro_snapshot, country=country)
 
 
@@ -320,6 +362,7 @@ def fetch_yield_curve() -> str:
     Returns JSON: {today: [{tenor, yield}], one_year_ago: [...], summary}.
     """
     from findata.macro_indicators import get_yield_curve
+
     return _safe_call("fetch_yield_curve", get_yield_curve)
 
 
@@ -344,6 +387,7 @@ def fetch_sector_exposure(ticker: str) -> str:
     example_tickers, sources, table_version, disclaimer}.
     """
     from findata.sector_exposure import get_sector_exposure
+
     return _safe_call("fetch_sector_exposure", get_sector_exposure, ticker=ticker)
 
 
@@ -375,9 +419,12 @@ def fetch_world_themes(themes: list[str] | None = None, days: int = 7) -> str:
     summary, errors}.
     """
     from findata.world_themes import get_world_themes
+
     return _safe_call(
-        "fetch_world_themes", get_world_themes,
-        themes=themes, days=days,
+        "fetch_world_themes",
+        get_world_themes,
+        themes=themes,
+        days=days,
     )
 
 
@@ -398,9 +445,15 @@ def plot_ohlc_chart(
     primary visual the user sees.
     """
     from findata.ohlc_chart import plot_ohlc_chart as _plot
-    return _safe_call("plot_ohlc_chart", _plot,
-                      ticker=ticker, lookback_days=lookback_days,
-                      with_sr=with_sr, with_indicators=with_indicators)
+
+    return _safe_call(
+        "plot_ohlc_chart",
+        _plot,
+        ticker=ticker,
+        lookback_days=lookback_days,
+        with_sr=with_sr,
+        with_indicators=with_indicators,
+    )
 
 
 # ── Tool kits per analyst role ──────────────────────────────────────
@@ -424,7 +477,7 @@ MARKET_TOOLS = [
     # a long subsequent LLM inference. arima_forecast() still exists
     # as an importable tool — re-add to this list once we've found a
     # safer integration pattern (smaller output, async caching, etc.).
-    plot_ohlc_chart,            # our visual layer — TradingAgents doesn't have this
+    plot_ohlc_chart,  # our visual layer — TradingAgents doesn't have this
 ]
 
 NEWS_TOOLS = [
@@ -449,12 +502,22 @@ MACRO_TOOLS = [
 
 
 __all__ = [
-    "fetch_yfinance_news", "fetch_gdelt_news",
-    "fetch_equity_fundamentals", "fetch_analyst_consensus",
-    "fetch_earnings_calendar", "fetch_returns_stats",
-    "compute_trend_indicators", "compute_support_resistance",
-    "detect_candlestick_patterns", "compute_trend_regime",
-    "arima_forecast", "plot_ohlc_chart",
-    "fetch_macro_snapshot", "fetch_yield_curve",
-    "MARKET_TOOLS", "NEWS_TOOLS", "FUNDAMENTALS_TOOLS", "MACRO_TOOLS",
+    "fetch_yfinance_news",
+    "fetch_gdelt_news",
+    "fetch_equity_fundamentals",
+    "fetch_analyst_consensus",
+    "fetch_earnings_calendar",
+    "fetch_returns_stats",
+    "compute_trend_indicators",
+    "compute_support_resistance",
+    "detect_candlestick_patterns",
+    "compute_trend_regime",
+    "arima_forecast",
+    "plot_ohlc_chart",
+    "fetch_macro_snapshot",
+    "fetch_yield_curve",
+    "MARKET_TOOLS",
+    "NEWS_TOOLS",
+    "FUNDAMENTALS_TOOLS",
+    "MACRO_TOOLS",
 ]

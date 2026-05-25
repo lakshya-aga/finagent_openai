@@ -34,33 +34,38 @@ def _first_numeric_frame(locals_kw: dict[str, Any]) -> pd.DataFrame:
     for v in locals_kw.values():
         if isinstance(v, pd.DataFrame) and v.select_dtypes("number").shape[1] > 0:
             return v
-    raise RuntimeError("no numeric DataFrame in scope; declare an explicit `asset=` arg")
+    raise RuntimeError(
+        "no numeric DataFrame in scope; declare an explicit `asset=` arg"
+    )
 
 
 # ── Builders ────────────────────────────────────────────────────────────
 
 
-def _returns_lookback(window: int = 1, asset: pd.DataFrame | None = None,
-                      **locals_kw: Any) -> pd.DataFrame:
+def _returns_lookback(
+    window: int = 1, asset: pd.DataFrame | None = None, **locals_kw: Any
+) -> pd.DataFrame:
     df = asset if asset is not None else _first_numeric_frame(locals_kw)
-    out = df.select_dtypes("number").pct_change(window).rename(
-        columns=lambda c: f"{c}_ret_{window}d"
+    out = (
+        df.select_dtypes("number")
+        .pct_change(window)
+        .rename(columns=lambda c: f"{c}_ret_{window}d")
     )
     return out
 
 
-def _rolling_vol(window: int = 20, asset: pd.DataFrame | None = None,
-                 **locals_kw: Any) -> pd.DataFrame:
+def _rolling_vol(
+    window: int = 20, asset: pd.DataFrame | None = None, **locals_kw: Any
+) -> pd.DataFrame:
     df = asset if asset is not None else _first_numeric_frame(locals_kw)
     rets = df.select_dtypes("number").pct_change()
-    out = rets.rolling(window).std().rename(
-        columns=lambda c: f"{c}_vol_{window}d"
-    )
+    out = rets.rolling(window).std().rename(columns=lambda c: f"{c}_vol_{window}d")
     return out
 
 
-def _zscore(window: int = 60, asset: pd.DataFrame | None = None,
-            **locals_kw: Any) -> pd.DataFrame:
+def _zscore(
+    window: int = 60, asset: pd.DataFrame | None = None, **locals_kw: Any
+) -> pd.DataFrame:
     df = asset if asset is not None else _first_numeric_frame(locals_kw)
     nums = df.select_dtypes("number")
     rolling_mean = nums.rolling(window).mean()
@@ -71,8 +76,9 @@ def _zscore(window: int = 60, asset: pd.DataFrame | None = None,
     return out
 
 
-def _macro_z_scores(window: int = 252, source: pd.DataFrame | None = None,
-                    **locals_kw: Any) -> pd.DataFrame:
+def _macro_z_scores(
+    window: int = 252, source: pd.DataFrame | None = None, **locals_kw: Any
+) -> pd.DataFrame:
     """Z-score every column of the named macro frame."""
     df = source if source is not None else _first_numeric_frame(locals_kw)
     nums = df.select_dtypes("number")

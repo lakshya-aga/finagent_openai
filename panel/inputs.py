@@ -31,7 +31,6 @@ from typing import Any, Callable
 
 from . import models as _models
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -82,6 +81,8 @@ def get_inference_inputs(
     )
     logger.info(
         "panel.get_inference_inputs: signal=%s window=%s..%s",
-        signal_name, window[0], window[1],
+        signal_name,
+        window[0],
+        window[1],
     )
     return fetch_fn(window)

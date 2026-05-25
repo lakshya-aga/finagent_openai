@@ -39,7 +39,9 @@ def book_returns(weights: pd.DataFrame, returns: pd.DataFrame) -> pd.Series:
     if weights is None or returns is None:
         return pd.Series(dtype=float)
     if weights.empty or returns.empty:
-        return pd.Series(dtype=float, index=returns.index if returns is not None else None)
+        return pd.Series(
+            dtype=float, index=returns.index if returns is not None else None
+        )
     common_cols = weights.columns.intersection(returns.columns)
     if len(common_cols) == 0:
         return pd.Series(0.0, index=returns.index)
@@ -215,7 +217,9 @@ def summary(
         "total_return": total_return(book),
         "annual_return": annual_return(book, periods_per_year=periods_per_year),
         "sharpe": sharpe(book, risk_free=risk_free, periods_per_year=periods_per_year),
-        "sortino": sortino(book, risk_free=risk_free, periods_per_year=periods_per_year),
+        "sortino": sortino(
+            book, risk_free=risk_free, periods_per_year=periods_per_year
+        ),
         "max_drawdown": max_drawdown(book),
         "calmar": calmar(book, periods_per_year=periods_per_year),
         "turnover": turnover(weights),
@@ -249,12 +253,19 @@ def value_book(
     ranks = cum.rank(axis=1, pct=True)
     long_mask = (ranks <= bottom_quantile).astype(float)
     if long_only:
-        weights = long_mask.div(long_mask.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+        weights = long_mask.div(
+            long_mask.sum(axis=1).replace(0, np.nan), axis=0
+        ).fillna(0.0)
     else:
         short_mask = (ranks >= (1.0 - bottom_quantile)).astype(float)
-        weights = (long_mask - short_mask).div(
-            (long_mask + short_mask).sum(axis=1).replace(0, np.nan), axis=0,
-        ).fillna(0.0)
+        weights = (
+            (long_mask - short_mask)
+            .div(
+                (long_mask + short_mask).sum(axis=1).replace(0, np.nan),
+                axis=0,
+            )
+            .fillna(0.0)
+        )
     return weights
 
 
@@ -279,12 +290,19 @@ def momentum_book(
     ranks = cum_skip.rank(axis=1, pct=True)
     long_mask = (ranks >= (1.0 - top_quantile)).astype(float)
     if long_only:
-        weights = long_mask.div(long_mask.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+        weights = long_mask.div(
+            long_mask.sum(axis=1).replace(0, np.nan), axis=0
+        ).fillna(0.0)
     else:
         short_mask = (ranks <= top_quantile).astype(float)
-        weights = (long_mask - short_mask).div(
-            (long_mask + short_mask).sum(axis=1).replace(0, np.nan), axis=0,
-        ).fillna(0.0)
+        weights = (
+            (long_mask - short_mask)
+            .div(
+                (long_mask + short_mask).sum(axis=1).replace(0, np.nan),
+                axis=0,
+            )
+            .fillna(0.0)
+        )
     return weights
 
 

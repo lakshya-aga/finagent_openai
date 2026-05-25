@@ -12,9 +12,9 @@ Two methods, same output shape — wire either into the UI and let users compare
              needing a third-party tracer like lineapy.
 """
 
-from .types import Lineage, LineageEdge, LineageNode
 from .ast_extractor import extract_lineage_ast
 from .runtime_extractor import extract_lineage_runtime
+from .types import Lineage, LineageEdge, LineageNode
 
 __all__ = [
     "Lineage",

@@ -19,8 +19,7 @@ from __future__ import annotations
 from agents import Agent, ModelSettings
 from openai.types.shared.reasoning import Reasoning
 
-from ..mcp_connections import make_data_mcp, make_fruit_thrower, file_search
-
+from ..mcp_connections import file_search, make_data_mcp, make_fruit_thrower
 
 ANALYSIS_PLANNER_INSTRUCTIONS = """You are an AD-HOC ANALYSIS planner.
 Your job is to convert a user's analysis / plot / computation request into a
@@ -80,7 +79,6 @@ PLANNING HEURISTICS
 
 
 from finagent.llm import get_model_name
-
 
 analysis_planner = Agent(
     name="AnalysisPlanner",

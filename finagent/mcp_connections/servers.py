@@ -24,7 +24,6 @@ from agents.mcp import (
     MCPServerStreamableHttpParams,
 )
 
-
 FRUIT_THROWER_URL = os.environ.get("FRUIT_THROWER_URL", "http://localhost:8090/mcp/")
 DATA_MCP_URL = os.environ.get("DATA_MCP_URL", "http://localhost:8000/sse")
 
@@ -37,7 +36,12 @@ FRUIT_THROWER_TOOLS = [
     "get_index_stats",
     "generate_function",
 ]
-DATA_MCP_TOOLS = ["search_tools", "get_tool_doc", "list_all_tools", "request_data_source"]
+DATA_MCP_TOOLS = [
+    "search_tools",
+    "get_tool_doc",
+    "list_all_tools",
+    "request_data_source",
+]
 
 
 def make_fruit_thrower() -> MCPServerStreamableHttp:

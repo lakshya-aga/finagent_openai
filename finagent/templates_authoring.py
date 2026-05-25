@@ -24,16 +24,14 @@ import json
 import logging
 import re
 import shutil
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from agents import Runner
 
 from .agents.template_author import template_author_agent
-
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +77,12 @@ async def draft_template(description: str) -> dict[str, Any]:
     try:
         result = await Runner.run(
             template_author_agent,
-            input=[{
-                "role": "user",
-                "content": [{"type": "input_text", "text": description.strip()}],
-            }],
+            input=[
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": description.strip()}],
+                }
+            ],
             max_turns=4,
         )
     except Exception as exc:
@@ -108,7 +108,9 @@ async def draft_template(description: str) -> dict[str, Any]:
         slug = f"{slug or 'template'}_{uuid.uuid4().hex[:6]}"
     source = getattr(draft, "python_source", "") or ""
 
-    errors = _validate_source(source, expected_template_name=draft.template_name or slug)
+    errors = _validate_source(
+        source, expected_template_name=draft.template_name or slug
+    )
     metadata = {
         "slug": slug,
         "template_name": draft.template_name,
@@ -155,14 +157,16 @@ def list_drafts() -> list[dict[str, Any]]:
             source = py_file.read_text()
         except OSError:
             source = ""
-        out.append({
-            "slug": py_file.stem,
-            "path": str(py_file),
-            "metadata": meta,
-            "source_preview": source[:1200],
-            "size": len(source),
-            "mtime": py_file.stat().st_mtime,
-        })
+        out.append(
+            {
+                "slug": py_file.stem,
+                "path": str(py_file),
+                "metadata": meta,
+                "source_preview": source[:1200],
+                "size": len(source),
+                "mtime": py_file.stat().st_mtime,
+            }
+        )
     return sorted(out, key=lambda d: d["mtime"], reverse=True)
 
 
@@ -287,6 +291,7 @@ def _validate_source(source: str, expected_template_name: str) -> list[str]:
             # *before* exec_module runs, otherwise the import machinery
             # can't resolve __package__.
             import sys as _sys
+
             _sys.modules[module_name] = module
             try:
                 spec.loader.exec_module(module)
@@ -334,8 +339,7 @@ def _validate_source(source: str, expected_template_name: str) -> list[str]:
             cells = module.compile(sample_recipe)
         except Exception as exc:
             errors.append(
-                f"compile() raised on the first preset: "
-                f"{type(exc).__name__}: {exc}"
+                f"compile() raised on the first preset: {type(exc).__name__}: {exc}"
             )
             return errors
 
@@ -347,10 +351,14 @@ def _validate_source(source: str, expected_template_name: str) -> list[str]:
             ctype = getattr(cell, "cell_type", None)
             content = getattr(cell, "content", None)
             if ctype not in ("code", "markdown"):
-                errors.append(f"cell {i}: cell_type must be 'code' or 'markdown', got {ctype!r}")
+                errors.append(
+                    f"cell {i}: cell_type must be 'code' or 'markdown', got {ctype!r}"
+                )
                 continue
             if not isinstance(content, str):
-                errors.append(f"cell {i}: content must be a string, got {type(content).__name__}")
+                errors.append(
+                    f"cell {i}: content must be a string, got {type(content).__name__}"
+                )
                 continue
             if ctype != "code":
                 continue

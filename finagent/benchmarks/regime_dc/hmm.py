@@ -26,7 +26,6 @@ behaviours worth flagging:
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -84,7 +83,9 @@ def fit_hmm(
     return regimes, best
 
 
-def standardize_regime_labels(regimes: pd.Series, *, verbose: bool = False) -> pd.Series:
+def standardize_regime_labels(
+    regimes: pd.Series, *, verbose: bool = False
+) -> pd.Series:
     """Flip labels so regime 0 is always the long-run majority state.
 
     Mirrors the paper's ``standardize_regime_labels``. The flip is a
@@ -123,16 +124,19 @@ def standardize_regime_labels(regimes: pd.Series, *, verbose: bool = False) -> p
             duration_initial += (time - prev_time).total_seconds()
         prev_time = time
 
-    frac_initial = duration_initial / total_duration_seconds if total_duration_seconds else 0.0
+    frac_initial = (
+        duration_initial / total_duration_seconds if total_duration_seconds else 0.0
+    )
     if verbose:
         logger.info(
             "regime_dc.standardize: initial=%d frac=%.3f total_secs=%.0f",
-            int(initial_regime), frac_initial, total_duration_seconds,
+            int(initial_regime),
+            frac_initial,
+            total_duration_seconds,
         )
 
-    flip = (
-        (initial_regime == 0 and frac_initial <= 0.5)
-        or (initial_regime == 1 and frac_initial >= 0.5)
+    flip = (initial_regime == 0 and frac_initial <= 0.5) or (
+        initial_regime == 1 and frac_initial >= 0.5
     )
     if flip:
         if verbose:

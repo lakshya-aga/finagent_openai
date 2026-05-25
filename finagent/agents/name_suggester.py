@@ -24,10 +24,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
 
 from pydantic import BaseModel, Field
-
 
 logger = logging.getLogger(__name__)
 
@@ -110,10 +108,11 @@ async def suggest_notebook_name(user_request: str) -> str:
     try:
         # Lazy imports — keep this module loadable in environments where
         # the Agents SDK isn't installed (tests, alternative runtimes).
-        from agents import Agent, Runner, ModelSettings
-        from finagent.llm import get_model_name
+        from agents import Agent, ModelSettings, Runner
     except ImportError as e:
-        logger.warning("name_suggester: SDK unavailable, falling back to 'notebook' (%s)", e)
+        logger.warning(
+            "name_suggester: SDK unavailable, falling back to 'notebook' (%s)", e
+        )
         return "notebook"
 
     try:
@@ -149,10 +148,12 @@ def _resolve_model_name() -> str:
     so this never blocks on misconfiguration."""
     try:
         from finagent.llm import get_model_name
+
         return get_model_name("name_suggester")
     except Exception:
         try:
             from finagent.llm import get_model_name
+
             return get_model_name("intent_classifier")
         except Exception:
             return "gpt-4o-mini"

@@ -5,7 +5,6 @@ from __future__ import annotations
 from agents import Agent, ModelSettings
 from openai.types.shared.reasoning import Reasoning
 
-from ..mcp_connections import make_data_mcp, make_fruit_thrower
 from ..functions import (
     find_regex_in_notebook_code,
     install_packages,
@@ -13,7 +12,7 @@ from ..functions import (
     replace_cell,
     validate_run,
 )
-
+from ..mcp_connections import make_data_mcp, make_fruit_thrower
 
 VALIDATOR_INSTRUCTIONS = """You are a NOTEBOOK VALIDATION AND REPAIR AGENT.
 
@@ -46,7 +45,7 @@ A. ModuleNotFoundError / ImportError
          `reason="module_not_on_pypi"`, the orchestrator hallucinated the
          module name. **Do NOT escalate immediately.** Instead:
             1. Use `find_regex_in_notebook_code` with the bad import
-               (e.g. regex `from\s+research\.\S+\s+import|import\s+research`)
+               (e.g. regex `from\\s+research\\.\\S+\\s+import|import\\s+research`)
                to locate every offending cell.
             2. Use the fruit-thrower MCP `search_code` for the symbols
                that import was trying to bring in. If a real fin-kit
@@ -111,7 +110,6 @@ End with a final object:
 
 
 from finagent.llm import get_model_name
-
 
 validatorandfixingagent = Agent(
     name="ValidatorAndFixingAgent",

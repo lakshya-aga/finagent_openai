@@ -68,7 +68,10 @@ def _run_code_in_kernel(code: str, timeout: int = 120) -> Dict[str, Any]:
                 continue
 
             msg_type = msg.get("msg_type")
-            if msg_type == "status" and msg.get("content", {}).get("execution_state") == "idle":
+            if (
+                msg_type == "status"
+                and msg.get("content", {}).get("execution_state") == "idle"
+            ):
                 break
 
             out = _serialize_output(msg)

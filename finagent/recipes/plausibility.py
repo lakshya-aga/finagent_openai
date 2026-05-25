@@ -35,7 +35,6 @@ from __future__ import annotations
 import math
 from typing import Mapping, Optional
 
-
 # Default plausibility bands for an equity strategy at daily frequency.
 # Each entry is (low_inclusive, high_inclusive). Anything outside the band
 # is suspicious enough that a human should look before trusting the run.
@@ -43,10 +42,10 @@ DEFAULT_BANDS: dict[str, tuple[float, float]] = {
     "sharpe": (-3.0, 3.0),
     "sortino": (-5.0, 5.0),
     "calmar": (-50.0, 50.0),
-    "annual_return": (-1.0, 1.0),         # -100% to +100% per year
-    "total_return": (-10.0, 50.0),        # -1000% to +5000% cumulative
-    "max_drawdown": (-1.0, 0.0),          # always non-positive, > -100%
-    "turnover": (0.0, 5.0),               # daily turnover; 5 = 500%/day
+    "annual_return": (-1.0, 1.0),  # -100% to +100% per year
+    "total_return": (-10.0, 50.0),  # -1000% to +5000% cumulative
+    "max_drawdown": (-1.0, 0.0),  # always non-positive, > -100%
+    "turnover": (0.0, 5.0),  # daily turnover; 5 = 500%/day
     "win_rate": (0.0, 1.0),
 }
 
@@ -64,7 +63,7 @@ _BOOK_PREFIXES: tuple[str, ...] = (
 def _strip_book_prefix(key: str) -> str:
     for prefix in _BOOK_PREFIXES:
         if key.startswith(prefix):
-            return key[len(prefix):]
+            return key[len(prefix) :]
     return key
 
 

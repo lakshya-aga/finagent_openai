@@ -32,38 +32,61 @@ logger = logging.getLogger(__name__)
 # exposure caps in the portfolio agent + the dashboard's sector chip.
 SECTORS: dict[str, str] = {
     # Financials
-    "HDFCBANK.NS": "Banking",       "ICICIBANK.NS": "Banking",
-    "SBIN.NS": "Banking",           "KOTAKBANK.NS": "Banking",
-    "AXISBANK.NS": "Banking",       "INDUSINDBK.NS": "Banking",
-    "BAJFINANCE.NS": "NBFC",        "BAJAJFINSV.NS": "NBFC",
+    "HDFCBANK.NS": "Banking",
+    "ICICIBANK.NS": "Banking",
+    "SBIN.NS": "Banking",
+    "KOTAKBANK.NS": "Banking",
+    "AXISBANK.NS": "Banking",
+    "INDUSINDBK.NS": "Banking",
+    "BAJFINANCE.NS": "NBFC",
+    "BAJAJFINSV.NS": "NBFC",
     "SHRIRAMFIN.NS": "NBFC",
-    "HDFCLIFE.NS": "Insurance",     "SBILIFE.NS": "Insurance",
+    "HDFCLIFE.NS": "Insurance",
+    "SBILIFE.NS": "Insurance",
     # IT
-    "TCS.NS": "IT",                 "INFY.NS": "IT",
-    "HCLTECH.NS": "IT",             "WIPRO.NS": "IT",
+    "TCS.NS": "IT",
+    "INFY.NS": "IT",
+    "HCLTECH.NS": "IT",
+    "WIPRO.NS": "IT",
     "TECHM.NS": "IT",
     # Energy + Utilities
-    "RELIANCE.NS": "Energy",        "ONGC.NS": "Energy",
-    "BPCL.NS": "Energy",            "COALINDIA.NS": "Energy",
-    "NTPC.NS": "Utilities",         "POWERGRID.NS": "Utilities",
+    "RELIANCE.NS": "Energy",
+    "ONGC.NS": "Energy",
+    "BPCL.NS": "Energy",
+    "COALINDIA.NS": "Energy",
+    "NTPC.NS": "Utilities",
+    "POWERGRID.NS": "Utilities",
     # Consumer
-    "HINDUNILVR.NS": "FMCG",        "ITC.NS": "FMCG",
-    "NESTLEIND.NS": "FMCG",         "BRITANNIA.NS": "FMCG",
-    "TATACONSUM.NS": "FMCG",        "TITAN.NS": "Consumer Disc",
-    "TRENT.NS": "Consumer Disc",    "ASIANPAINT.NS": "Consumer Disc",
+    "HINDUNILVR.NS": "FMCG",
+    "ITC.NS": "FMCG",
+    "NESTLEIND.NS": "FMCG",
+    "BRITANNIA.NS": "FMCG",
+    "TATACONSUM.NS": "FMCG",
+    "TITAN.NS": "Consumer Disc",
+    "TRENT.NS": "Consumer Disc",
+    "ASIANPAINT.NS": "Consumer Disc",
     # Auto
-    "MARUTI.NS": "Auto",            "M&M.NS": "Auto",
-    "TATAMOTORS.NS": "Auto",        "BAJAJ-AUTO.NS": "Auto",
-    "EICHERMOT.NS": "Auto",         "HEROMOTOCO.NS": "Auto",
+    "MARUTI.NS": "Auto",
+    "M&M.NS": "Auto",
+    "TATAMOTORS.NS": "Auto",
+    "BAJAJ-AUTO.NS": "Auto",
+    "EICHERMOT.NS": "Auto",
+    "HEROMOTOCO.NS": "Auto",
     # Industrials + Materials
-    "LT.NS": "Industrials",         "BEL.NS": "Industrials",
-    "ADANIPORTS.NS": "Industrials", "ULTRACEMCO.NS": "Materials",
-    "GRASIM.NS": "Materials",       "JSWSTEEL.NS": "Materials",
-    "TATASTEEL.NS": "Materials",    "HINDALCO.NS": "Materials",
+    "LT.NS": "Industrials",
+    "BEL.NS": "Industrials",
+    "ADANIPORTS.NS": "Industrials",
+    "ULTRACEMCO.NS": "Materials",
+    "GRASIM.NS": "Materials",
+    "JSWSTEEL.NS": "Materials",
+    "TATASTEEL.NS": "Materials",
+    "HINDALCO.NS": "Materials",
     "ADANIENT.NS": "Conglomerate",
     # Healthcare
-    "SUNPHARMA.NS": "Healthcare",   "DRREDDY.NS": "Healthcare",
-    "CIPLA.NS": "Healthcare",       "APOLLOHOSP.NS": "Healthcare",
+    "SUNPHARMA.NS": "Healthcare",
+    "DRREDDY.NS": "Healthcare",
+    "CIPLA.NS": "Healthcare",
+    "APOLLOHOSP.NS": "Healthcare",
     # Telecom
     "BHARTIARTL.NS": "Telecom",
 }
@@ -75,7 +98,8 @@ if _missing:
     logger.warning(
         "paper_trading.universe: %d tickers in NIFTY50_TICKERS have no "
         "SECTORS mapping — they will render as 'Unknown' on the dashboard: %s",
-        len(_missing), sorted(_missing),
+        len(_missing),
+        sorted(_missing),
     )
 
 
@@ -112,11 +136,14 @@ async def refresh_market_caps(
     out: dict[str, float] = {}
 
     from .store import get_market_caps, upsert_market_cap
+
     cached = get_market_caps(tickers)
     now = time.time()
     stale = [
-        t for t in tickers
-        if force or (now - (cached.get(t, {}).get("refreshed_at") or 0)) > _MARKET_CAP_TTL_SECS
+        t
+        for t in tickers
+        if force
+        or (now - (cached.get(t, {}).get("refreshed_at") or 0)) > _MARKET_CAP_TTL_SECS
     ]
     # Fresh rows: copy through.
     for t in tickers:
@@ -131,11 +158,14 @@ async def refresh_market_caps(
     def _fetch_one(ticker: str) -> Optional[float]:
         try:
             import yfinance as yf
+
             info = yf.Ticker(ticker).info or {}
             mcap = info.get("marketCap")
             return float(mcap) if mcap is not None else None
         except Exception as e:
-            logger.warning("paper_trading: market-cap fetch failed for %s (%s)", ticker, e)
+            logger.warning(
+                "paper_trading: market-cap fetch failed for %s (%s)", ticker, e
+            )
             return None
 
     # Sequential rather than parallel — yfinance is rate-limited and

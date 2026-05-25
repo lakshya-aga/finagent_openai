@@ -43,7 +43,6 @@ from .schemas import PortfolioDecision, ResearchPlan, TraderProposal
 from .state import InvestDebateState, PanelState
 from .tools import FUNDAMENTALS_TOOLS, MACRO_TOOLS, MARKET_TOOLS, NEWS_TOOLS
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -162,10 +161,18 @@ def _summarise_tool_outcome(tool_name: str, output_str: str) -> str:
     if "hurst_exponent" in obj or "hurst" in obj:
         h = obj.get("hurst_exponent") or obj.get("hurst")
         regime = obj.get("regime", "")
-        return f"Hurst {h:.2f}, {regime}" if isinstance(h, (int, float)) else (regime or "ok")
+        return (
+            f"Hurst {h:.2f}, {regime}"
+            if isinstance(h, (int, float))
+            else (regime or "ok")
+        )
     if "rsi_14" in obj or "sma_50" in obj:
         rsi = obj.get("rsi_14") or obj.get("rsi")
-        return f"RSI {rsi:.0f}, indicators ok" if isinstance(rsi, (int, float)) else "indicators ok"
+        return (
+            f"RSI {rsi:.0f}, indicators ok"
+            if isinstance(rsi, (int, float))
+            else "indicators ok"
+        )
     if "n_observations" in obj:
         return f"{obj.get('n_observations')} obs"
 
@@ -210,30 +217,37 @@ async def _invoke_structured_with_retry(
             last_error = exc
             logger.warning(
                 "trading_panel: structured output failed for %s (attempt %d/%d): %s",
-                speaker, attempt + 1, max_retries + 1, exc,
+                speaker,
+                attempt + 1,
+                max_retries + 1,
+                exc,
             )
             if attempt >= max_retries:
                 break
 
-            await _emit({
-                "type": "structured_retry",
-                "speaker": speaker,
-                "attempt": attempt + 1,
-                "error": str(exc)[:200],
-            })
+            await _emit(
+                {
+                    "type": "structured_retry",
+                    "speaker": speaker,
+                    "attempt": attempt + 1,
+                    "error": str(exc)[:200],
+                }
+            )
 
             # Re-prompt with the actual error so the model can correct.
             error_summary = str(exc)[:600]
             base_messages = [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_prompt),
-                HumanMessage(content=(
-                    f"Your previous attempt failed schema validation:\n\n"
-                    f"{error_summary}\n\n"
-                    f"Re-emit the response. Match the schema EXACTLY: every "
-                    f"required field present, enum values lowercase, numbers "
-                    f"as numbers (not strings), no commentary outside the JSON."
-                )),
+                HumanMessage(
+                    content=(
+                        f"Your previous attempt failed schema validation:\n\n"
+                        f"{error_summary}\n\n"
+                        f"Re-emit the response. Match the schema EXACTLY: every "
+                        f"required field present, enum values lowercase, numbers "
+                        f"as numbers (not strings), no commentary outside the JSON."
+                    )
+                ),
             ]
 
     raise RuntimeError(
@@ -287,20 +301,25 @@ async def _run_tool_loop(
     # exactly what each analyst started with.
     logger.info(
         "panel/tool_loop START speaker=%s phase=%s sys_prompt=%d chars user_prompt=%d chars tools=%d (%s)",
-        speaker, phase,
-        len(system_prompt or ""), len(user_prompt or ""),
-        len(tools), [t.name for t in tools],
+        speaker,
+        phase,
+        len(system_prompt or ""),
+        len(user_prompt or ""),
+        len(tools),
+        [t.name for t in tools],
     )
 
     for iteration in range(max_iterations):
         # Log the message-context size going INTO each LLM call.
         # If this grows unboundedly, that's the cause of slow inference.
-        ctx_chars = sum(
-            len(str(getattr(m, "content", ""))) for m in messages
-        )
+        ctx_chars = sum(len(str(getattr(m, "content", ""))) for m in messages)
         logger.info(
             "panel/tool_loop INFER speaker=%s iter=%d/%d msgs=%d ctx_chars=%d",
-            speaker, iteration + 1, max_iterations, len(messages), ctx_chars,
+            speaker,
+            iteration + 1,
+            max_iterations,
+            len(messages),
+            ctx_chars,
         )
 
         infer_start = time.time()
@@ -311,7 +330,11 @@ async def _run_tool_loop(
         ai_text_len = len(str(getattr(ai_msg, "content", "") or ""))
         logger.info(
             "panel/tool_loop AI_RESP speaker=%s iter=%d took=%.1fs tool_calls=%d text_len=%d",
-            speaker, iteration + 1, infer_dt, n_tool_calls, ai_text_len,
+            speaker,
+            iteration + 1,
+            infer_dt,
+            n_tool_calls,
+            ai_text_len,
         )
 
         messages.append(ai_msg)
@@ -321,8 +344,11 @@ async def _run_tool_loop(
             # Final answer — done.
             logger.info(
                 "panel/tool_loop DONE speaker=%s phase=%s iters=%d total_evidence=%d final_text_len=%d",
-                speaker, phase, iteration + 1,
-                len(evidence), ai_text_len,
+                speaker,
+                phase,
+                iteration + 1,
+                len(evidence),
+                ai_text_len,
             )
             return (ai_msg.content or "", evidence)
 
@@ -335,7 +361,8 @@ async def _run_tool_loop(
 
             logger.info(
                 "panel/tool_loop CALL speaker=%s tool=%s args=%s",
-                speaker, tool_name,
+                speaker,
+                tool_name,
                 json.dumps(tool_args, default=str)[:300],
             )
 
@@ -354,21 +381,27 @@ async def _run_tool_loop(
                 output = call_cache[cache_key]
                 logger.warning(
                     "panel/tool_loop CACHE_HIT speaker=%s tool=%s args=%s — returning cached result",
-                    speaker, tool_name, args_key[:100],
+                    speaker,
+                    tool_name,
+                    args_key[:100],
                 )
             elif n_prior >= per_tool_limit:
-                output = json.dumps({
-                    "error": (
-                        f"You have already called {tool_name} {n_prior} time(s) "
-                        f"this turn. Each tool may be called at most "
-                        f"{per_tool_limit} time(s) per analyst phase. Please "
-                        f"refer to the prior result and write your final report."
-                    ),
-                    "tool": tool_name,
-                })
+                output = json.dumps(
+                    {
+                        "error": (
+                            f"You have already called {tool_name} {n_prior} time(s) "
+                            f"this turn. Each tool may be called at most "
+                            f"{per_tool_limit} time(s) per analyst phase. Please "
+                            f"refer to the prior result and write your final report."
+                        ),
+                        "tool": tool_name,
+                    }
+                )
                 logger.warning(
                     "panel/tool_loop CALL_LIMIT speaker=%s tool=%s n_prior=%d — refusing",
-                    speaker, tool_name, n_prior,
+                    speaker,
+                    tool_name,
+                    n_prior,
                 )
             elif tool_fn is None:
                 output = json.dumps({"error": f"unknown tool: {tool_name}"})
@@ -379,11 +412,13 @@ async def _run_tool_loop(
                 # call freezes the whole panel. 60s is generous for
                 # any of our findata calls (typical: 1-5s).
                 try:
+
                     async def _invoke():
                         try:
                             return await tool_fn.ainvoke(tool_args)
                         except NotImplementedError:
                             return await asyncio.to_thread(tool_fn.invoke, tool_args)
+
                     output = await asyncio.wait_for(_invoke(), timeout=60.0)
                     # Record successful invocation for dedup + cap.
                     per_tool_count[tool_name or ""] = n_prior + 1
@@ -392,20 +427,27 @@ async def _run_tool_loop(
                         "trading_panel: tool %s hung past 60s, killing call",
                         tool_name,
                     )
-                    output = json.dumps({
-                        "error": "tool call timed out after 60s (likely yfinance rate-limit or hung network)",
-                        "tool": tool_name,
-                    })
+                    output = json.dumps(
+                        {
+                            "error": "tool call timed out after 60s (likely yfinance rate-limit or hung network)",
+                            "tool": tool_name,
+                        }
+                    )
                 except Exception as exc:
                     logger.exception(
-                        "trading_panel: tool %s raised", tool_name,
+                        "trading_panel: tool %s raised",
+                        tool_name,
                     )
-                    output = json.dumps({
-                        "error": f"{type(exc).__name__}: {exc}",
-                        "tool": tool_name,
-                    })
+                    output = json.dumps(
+                        {
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "tool": tool_name,
+                        }
+                    )
 
-            output_str = output if isinstance(output, str) else json.dumps(output, default=str)
+            output_str = (
+                output if isinstance(output, str) else json.dumps(output, default=str)
+            )
 
             # Shrink the LLM-visible payload (strip chart base64). The
             # full output is still captured in the evidence trail
@@ -418,7 +460,10 @@ async def _run_tool_loop(
 
             logger.info(
                 "panel/tool_loop RESP speaker=%s tool=%s output_len=%d (shrunk=%d) preview=%r",
-                speaker, tool_name, len(output_str), len(llm_visible),
+                speaker,
+                tool_name,
+                len(output_str),
+                len(llm_visible),
                 llm_visible[:200].replace("\n", " "),
             )
 
@@ -442,25 +487,27 @@ async def _run_tool_loop(
             # this, the analyst's 3-minute gathering phase looks blank
             # in the browser and users assume the panel is hung.
             outcome = _summarise_tool_outcome(tool_name or "unknown", output_str)
-            await _emit({
-                "type": "message",
-                "phase": phase,
-                "speaker": speaker,
-                "text": f"`→ {tool_name}` — {outcome}",
-                "ts": time.time(),
-                "interim": True,
-                # Tag the message with the tool + ticker so the frontend can
-                # offer an "expand" chevron that fetches the OHLC chart for
-                # that asset on demand. The ticker is the panel's subject
-                # ticker (state["ticker"]); tool name lets the UI decide
-                # whether to expose the expand affordance (chart-relevant
-                # tools only) without re-parsing the text.
-                "data": {
-                    "tool": tool_name,
-                    "ticker": panel_state.get("ticker"),
-                    "asset_class": panel_state.get("asset_class"),
-                },
-            })
+            await _emit(
+                {
+                    "type": "message",
+                    "phase": phase,
+                    "speaker": speaker,
+                    "text": f"`→ {tool_name}` — {outcome}",
+                    "ts": time.time(),
+                    "interim": True,
+                    # Tag the message with the tool + ticker so the frontend can
+                    # offer an "expand" chevron that fetches the OHLC chart for
+                    # that asset on demand. The ticker is the panel's subject
+                    # ticker (state["ticker"]); tool name lets the UI decide
+                    # whether to expose the expand affordance (chart-relevant
+                    # tools only) without re-parsing the text.
+                    "data": {
+                        "tool": tool_name,
+                        "ticker": panel_state.get("ticker"),
+                        "asset_class": panel_state.get("asset_class"),
+                    },
+                }
+            )
 
     # Hit iteration cap — return whatever the last AI message had.
     last_ai = next(
@@ -470,7 +517,8 @@ async def _run_tool_loop(
     text = (last_ai.content if last_ai else "") or ""
     logger.warning(
         "trading_panel: tool loop hit max_iterations=%d for %s",
-        max_iterations, speaker,
+        max_iterations,
+        speaker,
     )
     return text, evidence
 
@@ -480,26 +528,32 @@ async def _run_tool_loop(
 
 async def market_analyst_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "market_analyst", "state": "start"})
-    await _emit({
-        "type": "message",
-        "phase": "market_analyst",
-        "speaker": "market_analyst",
-        "text": "*Gathering technical signals — chart, indicators, S/R, regime, patterns.*",
-        "ts": time.time(),
-        "interim": True,
-    })
+    await _emit(
+        {
+            "type": "message",
+            "phase": "market_analyst",
+            "speaker": "market_analyst",
+            "text": "*Gathering technical signals — chart, indicators, S/R, regime, patterns.*",
+            "ts": time.time(),
+            "interim": True,
+        }
+    )
     llm = make_chat_for_role("panel_analyst")
     sys_prompt = MARKET_ANALYST_PROMPT.format(
-        ticker=state["ticker"], today_iso=state["today_iso"],
+        ticker=state["ticker"],
+        today_iso=state["today_iso"],
     )
     user_prompt = (
         f"Asset: {state['ticker']} ({state['asset_class']}). "
         f"Run your tool kit and produce the market analyst report."
     )
     text, evidence = await _run_tool_loop(
-        llm=llm, tools=MARKET_TOOLS,
-        system_prompt=sys_prompt, user_prompt=user_prompt,
-        speaker="market_analyst", phase="market_analyst",
+        llm=llm,
+        tools=MARKET_TOOLS,
+        system_prompt=sys_prompt,
+        user_prompt=user_prompt,
+        speaker="market_analyst",
+        phase="market_analyst",
         panel_state=state,
     )
 
@@ -513,8 +567,14 @@ async def market_analyst_node(state: PanelState) -> dict[str, Any]:
     if chart_md:
         text = chart_md + "\n\n" + text
 
-    await _emit({"type": "message", "phase": "market_analyst",
-                 "speaker": "market_analyst", "text": text})
+    await _emit(
+        {
+            "type": "message",
+            "phase": "market_analyst",
+            "speaker": "market_analyst",
+            "text": text,
+        }
+    )
     await _emit({"type": "phase", "phase": "market_analyst", "state": "end"})
     return {"market_report": text, "evidence": state.get("evidence", []) + evidence}
 
@@ -547,17 +607,20 @@ def _extract_chart_from_evidence(evidence: list[dict[str, Any]]) -> str:
 
 async def news_analyst_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "news_analyst", "state": "start"})
-    await _emit({
-        "type": "message",
-        "phase": "news_analyst",
-        "speaker": "news_analyst",
-        "text": "*Pulling recent headlines — yfinance + GDELT (with tone scoring).*",
-        "ts": time.time(),
-        "interim": True,
-    })
+    await _emit(
+        {
+            "type": "message",
+            "phase": "news_analyst",
+            "speaker": "news_analyst",
+            "text": "*Pulling recent headlines — yfinance + GDELT (with tone scoring).*",
+            "ts": time.time(),
+            "interim": True,
+        }
+    )
     llm = make_chat_for_role("panel_analyst")
     sys_prompt = NEWS_ANALYST_PROMPT.format(
-        ticker=state["ticker"], today_iso=state["today_iso"],
+        ticker=state["ticker"],
+        today_iso=state["today_iso"],
     )
     user_prompt = (
         f"Asset: {state['ticker']} ({state['asset_class']}). "
@@ -566,45 +629,69 @@ async def news_analyst_node(state: PanelState) -> dict[str, Any]:
         f"'Indian conglomerates'), run the tools, write the news report."
     )
     text, evidence = await _run_tool_loop(
-        llm=llm, tools=NEWS_TOOLS,
-        system_prompt=sys_prompt, user_prompt=user_prompt,
-        speaker="news_analyst", phase="news_analyst",
+        llm=llm,
+        tools=NEWS_TOOLS,
+        system_prompt=sys_prompt,
+        user_prompt=user_prompt,
+        speaker="news_analyst",
+        phase="news_analyst",
         panel_state=state,
     )
-    await _emit({"type": "message", "phase": "news_analyst",
-                 "speaker": "news_analyst", "text": text})
+    await _emit(
+        {
+            "type": "message",
+            "phase": "news_analyst",
+            "speaker": "news_analyst",
+            "text": text,
+        }
+    )
     await _emit({"type": "phase", "phase": "news_analyst", "state": "end"})
     return {"news_report": text, "evidence": state.get("evidence", []) + evidence}
 
 
 async def fundamentals_analyst_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "fundamentals_analyst", "state": "start"})
-    await _emit({
-        "type": "message",
-        "phase": "fundamentals_analyst",
-        "speaker": "fundamentals_analyst",
-        "text": "*Pulling 30 fundamentals fields, analyst consensus, earnings calendar, returns stats.*",
-        "ts": time.time(),
-        "interim": True,
-    })
+    await _emit(
+        {
+            "type": "message",
+            "phase": "fundamentals_analyst",
+            "speaker": "fundamentals_analyst",
+            "text": "*Pulling 30 fundamentals fields, analyst consensus, earnings calendar, returns stats.*",
+            "ts": time.time(),
+            "interim": True,
+        }
+    )
     llm = make_chat_for_role("panel_analyst")
     sys_prompt = FUNDAMENTALS_ANALYST_PROMPT.format(
-        ticker=state["ticker"], today_iso=state["today_iso"],
+        ticker=state["ticker"],
+        today_iso=state["today_iso"],
     )
     user_prompt = (
         f"Asset: {state['ticker']} ({state['asset_class']}). "
         f"Run the fundamentals tool kit and write the report."
     )
     text, evidence = await _run_tool_loop(
-        llm=llm, tools=FUNDAMENTALS_TOOLS,
-        system_prompt=sys_prompt, user_prompt=user_prompt,
-        speaker="fundamentals_analyst", phase="fundamentals_analyst",
+        llm=llm,
+        tools=FUNDAMENTALS_TOOLS,
+        system_prompt=sys_prompt,
+        user_prompt=user_prompt,
+        speaker="fundamentals_analyst",
+        phase="fundamentals_analyst",
         panel_state=state,
     )
-    await _emit({"type": "message", "phase": "fundamentals_analyst",
-                 "speaker": "fundamentals_analyst", "text": text})
+    await _emit(
+        {
+            "type": "message",
+            "phase": "fundamentals_analyst",
+            "speaker": "fundamentals_analyst",
+            "text": text,
+        }
+    )
     await _emit({"type": "phase", "phase": "fundamentals_analyst", "state": "end"})
-    return {"fundamentals_report": text, "evidence": state.get("evidence", []) + evidence}
+    return {
+        "fundamentals_report": text,
+        "evidence": state.get("evidence", []) + evidence,
+    }
 
 
 async def macro_analyst_node(state: PanelState) -> dict[str, Any]:
@@ -612,20 +699,25 @@ async def macro_analyst_node(state: PanelState) -> dict[str, Any]:
     can reference the company's debt + margin profile when reasoning
     about rate sensitivity and inflation pass-through."""
     await _emit({"type": "phase", "phase": "macro_analyst", "state": "start"})
-    await _emit({
-        "type": "message",
-        "phase": "macro_analyst",
-        "speaker": "macro_analyst",
-        "text": "*Reading the macro tape — rates, inflation, credit spreads, FX, commodities, yield curve.*",
-        "ts": time.time(),
-        "interim": True,
-    })
+    await _emit(
+        {
+            "type": "message",
+            "phase": "macro_analyst",
+            "speaker": "macro_analyst",
+            "text": "*Reading the macro tape — rates, inflation, credit spreads, FX, commodities, yield curve.*",
+            "ts": time.time(),
+            "interim": True,
+        }
+    )
     llm = make_chat_for_role("panel_analyst")
     # Hint country from asset_class so the macro tool can do the right
     # thing for .NS (still pulls US-side macro + USD/INR + a flag note).
-    country_hint = "IN" if state.get("asset_class", "").lower().startswith("indian") else "US"
+    country_hint = (
+        "IN" if state.get("asset_class", "").lower().startswith("indian") else "US"
+    )
     sys_prompt = MACRO_ANALYST_PROMPT.format(
-        ticker=state["ticker"], today_iso=state["today_iso"],
+        ticker=state["ticker"],
+        today_iso=state["today_iso"],
     )
     # Pass the fundamentals report through as part of the user prompt so
     # the macro analyst can connect macro to the company's specific
@@ -641,13 +733,22 @@ async def macro_analyst_node(state: PanelState) -> dict[str, Any]:
         f"macro print to the specific company in the fundamentals excerpt."
     )
     text, evidence = await _run_tool_loop(
-        llm=llm, tools=MACRO_TOOLS,
-        system_prompt=sys_prompt, user_prompt=user_prompt,
-        speaker="macro_analyst", phase="macro_analyst",
+        llm=llm,
+        tools=MACRO_TOOLS,
+        system_prompt=sys_prompt,
+        user_prompt=user_prompt,
+        speaker="macro_analyst",
+        phase="macro_analyst",
         panel_state=state,
     )
-    await _emit({"type": "message", "phase": "macro_analyst",
-                 "speaker": "macro_analyst", "text": text})
+    await _emit(
+        {
+            "type": "message",
+            "phase": "macro_analyst",
+            "speaker": "macro_analyst",
+            "text": text,
+        }
+    )
     await _emit({"type": "phase", "phase": "macro_analyst", "state": "end"})
     return {"macro_report": text, "evidence": state.get("evidence", []) + evidence}
 
@@ -682,13 +783,22 @@ def _format_prior_debate(deb: InvestDebateState) -> str:
 
 async def bull_researcher_node(state: PanelState) -> dict[str, Any]:
     deb = state.get("investment_debate") or InvestDebateState(
-        bull_history="", bear_history="", current_response="",
-        last_speaker="", count=0,
+        bull_history="",
+        bear_history="",
+        current_response="",
+        last_speaker="",
+        count=0,
     )
     round_n = (deb.get("count", 0) // 2) + 1
     phase = f"bull_round_{round_n}"
-    await _emit({"type": "phase", "phase": phase, "state": "start",
-                 "speaker": "bull_researcher"})
+    await _emit(
+        {
+            "type": "phase",
+            "phase": phase,
+            "state": "start",
+            "speaker": "bull_researcher",
+        }
+    )
 
     llm = make_chat_for_role("panel_researcher")
     sys_prompt = BULL_RESEARCHER_PROMPT.format(
@@ -696,8 +806,12 @@ async def bull_researcher_node(state: PanelState) -> dict[str, Any]:
         analyst_reports=_format_analyst_reports(state),
         prior_debate=_format_prior_debate(deb),
     )
-    msg = await llm.ainvoke([SystemMessage(content=sys_prompt),
-                              HumanMessage(content="Write your bull turn now.")])
+    msg = await llm.ainvoke(
+        [
+            SystemMessage(content=sys_prompt),
+            HumanMessage(content="Write your bull turn now."),
+        ]
+    )
     text = msg.content or ""
     new_deb = InvestDebateState(
         bull_history=(deb.get("bull_history", "") + "\n\n" + text).strip(),
@@ -706,21 +820,31 @@ async def bull_researcher_node(state: PanelState) -> dict[str, Any]:
         last_speaker="bull",
         count=deb.get("count", 0) + 1,
     )
-    await _emit({"type": "message", "phase": phase,
-                 "speaker": "bull_researcher", "text": text})
+    await _emit(
+        {"type": "message", "phase": phase, "speaker": "bull_researcher", "text": text}
+    )
     await _emit({"type": "phase", "phase": phase, "state": "end"})
     return {"investment_debate": new_deb}
 
 
 async def bear_researcher_node(state: PanelState) -> dict[str, Any]:
     deb = state.get("investment_debate") or InvestDebateState(
-        bull_history="", bear_history="", current_response="",
-        last_speaker="", count=0,
+        bull_history="",
+        bear_history="",
+        current_response="",
+        last_speaker="",
+        count=0,
     )
     round_n = (deb.get("count", 0) // 2) + 1
     phase = f"bear_round_{round_n}"
-    await _emit({"type": "phase", "phase": phase, "state": "start",
-                 "speaker": "bear_researcher"})
+    await _emit(
+        {
+            "type": "phase",
+            "phase": phase,
+            "state": "start",
+            "speaker": "bear_researcher",
+        }
+    )
 
     llm = make_chat_for_role("panel_researcher")
     sys_prompt = BEAR_RESEARCHER_PROMPT.format(
@@ -728,8 +852,12 @@ async def bear_researcher_node(state: PanelState) -> dict[str, Any]:
         analyst_reports=_format_analyst_reports(state),
         prior_debate=_format_prior_debate(deb),
     )
-    msg = await llm.ainvoke([SystemMessage(content=sys_prompt),
-                              HumanMessage(content="Write your bear turn now.")])
+    msg = await llm.ainvoke(
+        [
+            SystemMessage(content=sys_prompt),
+            HumanMessage(content="Write your bear turn now."),
+        ]
+    )
     text = msg.content or ""
     new_deb = InvestDebateState(
         bull_history=deb.get("bull_history", ""),
@@ -738,8 +866,9 @@ async def bear_researcher_node(state: PanelState) -> dict[str, Any]:
         last_speaker="bear",
         count=deb.get("count", 0) + 1,
     )
-    await _emit({"type": "message", "phase": phase,
-                 "speaker": "bear_researcher", "text": text})
+    await _emit(
+        {"type": "message", "phase": phase, "speaker": "bear_researcher", "text": text}
+    )
     await _emit({"type": "phase", "phase": phase, "state": "end"})
     return {"investment_debate": new_deb}
 
@@ -760,28 +889,37 @@ def _format_debate_transcript(deb: Optional[InvestDebateState]) -> str:
 
 async def research_manager_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "research_manager", "state": "start"})
-    await _emit({
-        "type": "message",
-        "phase": "research_manager",
-        "speaker": "research_manager",
-        "text": "*Synthesising the bull/bear debate into a recommendation…*",
-        "ts": time.time(),
-        "interim": True,
-    })
+    await _emit(
+        {
+            "type": "message",
+            "phase": "research_manager",
+            "speaker": "research_manager",
+            "text": "*Synthesising the bull/bear debate into a recommendation…*",
+            "ts": time.time(),
+            "interim": True,
+        }
+    )
     llm = make_chat_for_role("panel_research_manager")
     sys_prompt = RESEARCH_MANAGER_PROMPT.format(
         analyst_reports=_format_analyst_reports(state),
         debate_transcript=_format_debate_transcript(state.get("investment_debate")),
     )
     plan: ResearchPlan = await _invoke_structured_with_retry(
-        llm=llm, schema=ResearchPlan,
+        llm=llm,
+        schema=ResearchPlan,
         system_prompt=sys_prompt,
         user_prompt="Emit the ResearchPlan now.",
         speaker="research_manager",
     )
     plan_dict = plan.model_dump()
-    await _emit({"type": "research_plan", "phase": "research_manager",
-                 "speaker": "research_manager", "data": plan_dict})
+    await _emit(
+        {
+            "type": "research_plan",
+            "phase": "research_manager",
+            "speaker": "research_manager",
+            "data": plan_dict,
+        }
+    )
     await _emit({"type": "phase", "phase": "research_manager", "state": "end"})
     return {"research_plan": plan_dict}
 
@@ -791,28 +929,37 @@ async def research_manager_node(state: PanelState) -> dict[str, Any]:
 
 async def trader_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "trader", "state": "start"})
-    await _emit({
-        "type": "message",
-        "phase": "trader",
-        "speaker": "trader",
-        "text": "*Translating the research plan into entry / target / stop levels…*",
-        "ts": time.time(),
-        "interim": True,
-    })
+    await _emit(
+        {
+            "type": "message",
+            "phase": "trader",
+            "speaker": "trader",
+            "text": "*Translating the research plan into entry / target / stop levels…*",
+            "ts": time.time(),
+            "interim": True,
+        }
+    )
     llm = make_chat_for_role("panel_trader")
     sys_prompt = TRADER_PROMPT.format(
         research_plan=json.dumps(state.get("research_plan") or {}, indent=2),
         analyst_reports=_format_analyst_reports(state),
     )
     proposal: TraderProposal = await _invoke_structured_with_retry(
-        llm=llm, schema=TraderProposal,
+        llm=llm,
+        schema=TraderProposal,
         system_prompt=sys_prompt,
         user_prompt="Emit the TraderProposal now.",
         speaker="trader",
     )
     prop_dict = proposal.model_dump()
-    await _emit({"type": "trader_proposal", "phase": "trader",
-                 "speaker": "trader", "data": prop_dict})
+    await _emit(
+        {
+            "type": "trader_proposal",
+            "phase": "trader",
+            "speaker": "trader",
+            "data": prop_dict,
+        }
+    )
     await _emit({"type": "phase", "phase": "trader", "state": "end"})
     return {"trader_proposal": prop_dict}
 
@@ -822,26 +969,36 @@ async def trader_node(state: PanelState) -> dict[str, Any]:
 
 async def risk_debator_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "risk_review", "state": "start"})
-    await _emit({
-        "type": "message",
-        "phase": "risk_review",
-        "speaker": "risk_debator",
-        "text": "*Stress-testing the proposal — aggressive / conservative / neutral lenses…*",
-        "ts": time.time(),
-        "interim": True,
-    })
+    await _emit(
+        {
+            "type": "message",
+            "phase": "risk_review",
+            "speaker": "risk_debator",
+            "text": "*Stress-testing the proposal — aggressive / conservative / neutral lenses…*",
+            "ts": time.time(),
+            "interim": True,
+        }
+    )
     llm = make_chat_for_role("panel_risk")
     sys_prompt = RISK_DEBATOR_PROMPT.format(
         trader_proposal=json.dumps(state.get("trader_proposal") or {}, indent=2),
         analyst_reports=_format_analyst_reports(state),
     )
-    msg = await llm.ainvoke([
-        SystemMessage(content=sys_prompt),
-        HumanMessage(content="Run the three-lens risk review now."),
-    ])
+    msg = await llm.ainvoke(
+        [
+            SystemMessage(content=sys_prompt),
+            HumanMessage(content="Run the three-lens risk review now."),
+        ]
+    )
     review = msg.content or ""
-    await _emit({"type": "message", "phase": "risk_review",
-                 "speaker": "risk_debator", "text": review})
+    await _emit(
+        {
+            "type": "message",
+            "phase": "risk_review",
+            "speaker": "risk_debator",
+            "text": review,
+        }
+    )
     await _emit({"type": "phase", "phase": "risk_review", "state": "end"})
     return {"risk_review": review}
 
@@ -851,14 +1008,16 @@ async def risk_debator_node(state: PanelState) -> dict[str, Any]:
 
 async def portfolio_manager_node(state: PanelState) -> dict[str, Any]:
     await _emit({"type": "phase", "phase": "portfolio_manager", "state": "start"})
-    await _emit({
-        "type": "message",
-        "phase": "portfolio_manager",
-        "speaker": "portfolio_manager",
-        "text": "*Issuing the final verdict — rating, target, stop, time horizon, key risks…*",
-        "ts": time.time(),
-        "interim": True,
-    })
+    await _emit(
+        {
+            "type": "message",
+            "phase": "portfolio_manager",
+            "speaker": "portfolio_manager",
+            "text": "*Issuing the final verdict — rating, target, stop, time horizon, key risks…*",
+            "ts": time.time(),
+            "interim": True,
+        }
+    )
     llm = make_chat_for_role("panel_pm")
     sys_prompt = PORTFOLIO_MANAGER_PROMPT.format(
         analyst_reports=_format_analyst_reports(state),
@@ -867,13 +1026,20 @@ async def portfolio_manager_node(state: PanelState) -> dict[str, Any]:
         risk_review=state.get("risk_review") or "",
     )
     decision: PortfolioDecision = await _invoke_structured_with_retry(
-        llm=llm, schema=PortfolioDecision,
+        llm=llm,
+        schema=PortfolioDecision,
         system_prompt=sys_prompt,
         user_prompt="Emit the PortfolioDecision now.",
         speaker="portfolio_manager",
     )
     dec_dict = decision.model_dump()
-    await _emit({"type": "portfolio_decision", "phase": "portfolio_manager",
-                 "speaker": "portfolio_manager", "data": dec_dict})
+    await _emit(
+        {
+            "type": "portfolio_decision",
+            "phase": "portfolio_manager",
+            "speaker": "portfolio_manager",
+            "data": dec_dict,
+        }
+    )
     await _emit({"type": "phase", "phase": "portfolio_manager", "state": "end"})
     return {"portfolio_decision": dec_dict}

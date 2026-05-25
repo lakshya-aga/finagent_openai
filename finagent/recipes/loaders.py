@@ -24,8 +24,13 @@ def load(spec_json: str | dict[str, Any]) -> pd.DataFrame:
     return fn(**spec)
 
 
-def _yfinance(tickers: list[str], start: str, end: str | None = None,
-              interval: str = "1d", **kwargs) -> pd.DataFrame:
+def _yfinance(
+    tickers: list[str],
+    start: str,
+    end: str | None = None,
+    interval: str = "1d",
+    **kwargs,
+) -> pd.DataFrame:
     # Prefer findata wrapper when available (consistent column shape).
     try:
         from findata.equity_prices import get_equity_prices
@@ -34,14 +39,24 @@ def _yfinance(tickers: list[str], start: str, end: str | None = None,
     except Exception:
         import yfinance as yf
 
-        df = yf.download(tickers, start=start, end=end, interval=interval,
-                         auto_adjust=True, progress=False)
+        df = yf.download(
+            tickers,
+            start=start,
+            end=end,
+            interval=interval,
+            auto_adjust=True,
+            progress=False,
+        )
         return df
 
 
-def _fred(series_ids: list[str], start: str | None = None,
-          end: str | None = None, api_key: str | None = None,
-          **kwargs) -> pd.DataFrame:
+def _fred(
+    series_ids: list[str],
+    start: str | None = None,
+    end: str | None = None,
+    api_key: str | None = None,
+    **kwargs,
+) -> pd.DataFrame:
     from findata.fred import get_fred_series
 
     return get_fred_series(series_ids, start_date=start, end_date=end, api_key=api_key)
@@ -53,30 +68,41 @@ def _csv(path: str, **kwargs) -> pd.DataFrame:
     return get_file_data(path, **kwargs)
 
 
-def _fama_french(factor_model: str = "3", start: str | None = None,
-                 end: str | None = None, **kwargs) -> pd.DataFrame:
+def _fama_french(
+    factor_model: str = "3", start: str | None = None, end: str | None = None, **kwargs
+) -> pd.DataFrame:
     from findata.fama_french import get_fama_french_factors
 
     return get_fama_french_factors(factor_model, start_date=start, end_date=end)
 
 
-def _cboe(symbols: list[str] | None = None, start: str | None = None,
-          end: str | None = None, **kwargs) -> pd.DataFrame:
+def _cboe(
+    symbols: list[str] | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    **kwargs,
+) -> pd.DataFrame:
     from findata.cboe_volatility import get_cboe_volatility_indices
 
     return get_cboe_volatility_indices(symbols, start_date=start, end_date=end)
 
 
-def _coingecko(coin_id: str, vs_currency: str = "usd", days: int | str = 90,
-               **kwargs) -> pd.DataFrame:
+def _coingecko(
+    coin_id: str, vs_currency: str = "usd", days: int | str = 90, **kwargs
+) -> pd.DataFrame:
     from findata.coingecko import get_coingecko_ohlcv
 
     return get_coingecko_ohlcv(coin_id, vs_currency=vs_currency, days=days)
 
 
-def _binance(symbol: str, interval: str = "1d",
-             start_date: str | None = None, end_date: str | None = None,
-             limit: int = 1000, **kwargs) -> pd.DataFrame:
+def _binance(
+    symbol: str,
+    interval: str = "1d",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 1000,
+    **kwargs,
+) -> pd.DataFrame:
     from findata.binance import get_binance_ohlcv
 
     return get_binance_ohlcv(
@@ -88,8 +114,9 @@ def _binance(symbol: str, interval: str = "1d",
     )
 
 
-def _fin_kit(function: str, kwargs: dict[str, Any] | None = None,
-             **_more) -> pd.DataFrame:
+def _fin_kit(
+    function: str, kwargs: dict[str, Any] | None = None, **_more
+) -> pd.DataFrame:
     """Generic adapter — looks up `function` as a dotted path under fin_kit."""
     import importlib
 

@@ -18,7 +18,6 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 # ── Shared rating types ─────────────────────────────────────────────
 
 
@@ -29,6 +28,7 @@ class PortfolioRating(str, Enum):
     HOLD             — genuinely balanced; no edge.
     UNDERWEIGHT/SELL — directionally short.
     """
+
     BUY = "buy"
     OVERWEIGHT = "overweight"
     HOLD = "hold"
@@ -42,6 +42,7 @@ class TraderAction(str, Enum):
     The PM later refines BUY into BUY vs OVERWEIGHT (sizing) — the
     Trader only commits to the directional bet itself.
     """
+
     BUY = "buy"
     HOLD = "hold"
     SELL = "sell"
@@ -57,6 +58,7 @@ class ResearchPlan(BaseModel):
     side carried the argument, and translates that into concrete
     instructions the Trader can act on.
     """
+
     model_config = ConfigDict(use_enum_values=True)
 
     recommendation: PortfolioRating = Field(
@@ -91,6 +93,7 @@ class TraderProposal(BaseModel):
     HOLD. The Risk Debator and Portfolio Manager downstream may revise
     this, but the Trader's job is to commit to a specific shape.
     """
+
     model_config = ConfigDict(use_enum_values=True)
 
     action: TraderAction
@@ -128,6 +131,7 @@ class PortfolioDecision(BaseModel):
     proposal — if the risk debate flagged something material, the PM
     will revise rating / sizing / target / horizon here.
     """
+
     model_config = ConfigDict(use_enum_values=True)
 
     rating: PortfolioRating
@@ -164,7 +168,8 @@ class PortfolioDecision(BaseModel):
         ),
     )
     confidence: float = Field(
-        ge=0.0, le=1.0,
+        ge=0.0,
+        le=1.0,
         description=(
             "Subjective confidence 0..1. 0.5 = genuinely uncertain. "
             "Use the analyst-debate-risk consensus to calibrate."

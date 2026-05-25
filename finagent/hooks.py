@@ -22,10 +22,9 @@ from __future__ import annotations
 
 import json  # noqa: F401  used by on_llm_end's args serialiser
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from agents import RunHooks
-
 
 _TRUNC = 200
 
@@ -61,43 +60,51 @@ class StreamingHooks(RunHooks):
 
     # ── lifecycle ────────────────────────────────────────────────────────
     async def on_agent_start(self, context, agent) -> None:
-        await self._emit({
-            "type": "agent_lifecycle",
-            "phase": self._phase,
-            "agent": getattr(agent, "name", "agent"),
-            "state": "start",
-        })
+        await self._emit(
+            {
+                "type": "agent_lifecycle",
+                "phase": self._phase,
+                "agent": getattr(agent, "name", "agent"),
+                "state": "start",
+            }
+        )
 
     async def on_agent_end(self, context, agent, output) -> None:
-        await self._emit({
-            "type": "agent_lifecycle",
-            "phase": self._phase,
-            "agent": getattr(agent, "name", "agent"),
-            "state": "end",
-        })
+        await self._emit(
+            {
+                "type": "agent_lifecycle",
+                "phase": self._phase,
+                "agent": getattr(agent, "name", "agent"),
+                "state": "end",
+            }
+        )
 
     # ── tool calls ───────────────────────────────────────────────────────
     async def on_tool_start(self, context, agent, tool) -> None:
         name = getattr(tool, "name", tool.__class__.__name__)
-        await self._emit({
-            "type": "tool_call",
-            "phase": self._phase,
-            "agent": getattr(agent, "name", "agent"),
-            "tool": name,
-            "state": "start",
-        })
+        await self._emit(
+            {
+                "type": "tool_call",
+                "phase": self._phase,
+                "agent": getattr(agent, "name", "agent"),
+                "tool": name,
+                "state": "start",
+            }
+        )
 
     async def on_tool_end(self, context, agent, tool, result) -> None:
         name = getattr(tool, "name", tool.__class__.__name__)
         snippet = _truncate(str(result) if result is not None else "")
-        await self._emit({
-            "type": "tool_call",
-            "phase": self._phase,
-            "agent": getattr(agent, "name", "agent"),
-            "tool": name,
-            "state": "end",
-            "snippet": snippet,
-        })
+        await self._emit(
+            {
+                "type": "tool_call",
+                "phase": self._phase,
+                "agent": getattr(agent, "name", "agent"),
+                "tool": name,
+                "state": "end",
+                "snippet": snippet,
+            }
+        )
 
     # ── llm boundaries ───────────────────────────────────────────────────
     async def on_llm_end(self, context, agent, response) -> None:
@@ -119,12 +126,14 @@ class StreamingHooks(RunHooks):
                         if text:
                             bits.append(text)
                     if bits:
-                        await self._emit({
-                            "type": "reasoning",
-                            "phase": self._phase,
-                            "agent": agent_name,
-                            "text": _truncate(" ".join(bits), 400),
-                        })
+                        await self._emit(
+                            {
+                                "type": "reasoning",
+                                "phase": self._phase,
+                                "agent": agent_name,
+                                "text": _truncate(" ".join(bits), 400),
+                            }
+                        )
                 elif kind in ("function_call", "tool_call"):
                     name = getattr(item, "name", "") or "tool"
                     args = getattr(item, "arguments", "") or ""
@@ -134,14 +143,16 @@ class StreamingHooks(RunHooks):
                             args = json.dumps(args, ensure_ascii=False)
                         except Exception:
                             args = str(args)
-                    await self._emit({
-                        "type": "tool_call_planned",
-                        "phase": self._phase,
-                        "agent": agent_name,
-                        "tool": name,
-                        "args": _truncate(str(args), 400),
-                        "call_id": call_id,
-                    })
+                    await self._emit(
+                        {
+                            "type": "tool_call_planned",
+                            "phase": self._phase,
+                            "agent": agent_name,
+                            "tool": name,
+                            "args": _truncate(str(args), 400),
+                            "call_id": call_id,
+                        }
+                    )
         except Exception:
             pass
 
@@ -150,11 +161,16 @@ async def emit_phase(progress_cb, phase: str, state: str) -> None:
     """Convenience: emit a phase boundary event."""
     if not progress_cb:
         return
-    await progress_cb({"type": "event", "data": {
-        "type": "phase",
-        "phase": phase,
-        "state": state,
-    }})
+    await progress_cb(
+        {
+            "type": "event",
+            "data": {
+                "type": "phase",
+                "phase": phase,
+                "state": state,
+            },
+        }
+    )
 
 
 def build_notebook_outline(path: str) -> dict:
@@ -169,7 +185,12 @@ def build_notebook_outline(path: str) -> dict:
     try:
         nb = nbformat.read(open(path), as_version=4)
     except Exception as e:
-        return {"type": "notebook_outline", "path": str(path), "error": str(e), "cells": []}
+        return {
+            "type": "notebook_outline",
+            "path": str(path),
+            "error": str(e),
+            "cells": [],
+        }
 
     for i, cell in enumerate(nb.cells):
         md = cell.metadata.get("finagent") if hasattr(cell, "metadata") else None
@@ -187,12 +208,14 @@ def build_notebook_outline(path: str) -> dict:
             first = source.splitlines()[0] if source else ""
             title = _truncate(first, 80)
 
-        cells_out.append({
-            "idx": i,
-            "type": cell.cell_type,
-            "title": title,
-            "node_id": (md or {}).get("node_id", ""),
-            "rationale": (md or {}).get("rationale", ""),
-        })
+        cells_out.append(
+            {
+                "idx": i,
+                "type": cell.cell_type,
+                "title": title,
+                "node_id": (md or {}).get("node_id", ""),
+                "rationale": (md or {}).get("rationale", ""),
+            }
+        )
 
     return {"type": "notebook_outline", "path": str(path), "cells": cells_out}

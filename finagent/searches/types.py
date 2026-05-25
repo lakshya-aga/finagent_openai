@@ -20,7 +20,6 @@ from typing import Any, Iterator, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-
 # ── Search-space dimensions ─────────────────────────────────────────────
 
 
@@ -90,12 +89,18 @@ class Objective(BaseModel):
     metric: str = Field(..., min_length=1)
     direction: Literal["max", "min"] = "max"
 
-    def is_better(self, candidate: Optional[float], current_best: Optional[float]) -> bool:
+    def is_better(
+        self, candidate: Optional[float], current_best: Optional[float]
+    ) -> bool:
         if candidate is None:
             return False
         if current_best is None:
             return True
-        return (candidate > current_best) if self.direction == "max" else (candidate < current_best)
+        return (
+            (candidate > current_best)
+            if self.direction == "max"
+            else (candidate < current_best)
+        )
 
 
 class Budget(BaseModel):

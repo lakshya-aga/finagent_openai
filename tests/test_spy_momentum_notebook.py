@@ -33,7 +33,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import sqlite3
-import subprocess
 import sys
 from pathlib import Path
 
@@ -41,7 +40,6 @@ import nbformat
 import numpy as np
 import pandas as pd
 import pytest
-
 
 # ── Synthetic SPY OHLCV fixture (offline) ─────────────────────────────
 
@@ -58,13 +56,16 @@ def _synthetic_spy(n_years: int = 5, seed: int = 42) -> pd.DataFrame:
     daily_returns = rng.normal(loc=0.0004, scale=0.012, size=n_days)
     close = 100.0 * np.exp(np.cumsum(daily_returns))
     idx = pd.bdate_range("2018-01-02", periods=n_days)
-    return pd.DataFrame({
-        "Open":  close * (1 + rng.normal(0, 0.001, n_days)),
-        "High":  close * (1 + np.abs(rng.normal(0, 0.005, n_days))),
-        "Low":   close * (1 - np.abs(rng.normal(0, 0.005, n_days))),
-        "Close": close,
-        "Volume": rng.integers(50_000_000, 150_000_000, n_days),
-    }, index=idx)
+    return pd.DataFrame(
+        {
+            "Open": close * (1 + rng.normal(0, 0.001, n_days)),
+            "High": close * (1 + np.abs(rng.normal(0, 0.005, n_days))),
+            "Low": close * (1 - np.abs(rng.normal(0, 0.005, n_days))),
+            "Close": close,
+            "Volume": rng.integers(50_000_000, 150_000_000, n_days),
+        },
+        index=idx,
+    )
 
 
 # ── Notebook-text builder (one job per cell — follows the orchestrator rule) ──
@@ -86,94 +87,110 @@ def _build_spy_momentum_notebook(spy_csv: Path) -> nbformat.NotebookNode:
     # subsequent cells correctly. In production the panel package is
     # installed into the kernel's site-packages so this isn't needed;
     # for the test we inject the repo root onto sys.path.
-    cells.append(nbformat.v4.new_code_cell(
-        "import sys\n"
-        f"sys.path.insert(0, {str(_REPO_ROOT)!r})\n"
-    ))
+    cells.append(
+        nbformat.v4.new_code_cell(
+            f"import sys\nsys.path.insert(0, {str(_REPO_ROOT)!r})\n"
+        )
+    )
 
     # Cell 1 — imports (role: imports)
-    cells.append(nbformat.v4.new_code_cell(
-        "import pandas as pd\n"
-        "import numpy as np\n"
-        "from sklearn.linear_model import LinearRegression\n"
-        "import panel\n"
-    ))
+    cells.append(
+        nbformat.v4.new_code_cell(
+            "import pandas as pd\n"
+            "import numpy as np\n"
+            "from sklearn.linear_model import LinearRegression\n"
+            "import panel\n"
+        )
+    )
 
     # Cell 1 — data_load (role: data_load)
-    cells.append(nbformat.v4.new_code_cell(
-        f"df = pd.read_csv({str(spy_csv)!r}, index_col=0, parse_dates=True)\n"
-        "assert len(df) > 0, 'data_load failed'\n"
-    ))
+    cells.append(
+        nbformat.v4.new_code_cell(
+            f"df = pd.read_csv({str(spy_csv)!r}, index_col=0, parse_dates=True)\n"
+            "assert len(df) > 0, 'data_load failed'\n"
+        )
+    )
 
     # Cell 2 — preprocess: returns + rolling Sharpe (role: preprocess)
-    cells.append(nbformat.v4.new_code_cell(
-        "rets = df['Close'].pct_change()\n"
-        "rolling_mean = rets.rolling(252).mean()\n"
-        "rolling_std  = rets.rolling(252).std()\n"
-        "rolling_sharpe_252 = (rolling_mean / rolling_std).dropna() * (252 ** 0.5)\n"
-    ))
+    cells.append(
+        nbformat.v4.new_code_cell(
+            "rets = df['Close'].pct_change()\n"
+            "rolling_mean = rets.rolling(252).mean()\n"
+            "rolling_std  = rets.rolling(252).std()\n"
+            "rolling_sharpe_252 = (rolling_mean / rolling_std).dropna() * (252 ** 0.5)\n"
+        )
+    )
 
     # Cell — preprocess: align X / y windows for fitting.
     # (role: preprocess only — doing the next-step shift + dropna here
     # so the train cell is purely .fit() per the one-role-per-cell rule.)
-    cells.append(nbformat.v4.new_code_cell(
-        "rs = rolling_sharpe_252.copy()\n"
-        "y  = rets.reindex(rs.index).shift(-1).dropna()\n"
-        "X  = rs.reindex(y.index).to_frame(name='rs252')\n"
-    ))
+    cells.append(
+        nbformat.v4.new_code_cell(
+            "rs = rolling_sharpe_252.copy()\n"
+            "y  = rets.reindex(rs.index).shift(-1).dropna()\n"
+            "X  = rs.reindex(y.index).to_frame(name='rs252')\n"
+        )
+    )
 
     # Cell — train: fit a LinearRegression. Pure-train cell so the
     # splitter omits it from infer.py and emits the load_model reminder.
-    cells.append(nbformat.v4.new_code_cell(
-        "model = LinearRegression()\n"
-        "model.fit(X, y)\n"
-    ))
+    cells.append(
+        nbformat.v4.new_code_cell("model = LinearRegression()\nmodel.fit(X, y)\n")
+    )
 
     # Cell — signal_export: save_model (role: signal_export)
-    cells.append(nbformat.v4.new_code_cell(
-        "panel.save_model('spy-momentum-252d', model, metadata={\n"
-        "    'framework':'sklearn',\n"
-        "    'signature':'LinearRegression(y_next ~ rolling_sharpe_252)',\n"
-        "    'features':['rs252'],\n"
-        "    'lookback_days': 365,\n"
-        "    'training_window':[str(rs.index[0]), str(rs.index[-1])],\n"
-        "})\n"
-    ))
+    cells.append(
+        nbformat.v4.new_code_cell(
+            "panel.save_model('spy-momentum-252d', model, metadata={\n"
+            "    'framework':'sklearn',\n"
+            "    'signature':'LinearRegression(y_next ~ rolling_sharpe_252)',\n"
+            "    'features':['rs252'],\n"
+            "    'lookback_days': 365,\n"
+            "    'training_window':[str(rs.index[0]), str(rs.index[-1])],\n"
+            "})\n"
+        )
+    )
 
     # Cell 5 — eval: predict + compute walk-forward Sharpe of the
     # predicted signal (role: eval — paired with print, not chart, to
     # keep the cell single-purpose)
-    cells.append(nbformat.v4.new_code_cell(
-        "preds = pd.Series(model.predict(X).flatten(), index=X.index, name='signal')\n"
-        "signal_sharpe = (preds.mean() / preds.std()) * (252 ** 0.5) if preds.std() else 0.0\n"
-        "print(f'in_sample_signal_sharpe={signal_sharpe:.3f}')\n"
-    ))
+    cells.append(
+        nbformat.v4.new_code_cell(
+            "preds = pd.Series(model.predict(X).flatten(), index=X.index, name='signal')\n"
+            "signal_sharpe = (preds.mean() / preds.std()) * (252 ** 0.5) if preds.std() else 0.0\n"
+            "print(f'in_sample_signal_sharpe={signal_sharpe:.3f}')\n"
+        )
+    )
 
     # Cell 6 — signal_export: export_signal (role: signal_export)
-    cells.append(nbformat.v4.new_code_cell(
-        "panel.export_signal(\n"
-        "    'spy-momentum-252d',\n"
-        "    rolling_sharpe_252,\n"
-        "    metadata={\n"
-        "        'frequency':'daily',\n"
-        "        'universe':['SPY'],\n"
-        "        'description':'252-day rolling Sharpe ratio on SPY daily returns',\n"
-        "        'interpretation':'higher = stronger trailing risk-adjusted momentum',\n"
-        "        'model_name':'spy-momentum-252d',\n"
-        "    },\n"
-        ")\n"
-    ))
+    cells.append(
+        nbformat.v4.new_code_cell(
+            "panel.export_signal(\n"
+            "    'spy-momentum-252d',\n"
+            "    rolling_sharpe_252,\n"
+            "    metadata={\n"
+            "        'frequency':'daily',\n"
+            "        'universe':['SPY'],\n"
+            "        'description':'252-day rolling Sharpe ratio on SPY daily returns',\n"
+            "        'interpretation':'higher = stronger trailing risk-adjusted momentum',\n"
+            "        'model_name':'spy-momentum-252d',\n"
+            "    },\n"
+            ")\n"
+        )
+    )
 
     # Cell 7 — summary
-    cells.append(nbformat.v4.new_code_cell(
-        "import json\n"
-        "summary = {\n"
-        "    'recipe_name':'spy-momentum-252d',\n"
-        "    'metrics': {'rolling_sharpe_last': float(rolling_sharpe_252.iloc[-1]),\n"
-        "                'n_observations': int(len(rolling_sharpe_252))}\n"
-        "}\n"
-        "print('FINAGENT_RUN_SUMMARY ' + json.dumps(summary))\n"
-    ))
+    cells.append(
+        nbformat.v4.new_code_cell(
+            "import json\n"
+            "summary = {\n"
+            "    'recipe_name':'spy-momentum-252d',\n"
+            "    'metrics': {'rolling_sharpe_last': float(rolling_sharpe_252.iloc[-1]),\n"
+            "                'n_observations': int(len(rolling_sharpe_252))}\n"
+            "}\n"
+            "print('FINAGENT_RUN_SUMMARY ' + json.dumps(summary))\n"
+        )
+    )
 
     nb.cells = cells
     return nb
@@ -222,15 +239,15 @@ def test_spy_momentum_notebook_to_signal_round_trip(isolated_outputs):
     _execute_notebook_in_process(nb_path)
 
     # 4. Verify on-disk artefacts (model + signal).
-    model_pkl   = isolated_outputs / "models"  / "spy-momentum-252d" / "model.pkl"
-    model_mf    = isolated_outputs / "models"  / "spy-momentum-252d" / "manifest.json"
-    signal_pq   = isolated_outputs / "signals" / "spy-momentum-252d" / "series.parquet"
-    signal_mf   = isolated_outputs / "signals" / "spy-momentum-252d" / "manifest.json"
+    model_pkl = isolated_outputs / "models" / "spy-momentum-252d" / "model.pkl"
+    model_mf = isolated_outputs / "models" / "spy-momentum-252d" / "manifest.json"
+    signal_pq = isolated_outputs / "signals" / "spy-momentum-252d" / "series.parquet"
+    signal_mf = isolated_outputs / "signals" / "spy-momentum-252d" / "manifest.json"
 
-    assert model_pkl.exists(),  f"model pkl missing: {model_pkl}"
-    assert model_mf.exists(),   f"model manifest missing: {model_mf}"
-    assert signal_pq.exists(),  f"signal parquet missing: {signal_pq}"
-    assert signal_mf.exists(),  f"signal manifest missing: {signal_mf}"
+    assert model_pkl.exists(), f"model pkl missing: {model_pkl}"
+    assert model_mf.exists(), f"model manifest missing: {model_mf}"
+    assert signal_pq.exists(), f"signal parquet missing: {signal_pq}"
+    assert signal_mf.exists(), f"signal manifest missing: {signal_mf}"
 
     # 5. Verify model manifest contents.
     mf = json.loads(model_mf.read_text())
@@ -266,16 +283,20 @@ def test_spy_momentum_notebook_to_signal_round_trip(isolated_outputs):
     assert sig[3] == "active"
     assert sig[4] is not None
 
-    versions = conn.execute(
-        "SELECT count(*) FROM signal_versions"
-    ).fetchone()[0]
+    versions = conn.execute("SELECT count(*) FROM signal_versions").fetchone()[0]
     assert versions == 1, f"expected 1 version row, got {versions}"
 
     # 8. Tag + split the executed notebook into train.py / infer.py.
-    spec = importlib.util.spec_from_file_location("classifier", "finagent/cells/classifier.py")
-    classifier = importlib.util.module_from_spec(spec); spec.loader.exec_module(classifier)
-    spec = importlib.util.spec_from_file_location("splitter", "finagent/cells/splitter.py")
-    splitter = importlib.util.module_from_spec(spec); spec.loader.exec_module(splitter)
+    spec = importlib.util.spec_from_file_location(
+        "classifier", "finagent/cells/classifier.py"
+    )
+    classifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(classifier)
+    spec = importlib.util.spec_from_file_location(
+        "splitter", "finagent/cells/splitter.py"
+    )
+    splitter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(splitter)
 
     role_map = classifier.tag_notebook(nb_path)
     # Cell 0 = bootstrap (sys.path injection — classifies as 'other').
@@ -307,6 +328,7 @@ def test_spy_momentum_notebook_to_signal_round_trip(isolated_outputs):
     # 9. Inference round-trip — load the saved model, run it on a fresh
     #    in-memory window, confirm finite output.
     import panel
+
     loaded_model = panel.load_model("spy-momentum-252d")
     fresh_X = pd.DataFrame({"rs252": [0.5, 1.2, -0.3]})
     preds = loaded_model.predict(fresh_X)
@@ -325,7 +347,6 @@ def test_spy_momentum_signal_listed_via_dashboard_helpers(isolated_outputs):
     # Bypass finagent.__init__ (it eagerly imports openai). Build a
     # minimal package shim that satisfies the relative imports inside
     # finagent.experiments, then load that module directly.
-    import sys
     import types
 
     sys.modules.pop("finagent", None)

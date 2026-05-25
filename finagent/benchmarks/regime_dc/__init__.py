@@ -42,8 +42,8 @@ CLI:
     python -m finagent.benchmarks.regime_dc
 """
 
-from .pipeline import Pipeline
 from .grid_search import CustomCrossValidation, run_benchmark
+from .pipeline import Pipeline
 from .strategy import metrics_summary
 
 __all__ = [

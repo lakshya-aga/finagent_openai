@@ -17,12 +17,12 @@ import json
 import textwrap
 from dataclasses import dataclass
 
-from ..types import Feature, Recipe
+from ..types import Recipe
 
 
 @dataclass
 class CellSpec:
-    cell_type: str                 # "code" or "markdown"
+    cell_type: str  # "code" or "markdown"
     content: str
     dag_node_id: str
     rationale: str = ""
@@ -59,8 +59,15 @@ METADATA = {
         # (model_<m> / value_<m> / momentum_<m> / buy_and_hold_<m>) so the
         # project page can sort by any one and compare strategies head-to-head.
         "metrics": [
-            "sharpe", "sortino", "annual_return", "total_return",
-            "max_drawdown", "calmar", "turnover", "hit_rate", "exposure",
+            "sharpe",
+            "sortino",
+            "annual_return",
+            "total_return",
+            "max_drawdown",
+            "calmar",
+            "turnover",
+            "hit_rate",
+            "exposure",
         ],
     },
     # Plausibility band OVERRIDES for this template. Merged on top of
@@ -125,9 +132,9 @@ METADATA = {
                 "# Pre-registered hypothesis (optional). Locks the success/failure\n"
                 "# threshold BEFORE the run executes — kills HARKing.\n"
                 "hypothesis:\n"
-                "  thesis: \"A 3-state HMM that switches between value and momentum strategies\\n"
+                '  thesis: "A 3-state HMM that switches between value and momentum strategies\\n'
                 "    on SPY/TLT/GLD should outperform passive buy-and-hold on a\\n"
-                "    risk-adjusted basis (Sharpe) net of 3 bps execution costs.\"\n"
+                '    risk-adjusted basis (Sharpe) net of 3 bps execution costs."\n'
                 "  success_criteria:\n"
                 "    - { metric: sharpe, op: '>=', value: 0.6 }\n"
                 "    - { metric: annual_return, op: '>=', value: 0.06 }\n"
@@ -178,8 +185,8 @@ METADATA = {
                 "    bps_per_side: 3\n"
                 "    borrow_bps: 0\n\n"
                 "hypothesis:\n"
-                "  thesis: \"XGBoost classifier on macro + price features should beat\\n"
-                "    a coin-flip predictor on next-5-day return sign on SPY (hit rate >= 0.55).\"\n"
+                '  thesis: "XGBoost classifier on macro + price features should beat\\n'
+                '    a coin-flip predictor on next-5-day return sign on SPY (hit rate >= 0.55)."\n'
                 "  success_criteria:\n"
                 "    - { metric: hit_rate, op: '>=', value: 0.55 }\n"
                 "    - { metric: sharpe, op: '>=', value: 0.4 }\n"
@@ -212,99 +219,132 @@ def compile(recipe: Recipe) -> list[CellSpec]:
     cells.append(_md_header(recipe))
 
     # ── Step 2 — Imports ───────────────────────────────────────────────
-    cells.append(_md_step(
-        2, "Imports + recipe metadata",
-        "n2_imports",
-        "Pin the recipe identity and numerical seed up front so re-runs are deterministic.",
-    ))
+    cells.append(
+        _md_step(
+            2,
+            "Imports + recipe metadata",
+            "n2_imports",
+            "Pin the recipe identity and numerical seed up front so re-runs are deterministic.",
+        )
+    )
     cells.append(_code_imports(recipe))
 
     # ── Step 3 — Load data ─────────────────────────────────────────────
-    cells.append(_md_step(
-        3, "Load data",
-        "n3_load",
-        "Pull every datasource declared in the recipe.",
-    ))
+    cells.append(
+        _md_step(
+            3,
+            "Load data",
+            "n3_load",
+            "Pull every datasource declared in the recipe.",
+        )
+    )
     cells.append(_code_load_data(recipe))
 
     # ── Step 4 — Build features ────────────────────────────────────────
-    cells.append(_md_step(
-        4, "Build features",
-        "n4_features",
-        "Derive the feature matrix from raw data. Each builder maps to a recipe entry.",
-    ))
+    cells.append(
+        _md_step(
+            4,
+            "Build features",
+            "n4_features",
+            "Derive the feature matrix from raw data. Each builder maps to a recipe entry.",
+        )
+    )
     cells.append(_code_features(recipe))
 
     # ── Step 5 — Build target (kind-specific) ─────────────────────────
-    cells.append(_md_step(
-        5, "Build target",
-        "n5_target",
-        f"target.kind={recipe.target.kind}; method={recipe.target.method or '-'}",
-    ))
+    cells.append(
+        _md_step(
+            5,
+            "Build target",
+            "n5_target",
+            f"target.kind={recipe.target.kind}; method={recipe.target.method or '-'}",
+        )
+    )
     cells.append(_code_target(recipe))
 
     # ── Step 6 — Walk-forward fit/predict loop ─────────────────────────
-    cells.append(_md_step(
-        6, "Walk-forward training and prediction",
-        "n6_walk_forward",
-        f"Splits={recipe.evaluation.splits}; train={recipe.evaluation.train_window}; "
-        f"test={recipe.evaluation.test_window}.",
-    ))
+    cells.append(
+        _md_step(
+            6,
+            "Walk-forward training and prediction",
+            "n6_walk_forward",
+            f"Splits={recipe.evaluation.splits}; train={recipe.evaluation.train_window}; "
+            f"test={recipe.evaluation.test_window}.",
+        )
+    )
     cells.append(_code_walk_forward(recipe))
 
     # ── Step 7 — Reference strategy books ─────────────────────────────
-    cells.append(_md_step(
-        7, "Build reference strategy books",
-        "n7_reference_books",
-        "Construct value (laggard), momentum (12-1), and buy-and-hold "
-        "weight frames — the strategies a researcher would compare against.",
-    ))
+    cells.append(
+        _md_step(
+            7,
+            "Build reference strategy books",
+            "n7_reference_books",
+            "Construct value (laggard), momentum (12-1), and buy-and-hold "
+            "weight frames — the strategies a researcher would compare against.",
+        )
+    )
     cells.append(_code_reference_books(recipe))
 
     # ── Step 8 — Model-driven book (switching for unsup, signal for sup) ─
-    cells.append(_md_step(
-        8, "Build model-driven book",
-        "n8_model_book",
-        "Unsupervised: walk-forward learn regime→strategy mapping in-sample, "
-        "switch out-of-sample. Supervised: use the prediction as a long/flat signal.",
-    ))
+    cells.append(
+        _md_step(
+            8,
+            "Build model-driven book",
+            "n8_model_book",
+            "Unsupervised: walk-forward learn regime→strategy mapping in-sample, "
+            "switch out-of-sample. Supervised: use the prediction as a long/flat signal.",
+        )
+    )
     cells.append(_code_model_book(recipe))
 
     # ── Step 9 — Financial metrics for every book + canonical output ──
-    cells.append(_md_step(
-        9, "Financial metrics + asset_returns / asset_weights",
-        "n9_metrics",
-        "Sharpe / Sortino / drawdown / turnover for each strategy. "
-        "asset_weights / asset_returns bound to the model book — the "
-        "platform's canonical comparison surface.",
-    ))
+    cells.append(
+        _md_step(
+            9,
+            "Financial metrics + asset_returns / asset_weights",
+            "n9_metrics",
+            "Sharpe / Sortino / drawdown / turnover for each strategy. "
+            "asset_weights / asset_returns bound to the model book — the "
+            "platform's canonical comparison surface.",
+        )
+    )
     cells.append(_code_financial_metrics(recipe))
 
     # ── Step 10 — Charts ──────────────────────────────────────────────
-    cells.append(_md_step(
-        10, "Charts",
-        "n10_charts",
-        "Equity curves for every book, drawdown for the model book, "
-        "and (unsupervised only) a regime ribbon overlaying price.",
-    ))
+    cells.append(
+        _md_step(
+            10,
+            "Charts",
+            "n10_charts",
+            "Equity curves for every book, drawdown for the model book, "
+            "and (unsupervised only) a regime ribbon overlaying price.",
+        )
+    )
     cells.append(_code_charts(recipe))
 
     # ── Step 11 — Decomposition (asset contribution + per-year returns) ─
-    cells.append(_md_step(
-        11, "Decomposition",
-        "n11_decomposition",
-        "Where did the returns come from? Per-asset contribution bar chart "
-        "across books, plus a calendar-year return table for like-for-like "
-        "year comparison.",
-    ))
+    cells.append(
+        _md_step(
+            11,
+            "Decomposition",
+            "n11_decomposition",
+            "Where did the returns come from? Per-asset contribution bar chart "
+            "across books, plus a calendar-year return table for like-for-like "
+            "year comparison.",
+        )
+    )
     cells.append(_code_decomposition(recipe))
 
     # ── Step 12 — Persist run summary for the experiment store ────────
-    cells.append(_md_step(
-        12, "Run summary",
-        "n12_summary",
-        "Print a JSON summary the experiment runner harvests for the Project page.",
-    ))
+    cells.append(
+        _md_step(
+            12,
+            "Run summary",
+            "n12_summary",
+            "Print a JSON summary the experiment runner harvests for the Project page.",
+        )
+    )
     cells.append(_code_summary(recipe))
 
     return cells
@@ -372,7 +412,9 @@ def _code_imports(recipe: Recipe) -> CellSpec:
         f"SEED = {recipe.seed}",
         "np.random.seed(SEED)",
     ]
-    return CellSpec("code", "\n".join(lines), "n2_imports", "Imports + frozen recipe blob.")
+    return CellSpec(
+        "code", "\n".join(lines), "n2_imports", "Imports + frozen recipe blob."
+    )
 
 
 def _code_load_data(recipe: Recipe) -> CellSpec:
@@ -386,8 +428,12 @@ def _code_load_data(recipe: Recipe) -> CellSpec:
     lines.append("# Sanity preview")
     if recipe.data:
         first = next(iter(recipe.data))
-        lines.append(f"print({first}.shape if hasattr({first}, 'shape') else len({first}))")
-    return CellSpec("code", "\n".join(lines), "n3_load", "Declarative datasource loaders.")
+        lines.append(
+            f"print({first}.shape if hasattr({first}, 'shape') else len({first}))"
+        )
+    return CellSpec(
+        "code", "\n".join(lines), "n3_load", "Declarative datasource loaders."
+    )
 
 
 def _code_features(recipe: Recipe) -> CellSpec:
@@ -404,13 +450,22 @@ def _code_features(recipe: Recipe) -> CellSpec:
         # kwargs work as a Python expression. json.dumps would emit
         # null/true/false → NameError when the cell evaluates.
         params_blob = repr(feat.params)
-        lines.append(f"_feature_frames.append(_feat.build({feat.name!r}, **{params_blob}, **locals()))")
-    lines.extend([
-        "",
-        "X = pd.concat(_feature_frames, axis=1).dropna(how='any')",
-        "print(f'feature matrix: shape={X.shape}, columns={list(X.columns)[:8]}…')",
-    ])
-    return CellSpec("code", "\n".join(lines), "n4_features", "Feature matrix from declarative builders.")
+        lines.append(
+            f"_feature_frames.append(_feat.build({feat.name!r}, **{params_blob}, **locals()))"
+        )
+    lines.extend(
+        [
+            "",
+            "X = pd.concat(_feature_frames, axis=1).dropna(how='any')",
+            "print(f'feature matrix: shape={X.shape}, columns={list(X.columns)[:8]}…')",
+        ]
+    )
+    return CellSpec(
+        "code",
+        "\n".join(lines),
+        "n4_features",
+        "Feature matrix from declarative builders.",
+    )
 
 
 def _code_target(recipe: Recipe) -> CellSpec:
@@ -434,7 +489,7 @@ def _code_target(recipe: Recipe) -> CellSpec:
                 # Supervised classification: forward-return-sign over a {h}-day horizon.
                 # Pick the first numeric column in X's source frame as the asset return.
                 ASSET_RETURNS = next(
-                    (df for df in [{', '.join(recipe.data.keys())}] if isinstance(df, pd.DataFrame) and df.select_dtypes('number').shape[1] > 0),
+                    (df for df in [{", ".join(recipe.data.keys())}] if isinstance(df, pd.DataFrame) and df.select_dtypes('number').shape[1] > 0),
                     None,
                 )
                 if ASSET_RETURNS is None:
@@ -450,7 +505,7 @@ def _code_target(recipe: Recipe) -> CellSpec:
             body = textwrap.dedent(f"""\
                 # Supervised classification: high-vol vs low-vol regime by rolling quantile.
                 ASSET_RETURNS = next(
-                    (df for df in [{', '.join(recipe.data.keys())}] if isinstance(df, pd.DataFrame) and df.select_dtypes('number').shape[1] > 0),
+                    (df for df in [{", ".join(recipe.data.keys())}] if isinstance(df, pd.DataFrame) and df.select_dtypes('number').shape[1] > 0),
                     None,
                 )
                 if ASSET_RETURNS is None:
@@ -547,7 +602,12 @@ def _code_walk_forward(recipe: Recipe) -> CellSpec:
         "oos_predictions = oos_predictions.dropna()",
         "print(f'OOS predictions: {len(oos_predictions)} rows · {len(_fold_test_slices)} folds')",
     ]
-    return CellSpec("code", "\n".join(body_lines), "n6_walk_forward", "Walk-forward fit/predict loop.")
+    return CellSpec(
+        "code",
+        "\n".join(body_lines),
+        "n6_walk_forward",
+        "Walk-forward fit/predict loop.",
+    )
 
 
 def _code_reference_books(recipe: Recipe) -> CellSpec:
@@ -649,8 +709,12 @@ def _code_reference_books(recipe: Recipe) -> CellSpec:
         print(f'  value avg exposure   : {{sm.exposure(_value_w):.2f}}')
         print(f'  momentum avg exposure: {{sm.exposure(_momentum_w):.2f}}')
         """)
-    return CellSpec("code", body, "n7_reference_books",
-                    "Value + momentum + buy-and-hold reference weights.")
+    return CellSpec(
+        "code",
+        body,
+        "n7_reference_books",
+        "Value + momentum + buy-and-hold reference weights.",
+    )
 
 
 def _code_model_book(recipe: Recipe) -> CellSpec:
@@ -731,8 +795,12 @@ def _code_model_book(recipe: Recipe) -> CellSpec:
             model_weights = _eq_w.mul(_signal, axis=0).fillna(0.0)
             print(f'model book built (signal-driven). long weeks: {(_signal > 0).sum()}')
         """)
-    return CellSpec("code", body, "n8_model_book",
-                    "Model book: regime-switched (unsup) or signal-driven (sup).")
+    return CellSpec(
+        "code",
+        body,
+        "n8_model_book",
+        "Model book: regime-switched (unsup) or signal-driven (sup).",
+    )
 
 
 def _code_financial_metrics(recipe: Recipe) -> CellSpec:
@@ -748,9 +816,7 @@ def _code_financial_metrics(recipe: Recipe) -> CellSpec:
     # shows the after-trading-cost number first — which is the only
     # number that actually matters for capital allocation.
     costs = recipe.evaluation.costs
-    costs_blob = (
-        repr(costs.model_dump()) if costs is not None else "None"
-    )
+    costs_blob = repr(costs.model_dump()) if costs is not None else "None"
     body = textwrap.dedent(f"""\
         from finagent.recipes import strategy_metrics as sm
 
@@ -894,8 +960,12 @@ def _code_financial_metrics(recipe: Recipe) -> CellSpec:
                 }})
             print(f'regime metrics: {{len(regime_metrics)}} regimes captured')
         """)
-    return CellSpec("code", body, "n9_metrics",
-                    "Financial metrics for value / momentum / buy-and-hold / model + canonical asset_returns/weights.")
+    return CellSpec(
+        "code",
+        body,
+        "n9_metrics",
+        "Financial metrics for value / momentum / buy-and-hold / model + canonical asset_returns/weights.",
+    )
 
 
 def _code_charts(recipe: Recipe) -> CellSpec:
@@ -985,8 +1055,12 @@ def _code_charts(recipe: Recipe) -> CellSpec:
                 plt.tight_layout()
                 plt.show()
         """)
-    return CellSpec("code", body, "n10_charts",
-                    "Equity curves + drawdown + (unsup) regime ribbon as inline PNGs.")
+    return CellSpec(
+        "code",
+        body,
+        "n10_charts",
+        "Equity curves + drawdown + (unsup) regime ribbon as inline PNGs.",
+    )
 
 
 def _code_decomposition(recipe: Recipe) -> CellSpec:
@@ -1106,8 +1180,12 @@ def _code_decomposition(recipe: Recipe) -> CellSpec:
                 print('Calendar-year returns (%):')
                 print((yearly_df_with_full * 100.0).round(2).to_string())
         """)
-    return CellSpec("code", body, "n11_decomposition",
-                    "Per-asset contribution bars + per-year return table.")
+    return CellSpec(
+        "code",
+        body,
+        "n11_decomposition",
+        "Per-asset contribution bars + per-year return table.",
+    )
 
 
 def _code_summary(recipe: Recipe) -> CellSpec:
@@ -1126,4 +1204,6 @@ def _code_summary(recipe: Recipe) -> CellSpec:
         }
         print('FINAGENT_RUN_SUMMARY ' + _json.dumps(SUMMARY, default=str))
         """)
-    return CellSpec("code", body, "n12_summary", "Run-summary marker for harness ingestion.")
+    return CellSpec(
+        "code", body, "n12_summary", "Run-summary marker for harness ingestion."
+    )

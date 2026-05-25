@@ -58,10 +58,17 @@ METADATA = {
     ),
     "supports": {
         "targets": ["supervised_regression"],
-        "models": [],   # OU fit is internal — no sklearn-style classifier needed
+        "models": [],  # OU fit is internal — no sklearn-style classifier needed
         "metrics": [
-            "sharpe", "sortino", "annual_return", "total_return",
-            "max_drawdown", "calmar", "turnover", "hit_rate", "exposure",
+            "sharpe",
+            "sortino",
+            "annual_return",
+            "total_return",
+            "max_drawdown",
+            "calmar",
+            "turnover",
+            "hit_rate",
+            "exposure",
         ],
     },
     # Plausibility envelope — pairs trading at daily frequency lives in
@@ -73,7 +80,7 @@ METADATA = {
         "total_return": (-10, 50),
         "calmar": (-50, 50),
         "max_drawdown": (-1, 0),
-        "turnover": (0, 10),       # pairs strategies churn more than long-only
+        "turnover": (0, 10),  # pairs strategies churn more than long-only
         "sortino": (-5, 5),
     },
     "presets": [
@@ -108,8 +115,8 @@ METADATA = {
                 "    bps_per_side: 5\n"
                 "    borrow_bps: 50\n\n"
                 "hypothesis:\n"
-                "  thesis: \"SPY/TLT cointegration mean-reversion should produce a positive\\n"
-                "    Sharpe net of execution + borrow costs over a multi-cycle window.\"\n"
+                '  thesis: "SPY/TLT cointegration mean-reversion should produce a positive\\n'
+                '    Sharpe net of execution + borrow costs over a multi-cycle window."\n'
                 "  success_criteria:\n"
                 "    - { metric: sharpe, op: '>=', value: 0.5 }\n"
                 "  cancel_criteria:\n"
@@ -148,9 +155,9 @@ METADATA = {
                 "    bps_per_side: 8\n"
                 "    borrow_bps: 75\n\n"
                 "hypothesis:\n"
-                "  thesis: \"The most cointegrated pair in a 6-name sector ETF universe\\n"
+                '  thesis: "The most cointegrated pair in a 6-name sector ETF universe\\n'
                 "    should produce a Sharpe net of costs that beats simply buying-and-holding\\n"
-                "    the universe.\"\n"
+                '    the universe."\n'
                 "  success_criteria:\n"
                 "    - { metric: sharpe, op: '>=', value: 0.5 }\n"
                 "  cancel_criteria:\n"
@@ -176,49 +183,112 @@ def compile(recipe: Recipe) -> list[CellSpec]:
     cells: list[CellSpec] = []
     cells.append(_md_header(recipe))
 
-    cells.append(_md_step(2, "Imports + recipe metadata", "n2_imports",
-                          "Pin the recipe identity and seed up front for determinism."))
+    cells.append(
+        _md_step(
+            2,
+            "Imports + recipe metadata",
+            "n2_imports",
+            "Pin the recipe identity and seed up front for determinism.",
+        )
+    )
     cells.append(_code_imports(recipe))
 
-    cells.append(_md_step(3, "Load data", "n3_load",
-                          "Pull every datasource declared in the recipe."))
+    cells.append(
+        _md_step(
+            3, "Load data", "n3_load", "Pull every datasource declared in the recipe."
+        )
+    )
     cells.append(_code_load_data(recipe))
 
-    cells.append(_md_step(4, "Compute pairwise log-price spreads", "n4_spreads",
-                          "Build log-price spreads for every pair (i,j) with OLS β."))
+    cells.append(
+        _md_step(
+            4,
+            "Compute pairwise log-price spreads",
+            "n4_spreads",
+            "Build log-price spreads for every pair (i,j) with OLS β.",
+        )
+    )
     cells.append(_code_spreads(recipe))
 
-    cells.append(_md_step(5, "Cointegration tests", "n5_coint",
-                          "Engle-Granger across every pair; pick the lowest-p survivor."))
+    cells.append(
+        _md_step(
+            5,
+            "Cointegration tests",
+            "n5_coint",
+            "Engle-Granger across every pair; pick the lowest-p survivor.",
+        )
+    )
     cells.append(_code_cointegration(recipe))
 
-    cells.append(_md_step(6, "Walk-forward OU fit + signal", "n6_walk_forward",
-                          "Fit OU on each train window; generate z-score signals on test."))
+    cells.append(
+        _md_step(
+            6,
+            "Walk-forward OU fit + signal",
+            "n6_walk_forward",
+            "Fit OU on each train window; generate z-score signals on test.",
+        )
+    )
     cells.append(_code_walk_forward(recipe))
 
-    cells.append(_md_step(7, "Reference strategy books", "n7_reference_books",
-                          "Buy-and-hold of the universe, plus a buy-both-legs baseline."))
+    cells.append(
+        _md_step(
+            7,
+            "Reference strategy books",
+            "n7_reference_books",
+            "Buy-and-hold of the universe, plus a buy-both-legs baseline.",
+        )
+    )
     cells.append(_code_reference_books(recipe))
 
-    cells.append(_md_step(8, "Pairs model book", "n8_model_book",
-                          "Translate z-score signals into β-hedged pair weights."))
+    cells.append(
+        _md_step(
+            8,
+            "Pairs model book",
+            "n8_model_book",
+            "Translate z-score signals into β-hedged pair weights.",
+        )
+    )
     cells.append(_code_model_book(recipe))
 
-    cells.append(_md_step(9, "Financial metrics", "n9_metrics",
-                          "Sharpe / Sortino / DD / turnover for model + reference books; "
-                          "headline aliases bound to the model book."))
+    cells.append(
+        _md_step(
+            9,
+            "Financial metrics",
+            "n9_metrics",
+            "Sharpe / Sortino / DD / turnover for model + reference books; "
+            "headline aliases bound to the model book.",
+        )
+    )
     cells.append(_code_financial_metrics(recipe))
 
-    cells.append(_md_step(10, "Charts", "n10_charts",
-                          "Spread + entry/exit z-bands; equity curves; drawdown."))
+    cells.append(
+        _md_step(
+            10,
+            "Charts",
+            "n10_charts",
+            "Spread + entry/exit z-bands; equity curves; drawdown.",
+        )
+    )
     cells.append(_code_charts(recipe))
 
-    cells.append(_md_step(11, "Decomposition", "n11_decomposition",
-                          "Per-leg PnL contribution + calendar-year returns by book."))
+    cells.append(
+        _md_step(
+            11,
+            "Decomposition",
+            "n11_decomposition",
+            "Per-leg PnL contribution + calendar-year returns by book.",
+        )
+    )
     cells.append(_code_decomposition(recipe))
 
-    cells.append(_md_step(12, "Run summary", "n12_summary",
-                          "Print the JSON summary the experiment runner harvests."))
+    cells.append(
+        _md_step(
+            12,
+            "Run summary",
+            "n12_summary",
+            "Print the JSON summary the experiment runner harvests.",
+        )
+    )
     cells.append(_code_summary(recipe))
 
     return cells
@@ -273,7 +343,9 @@ def _code_imports(recipe: Recipe) -> CellSpec:
         "ENTRY_Z = 2.0",
         "EXIT_Z = 0.5",
     ]
-    return CellSpec("code", "\n".join(lines), "n2_imports", "Imports + frozen recipe blob.")
+    return CellSpec(
+        "code", "\n".join(lines), "n2_imports", "Imports + frozen recipe blob."
+    )
 
 
 def _code_load_data(recipe: Recipe) -> CellSpec:
@@ -284,8 +356,12 @@ def _code_load_data(recipe: Recipe) -> CellSpec:
     lines.append("")
     if recipe.data:
         first = next(iter(recipe.data))
-        lines.append(f"print({first}.shape if hasattr({first}, 'shape') else len({first}))")
-    return CellSpec("code", "\n".join(lines), "n3_load", "Declarative datasource loaders.")
+        lines.append(
+            f"print({first}.shape if hasattr({first}, 'shape') else len({first}))"
+        )
+    return CellSpec(
+        "code", "\n".join(lines), "n3_load", "Declarative datasource loaders."
+    )
 
 
 def _code_spreads(recipe: Recipe) -> CellSpec:
@@ -461,7 +537,9 @@ def _code_reference_books(recipe: Recipe) -> CellSpec:
         print(f'  buy-and-hold avg exposure: {sm.exposure(_bh_w):.2f}')
         print(f'  both-legs avg exposure   : {sm.exposure(_both_w):.2f}')
         """)
-    return CellSpec("code", body, "n7_reference_books", "B&H + both-legs reference weights.")
+    return CellSpec(
+        "code", body, "n7_reference_books", "B&H + both-legs reference weights."
+    )
 
 
 def _code_model_book(recipe: Recipe) -> CellSpec:
@@ -486,9 +564,7 @@ def _code_model_book(recipe: Recipe) -> CellSpec:
 def _code_financial_metrics(recipe: Recipe) -> CellSpec:
     requested = list(recipe.evaluation.metrics)
     costs = recipe.evaluation.costs
-    costs_blob = (
-        repr(costs.model_dump()) if costs is not None else "None"
-    )
+    costs_blob = repr(costs.model_dump()) if costs is not None else "None"
     body = textwrap.dedent(f"""\
         from finagent.recipes import strategy_metrics as sm
 
@@ -559,7 +635,12 @@ def _code_financial_metrics(recipe: Recipe) -> CellSpec:
         asset_weights = model_weights.fillna(0.0)
         print(f'\\nasset_returns shape={{asset_returns.shape}}, asset_weights shape={{asset_weights.shape}}')
         """)
-    return CellSpec("code", body, "n9_metrics", "Financial metrics + canonical asset_returns/weights.")
+    return CellSpec(
+        "code",
+        body,
+        "n9_metrics",
+        "Financial metrics + canonical asset_returns/weights.",
+    )
 
 
 def _code_charts(recipe: Recipe) -> CellSpec:
@@ -614,7 +695,9 @@ def _code_charts(recipe: Recipe) -> CellSpec:
             plt.tight_layout()
             plt.show()
         """)
-    return CellSpec("code", body, "n10_charts", "Spread bands + equity curves + drawdown.")
+    return CellSpec(
+        "code", body, "n10_charts", "Spread bands + equity curves + drawdown."
+    )
 
 
 def _code_decomposition(recipe: Recipe) -> CellSpec:
@@ -678,4 +761,6 @@ def _code_summary(recipe: Recipe) -> CellSpec:
         }
         print('FINAGENT_RUN_SUMMARY ' + _json.dumps(SUMMARY, default=str))
         """)
-    return CellSpec("code", body, "n12_summary", "Run-summary marker for harness ingestion.")
+    return CellSpec(
+        "code", body, "n12_summary", "Run-summary marker for harness ingestion."
+    )

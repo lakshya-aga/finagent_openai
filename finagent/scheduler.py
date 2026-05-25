@@ -17,10 +17,8 @@ app.py) calls ``run_daily_nifty_debates`` directly.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Optional
-
 
 # ─── Nifty 50 universe ──────────────────────────────────────────────
 # Source: NSE indices listing as of 2026-05. The Nifty 50 changes
@@ -28,16 +26,56 @@ from typing import Optional
 # Tickers use the .NS suffix so yfinance routes them to NSE.
 
 NIFTY_50: list[str] = [
-    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "BHARTIARTL.NS", "ICICIBANK.NS",
-    "INFY.NS",     "SBIN.NS", "LT.NS",       "HINDUNILVR.NS", "ITC.NS",
-    "BAJFINANCE.NS", "HCLTECH.NS", "KOTAKBANK.NS", "MARUTI.NS", "AXISBANK.NS",
-    "M&M.NS", "SUNPHARMA.NS", "ULTRACEMCO.NS", "TITAN.NS", "NTPC.NS",
-    "BAJAJFINSV.NS", "ASIANPAINT.NS", "ONGC.NS", "ADANIENT.NS", "POWERGRID.NS",
-    "WIPRO.NS", "JSWSTEEL.NS", "TATAMOTORS.NS", "ADANIPORTS.NS", "COALINDIA.NS",
-    "BAJAJ-AUTO.NS", "NESTLEIND.NS", "BEL.NS", "TATASTEEL.NS", "GRASIM.NS",
-    "HDFCLIFE.NS", "TRENT.NS", "SBILIFE.NS", "EICHERMOT.NS", "HINDALCO.NS",
-    "TECHM.NS", "DRREDDY.NS", "CIPLA.NS", "INDUSINDBK.NS", "APOLLOHOSP.NS",
-    "BPCL.NS", "TATACONSUM.NS", "BRITANNIA.NS", "SHRIRAMFIN.NS", "HEROMOTOCO.NS",
+    "RELIANCE.NS",
+    "TCS.NS",
+    "HDFCBANK.NS",
+    "BHARTIARTL.NS",
+    "ICICIBANK.NS",
+    "INFY.NS",
+    "SBIN.NS",
+    "LT.NS",
+    "HINDUNILVR.NS",
+    "ITC.NS",
+    "BAJFINANCE.NS",
+    "HCLTECH.NS",
+    "KOTAKBANK.NS",
+    "MARUTI.NS",
+    "AXISBANK.NS",
+    "M&M.NS",
+    "SUNPHARMA.NS",
+    "ULTRACEMCO.NS",
+    "TITAN.NS",
+    "NTPC.NS",
+    "BAJAJFINSV.NS",
+    "ASIANPAINT.NS",
+    "ONGC.NS",
+    "ADANIENT.NS",
+    "POWERGRID.NS",
+    "WIPRO.NS",
+    "JSWSTEEL.NS",
+    "TATAMOTORS.NS",
+    "ADANIPORTS.NS",
+    "COALINDIA.NS",
+    "BAJAJ-AUTO.NS",
+    "NESTLEIND.NS",
+    "BEL.NS",
+    "TATASTEEL.NS",
+    "GRASIM.NS",
+    "HDFCLIFE.NS",
+    "TRENT.NS",
+    "SBILIFE.NS",
+    "EICHERMOT.NS",
+    "HINDALCO.NS",
+    "TECHM.NS",
+    "DRREDDY.NS",
+    "CIPLA.NS",
+    "INDUSINDBK.NS",
+    "APOLLOHOSP.NS",
+    "BPCL.NS",
+    "TATACONSUM.NS",
+    "BRITANNIA.NS",
+    "SHRIRAMFIN.NS",
+    "HEROMOTOCO.NS",
 ]
 
 
@@ -98,7 +136,7 @@ async def run_daily_nifty_debates(n: int = 5, rounds: int = 2) -> dict:
                 ticker=ticker,
                 asset_class="indian_equity",
                 rounds=rounds,
-                emit=None,             # no SSE stream — purely server-side
+                emit=None,  # no SSE stream — purely server-side
                 debate_id=None,
                 source="scheduled",
             )
@@ -143,10 +181,15 @@ def _record_fire(job_id: str, status: str, result: dict | None = None) -> None:
     re-running the job.
     """
     import time as _time
+
     entry = {"status": status, "ts": _time.time()}
     if result is not None:
         # Trim noisy fields so the health response stays under a few KB.
-        trimmed = {k: v for k, v in result.items() if k not in ("sample_per_ticker", "traceback")}
+        trimmed = {
+            k: v
+            for k, v in result.items()
+            if k not in ("sample_per_ticker", "traceback")
+        }
         if "reports" in trimmed and isinstance(trimmed["reports"], list):
             trimmed["reports"] = [
                 {k: v for k, v in r.items() if k not in ("trades", "positions")}
@@ -223,13 +266,15 @@ def start_scheduler() -> None:
         run_daily_stock_analyses,
         CronTrigger(hour=9, minute=30, timezone="UTC"),
         id="paper_trading_daily_analyses",
-        replace_existing=True, misfire_grace_time=1800,
+        replace_existing=True,
+        misfire_grace_time=1800,
     )
     sch.add_job(
         run_paper_trading_rebalance,
         CronTrigger(hour=10, minute=0, timezone="UTC"),
         id="paper_trading_rebalance",
-        replace_existing=True, misfire_grace_time=3600,
+        replace_existing=True,
+        misfire_grace_time=3600,
     )
 
     sch.start()
@@ -252,14 +297,17 @@ async def run_daily_stock_analyses() -> dict:
     """
     import traceback
     from datetime import datetime, timezone
+
     from .paper_trading.calendar import is_nse_trading_day, next_nse_trading_day
+
     today = datetime.now(timezone.utc).date().isoformat()
     if not is_nse_trading_day(today):
         # Calendar gate — no live NSE session today (weekend / holiday).
         # Skip cleanly rather than burning $5-10 of LLM on predictions
         # that will then be acted on at stale prices by the rebalance.
         skip = {
-            "date": today, "status": "skipped_non_trading_day",
+            "date": today,
+            "status": "skipped_non_trading_day",
             "next_trading_day": next_nse_trading_day(today).isoformat(),
         }
         logging.info("scheduler: stock_analyst SKIP %s (not an NSE trading day)", today)
@@ -272,7 +320,8 @@ async def run_daily_stock_analyses() -> dict:
     except Exception as e:
         logging.exception("scheduler: stock_analyst import failed")
         payload = {
-            "date": today, "status": "import_failed",
+            "date": today,
+            "status": "import_failed",
             "error": f"{type(e).__name__}: {e}",
             "traceback": traceback.format_exc()[-1500:],
         }
@@ -286,7 +335,8 @@ async def run_daily_stock_analyses() -> dict:
     except Exception as e:
         logging.exception("scheduler: stock_analyst daily run failed")
         payload = {
-            "date": today, "status": "run_failed",
+            "date": today,
+            "status": "run_failed",
             "error": f"{type(e).__name__}: {e}",
             "traceback": traceback.format_exc()[-1500:],
         }
@@ -320,6 +370,7 @@ async def run_paper_trading_rebalance() -> dict:
     """
     import traceback
     from datetime import datetime, timezone
+
     from .paper_trading import intraday
     from .paper_trading.calendar import is_nse_trading_day, next_nse_trading_day
 
@@ -330,7 +381,8 @@ async def run_paper_trading_rebalance() -> dict:
         # positions at the LAST KNOWN close (Friday's), booking
         # artificial "direction flip" rows with ₹0 PnL every weekend.
         skip = {
-            "date": today, "status": "skipped_non_trading_day",
+            "date": today,
+            "status": "skipped_non_trading_day",
             "next_trading_day": next_nse_trading_day(today).isoformat(),
         }
         logging.info("scheduler: rebalance SKIP %s (not an NSE trading day)", today)
@@ -352,7 +404,8 @@ async def run_paper_trading_rebalance() -> dict:
             ),
         )
         payload = {
-            "date": today, "status": "ok",
+            "date": today,
+            "status": "ok",
             "reports": [r.__dict__ for r in reports],
         }
         _record_fire("paper_trading_rebalance", "ok", payload)
@@ -360,7 +413,8 @@ async def run_paper_trading_rebalance() -> dict:
     except Exception as e:
         logging.exception("scheduler: paper-trading rebalance failed for %s", today)
         payload = {
-            "date": today, "status": "rebalance_failed",
+            "date": today,
+            "status": "rebalance_failed",
             "error": f"{type(e).__name__}: {e}",
             "traceback": traceback.format_exc()[-1500:],
         }
@@ -388,11 +442,13 @@ def get_registered_jobs() -> list[dict]:
     try:
         for job in _scheduler.get_jobs():  # type: ignore[attr-defined]
             next_run = getattr(job, "next_run_time", None)
-            out.append({
-                "id":            getattr(job, "id", "?"),
-                "next_run_time": next_run.isoformat() if next_run else None,
-                "trigger":       str(getattr(job, "trigger", "?")),
-            })
+            out.append(
+                {
+                    "id": getattr(job, "id", "?"),
+                    "next_run_time": next_run.isoformat() if next_run else None,
+                    "trigger": str(getattr(job, "trigger", "?")),
+                }
+            )
     except Exception as e:
         logging.warning("scheduler.get_registered_jobs failed: %s", e)
     return out

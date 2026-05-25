@@ -24,7 +24,6 @@ from typing import Any, Literal, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
 # ── Data ────────────────────────────────────────────────────────────────
 
 
@@ -33,7 +32,16 @@ class DataSource(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    kind: Literal["yfinance", "fred", "fin_kit", "csv", "fama_french", "cboe", "coingecko", "binance"]
+    kind: Literal[
+        "yfinance",
+        "fred",
+        "fin_kit",
+        "csv",
+        "fama_french",
+        "cboe",
+        "coingecko",
+        "binance",
+    ]
     # All other fields are kind-specific; the loader knows what to look for.
     # Examples:
     #   yfinance:  tickers (list[str]), start (date), end (date), interval
@@ -62,10 +70,15 @@ class Target(BaseModel):
     method: Optional[str] = None  # e.g. "hmm", "kmeans", "future_return_sign"
     n_states: Optional[int] = Field(None, ge=2, le=10)
     horizon_days: Optional[int] = Field(None, ge=1, le=63)
-    label_strategy: Optional[Literal[
-        "next_return_sign", "future_return_sign", "triple_barrier", "vol_quantile",
-        "cointegration_zscore",
-    ]] = None
+    label_strategy: Optional[
+        Literal[
+            "next_return_sign",
+            "future_return_sign",
+            "triple_barrier",
+            "vol_quantile",
+            "cointegration_zscore",
+        ]
+    ] = None
     threshold: Optional[float] = None  # e.g. for triple_barrier or vol_quantile
 
     @model_validator(mode="after")
@@ -103,9 +116,7 @@ class Feature(BaseModel):
 class ModelSpec(BaseModel):
     """Fully-qualified class + kwargs."""
 
-    class_path: str = Field(
-        ..., description="Dotted path, e.g. 'hmmlearn.GaussianHMM'"
-    )
+    class_path: str = Field(..., description="Dotted path, e.g. 'hmmlearn.GaussianHMM'")
     params: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("class_path")
@@ -189,18 +200,24 @@ class Costs(BaseModel):
     """
 
     bps_per_side: float = Field(
-        0.0, ge=0.0, le=500.0,
+        0.0,
+        ge=0.0,
+        le=500.0,
         description="Per-trade cost in bps. Round-trip ≈ 2× this.",
     )
     borrow_bps: float = Field(
-        0.0, ge=0.0, le=2000.0,
+        0.0,
+        ge=0.0,
+        le=2000.0,
         description="Annualised short borrow rate in bps.",
     )
 
 
 class Evaluation(BaseModel):
     splits: SplitKind
-    train_window: Optional[int] = Field(None, ge=20, description="bars in each train fold")
+    train_window: Optional[int] = Field(
+        None, ge=20, description="bars in each train fold"
+    )
     test_window: Optional[int] = Field(None, ge=1, description="bars in each test fold")
     n_folds: Optional[int] = Field(None, ge=2, le=20)
     metrics: list[str] = Field(default_factory=list)

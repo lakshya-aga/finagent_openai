@@ -5,7 +5,6 @@ from __future__ import annotations
 from agents import Agent, ModelSettings
 from openai.types.shared.reasoning import Reasoning
 
-from ..mcp_connections import make_data_mcp, make_fruit_thrower
 from ..functions import (
     add_cell,
     delete_cell,
@@ -13,7 +12,7 @@ from ..functions import (
     read_notebook,
     replace_cell,
 )
-
+from ..mcp_connections import make_data_mcp, make_fruit_thrower
 
 EDIT_ORCHESTRATION_INSTRUCTIONS = """You are a NOTEBOOK EDIT AGENT.
 
@@ -67,7 +66,6 @@ End with: {"op": "FINAL", "result": "SUCCESS" | "FATAL: <reason>"}
 
 
 from finagent.llm import get_model_name
-
 
 edit_orchestration_agent = Agent(
     name="EditOrchestrationAgent",

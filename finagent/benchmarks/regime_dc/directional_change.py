@@ -20,13 +20,8 @@ trend-flip edge case that v2 fixed.
 
 from __future__ import annotations
 
-from typing import Optional
-
-import numpy as np
 import pandas as pd
-
 import yfinance as yf
-
 
 # ── data loader ─────────────────────────────────────────────────────
 
@@ -52,8 +47,11 @@ def get_data(
     only used ^GSPC).
     """
     data = yf.download(
-        tickers, start=start_date, end=end_date,
-        progress=False, auto_adjust=False,
+        tickers,
+        start=start_date,
+        end=end_date,
+        progress=False,
+        auto_adjust=False,
     )
 
     # yf.download returns a MultiIndex (field, ticker) when given a
@@ -140,10 +138,10 @@ def split_dcc_ext(dc: list[tuple]) -> tuple[list, list, list, list]:
     Mirrors the paper's ``get_DCC_EXT``."""
     if not dc:
         return [], [], [], []
-    dcc        = [row[1] for row in dc]
-    dcc_index  = [row[0] for row in dc]
-    ext        = [row[3] for row in dc]
-    ext_index  = [row[2] for row in dc]
+    dcc = [row[1] for row in dc]
+    dcc_index = [row[0] for row in dc]
+    ext = [row[3] for row in dc]
+    ext_index = [row[2] for row in dc]
     return dcc, dcc_index, ext, ext_index
 
 
@@ -175,13 +173,14 @@ def get_R(tmv: pd.Series, T: pd.Series, theta: float) -> pd.Series:
 
 
 def compute_indicators(
-    prices: pd.Series, theta: float,
+    prices: pd.Series,
+    theta: float,
 ) -> tuple[list[tuple], pd.Series, pd.Series, pd.Series]:
     """One-shot: DC events → (DC, TMV, T, R). Each indicator series
     is aligned on the SAME EXT-timestamp index, so a row in any of
     the three corresponds to the same trend in the others."""
     dc = get_DC_data(prices, theta)
     tmv = get_TMV(dc, theta)
-    T   = get_T(dc)
-    R   = get_R(tmv, T, theta)
+    T = get_T(dc)
+    R = get_R(tmv, T, theta)
     return dc, tmv, T, R

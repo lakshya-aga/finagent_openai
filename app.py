@@ -1,4 +1,5 @@
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # Configure logging at INFO so logger.info() calls reach docker logs.
@@ -8,10 +9,11 @@ load_dotenv()
 # synapse-finagent-1 | grep …` returns empty. Done at import time
 # so it covers every module imported below.
 import logging as _logging_setup
+
 _logging_setup.basicConfig(
     level=_logging_setup.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    force=True,   # override uvicorn's logger config which kicks in later
+    force=True,  # override uvicorn's logger config which kicks in later
 )
 
 # Phoenix tracing — auto-instruments openai / httpx / langchain calls
@@ -19,38 +21,35 @@ _logging_setup.basicConfig(
 # Must run before any LLM client is constructed so the instrumentation
 # patches the SDK before first use.
 from finagent.tracing import init_tracing
+
 init_tracing()
 
 # Daily Nifty 50 debate scheduler. APScheduler in-process; cron at
 # 02:00 UTC (07:30 IST). No-op if apscheduler isn't installed locally.
-from finagent.scheduler import start_scheduler, stop_scheduler
-
 import asyncio
 import json
 import logging
 import math
 import os
-import re
-import uuid
-from pathlib import Path
-from typing import List, Literal, Optional
-
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import StreamingResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
-from openai import AsyncOpenAI
-from pydantic import BaseModel
-
-from agent_workflow import run_workflow, WorkflowInput
 
 # ── Rate Limiting ────────────────────────────────────────────────────────
 # Simple in-memory sliding-window rate limiter. Tracks timestamps per key
 # (user id, session id, or IP). Configurable via RATE_LIMIT_RPM (default 10).
 # Only applied to expensive endpoints: /api/chat, /api/debates, /api/recipes,
 # and the Synapse-facing /chat route.
-
 import time as _time
+import uuid
 from collections import defaultdict as _defaultdict
+from pathlib import Path
+from typing import List, Literal, Optional
+
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from agent_workflow import WorkflowInput, run_workflow
+from finagent.scheduler import start_scheduler, stop_scheduler
 
 _RATE_LIMIT_RPM = int(os.environ.get("RATE_LIMIT_RPM", "10"))
 _RATE_WINDOW = 60  # seconds
@@ -108,6 +107,7 @@ async def _rate_limit_key(request: "StarletteRequest") -> str:
     client_ip = request.client.host if request.client else "unknown"
     return f"ip:{client_ip}"
 
+
 app = FastAPI()
 
 
@@ -115,7 +115,7 @@ app = FastAPI()
 # so /api/health can answer "did the new code actually pull and the
 # container actually restart" without shelling out per request.
 import subprocess as _subprocess
-import time as _time
+
 _PROCESS_STARTED_AT = _time.time()
 
 
@@ -132,25 +132,48 @@ def _resolve_commit_info() -> dict:
     env_sha = os.environ.get("FINAGENT_COMMIT_SHA", "").strip()
     if env_sha:
         return {
-            "sha":     env_sha,
+            "sha": env_sha,
             "subject": os.environ.get("FINAGENT_COMMIT_SUBJECT", ""),
-            "time":    os.environ.get("FINAGENT_COMMIT_TIME", ""),
-            "source":  "env",
+            "time": os.environ.get("FINAGENT_COMMIT_TIME", ""),
+            "source": "env",
         }
     try:
         cwd = Path(__file__).resolve().parent
-        sha = _subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=str(cwd), timeout=2,
-        ).decode().strip()
-        subject = _subprocess.check_output(
-            ["git", "log", "-1", "--pretty=%s"], cwd=str(cwd), timeout=2,
-        ).decode().strip()
-        commit_time = _subprocess.check_output(
-            ["git", "log", "-1", "--pretty=%cI"], cwd=str(cwd), timeout=2,
-        ).decode().strip()
+        sha = (
+            _subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(cwd),
+                timeout=2,
+            )
+            .decode()
+            .strip()
+        )
+        subject = (
+            _subprocess.check_output(
+                ["git", "log", "-1", "--pretty=%s"],
+                cwd=str(cwd),
+                timeout=2,
+            )
+            .decode()
+            .strip()
+        )
+        commit_time = (
+            _subprocess.check_output(
+                ["git", "log", "-1", "--pretty=%cI"],
+                cwd=str(cwd),
+                timeout=2,
+            )
+            .decode()
+            .strip()
+        )
         return {"sha": sha, "subject": subject, "time": commit_time, "source": "git"}
     except Exception as e:
-        return {"sha": None, "subject": None, "time": None, "source": f"unavailable: {type(e).__name__}"}
+        return {
+            "sha": None,
+            "subject": None,
+            "time": None,
+            "source": f"unavailable: {type(e).__name__}",
+        }
 
 
 _COMMIT_INFO = _resolve_commit_info()
@@ -218,15 +241,20 @@ async def _chart_smoke_test() -> None:
     for ticker in ("AAPL", "RELIANCE.NS"):
         try:
             out = await asyncio.to_thread(
-                plot_ohlc_chart, ticker,
-                lookback_days=60, with_sr=False, with_indicators=False,
+                plot_ohlc_chart,
+                ticker,
+                lookback_days=60,
+                with_sr=False,
+                with_indicators=False,
             )
         except Exception as e:
             logging.error(
                 "chart_smoke: %s raised %s: %s — investigate immediately "
                 "(this means plot_ohlc_chart's own try/except didn't catch a "
                 "code path it should have)",
-                ticker, type(e).__name__, e,
+                ticker,
+                type(e).__name__,
+                e,
             )
             continue
         status = out.get("chart_status", "?")
@@ -234,20 +262,24 @@ async def _chart_smoke_test() -> None:
             logging.info("chart_smoke: %s OK", ticker)
         elif status == "no_data":
             logging.warning(
-                "chart_smoke: %s no_data — likely yfinance rate-limit, "
-                "not a code bug", ticker,
+                "chart_smoke: %s no_data — likely yfinance rate-limit, not a code bug",
+                ticker,
             )
         else:
             logging.error(
                 "chart_smoke: %s status=%s summary=%r — REGRESSION, "
                 "investigate before charts ship to users",
-                ticker, status, (out.get("summary") or "")[:160],
+                ticker,
+                status,
+                (out.get("summary") or "")[:160],
             )
 
 
 @app.on_event("shutdown")
 async def _shutdown():
     stop_scheduler()
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ── SQLite-backed session store ──────────────────────────────────────────
@@ -288,9 +320,7 @@ def _get_session(sid: str) -> dict:
 
 def _create_session(sid: str) -> dict:
     with sqlite3.connect(str(_SESSION_DB_PATH)) as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO sessions (session_id) VALUES (?)", (sid,)
-        )
+        conn.execute("INSERT OR IGNORE INTO sessions (session_id) VALUES (?)", (sid,))
         conn.commit()
     return {"notebook_path": None, "history": []}
 
@@ -314,9 +344,7 @@ def _cleanup_old_sessions() -> int:
     """Delete sessions older than SESSION_TTL_DAYS. Returns count deleted."""
     cutoff = _time.time() - (_SESSION_TTL_DAYS * 86400)
     with sqlite3.connect(str(_SESSION_DB_PATH)) as conn:
-        cursor = conn.execute(
-            "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
-        )
+        cursor = conn.execute("DELETE FROM sessions WHERE updated_at < ?", (cutoff,))
         conn.commit()
         return cursor.rowcount
 
@@ -364,18 +392,28 @@ async def chat(req: ChatRequest):
             notebook_path = result.get("notebook_path") or session["notebook_path"]
             history = list(session["history"])
             history.append(
-                {"role": "user", "content": [{"type": "input_text", "text": req.message}]}
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": req.message}],
+                }
             )
             history.append(
-                {"role": "assistant", "content": [{"type": "output_text", "text": result.get("output_text", "")}]}
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": result.get("output_text", "")}
+                    ],
+                }
             )
             _update_session(sid, notebook_path, history)
-            await progress_queue.put({
-                "type": "done",
-                "mode": result.get("mode", "new"),
-                "notebook_path": notebook_path,
-                "summary": result.get("output_text", ""),  # used by question mode
-            })
+            await progress_queue.put(
+                {
+                    "type": "done",
+                    "mode": result.get("mode", "new"),
+                    "notebook_path": notebook_path,
+                    "summary": result.get("output_text", ""),  # used by question mode
+                }
+            )
         except Exception as e:
             logging.exception("/api/chat run_workflow failed")
             await progress_queue.put(_client_error_payload(e))
@@ -736,7 +774,8 @@ class _DebateSubmission(BaseModel):
 async def paper_trading_portfolio(strategy: str = "equal_weight"):
     """Surface A header stats — equity, today's PnL, all-time return,
     Sharpe, max drawdown, exposure summary."""
-    from finagent.paper_trading import store, STRATEGIES
+    from finagent.paper_trading import STRATEGIES, store
+
     if strategy not in STRATEGIES:
         raise HTTPException(400, f"strategy must be one of {STRATEGIES}")
     return store.portfolio_overview(strategy)
@@ -751,7 +790,8 @@ async def paper_trading_equity_curve(
     """Surface B chart data — list of {date, equity_value, daily_pnl,
     daily_return_pct, drawdown}. Drawdown is computed on the fly from
     the equity curve so the store stays write-once."""
-    from finagent.paper_trading import store, STRATEGIES, STARTING_CAPITAL
+    from finagent.paper_trading import STARTING_CAPITAL, STRATEGIES, store
+
     if strategy not in STRATEGIES:
         raise HTTPException(400, f"strategy must be one of {STRATEGIES}")
     snaps = store.list_snapshots(strategy, start=start, end=end)
@@ -763,15 +803,19 @@ async def paper_trading_equity_curve(
         v = s["equity_value"]
         if v > peak:
             peak = v
-        out.append({
-            "date": s["date"],
-            "equity_value": v,
-            "daily_pnl": s["daily_pnl"],
-            "daily_return_pct": s["daily_return_pct"],
-            "drawdown": (v - peak) / peak if peak > 0 else 0.0,
-            "transaction_costs": s["transaction_costs"],
-            "n_long": s["n_long"], "n_short": s["n_short"], "n_neutral": s["n_neutral"],
-        })
+        out.append(
+            {
+                "date": s["date"],
+                "equity_value": v,
+                "daily_pnl": s["daily_pnl"],
+                "daily_return_pct": s["daily_return_pct"],
+                "drawdown": (v - peak) / peak if peak > 0 else 0.0,
+                "transaction_costs": s["transaction_costs"],
+                "n_long": s["n_long"],
+                "n_short": s["n_short"],
+                "n_neutral": s["n_neutral"],
+            }
+        )
     return {"strategy": strategy, "n_points": len(out), "points": out}
 
 
@@ -782,7 +826,8 @@ async def paper_trading_positions(
 ):
     """Surface C table — open positions for a strategy at a given date
     (default: most recent snapshot date)."""
-    from finagent.paper_trading import store, universe, STRATEGIES
+    from finagent.paper_trading import STRATEGIES, store, universe
+
     if strategy not in STRATEGIES:
         raise HTTPException(400, f"strategy must be one of {STRATEGIES}")
     positions = store.list_positions(strategy, date)
@@ -790,8 +835,12 @@ async def paper_trading_positions(
     # second lookup per row.
     for p in positions:
         p["sector"] = universe.get_sector(p["ticker"])
-    return {"strategy": strategy, "as_of": positions[0]["date"] if positions else None,
-            "n_positions": len(positions), "positions": positions}
+    return {
+        "strategy": strategy,
+        "as_of": positions[0]["date"] if positions else None,
+        "n_positions": len(positions),
+        "positions": positions,
+    }
 
 
 @app.get("/api/paper-trading/predictions")
@@ -800,6 +849,7 @@ async def paper_trading_predictions(date: Optional[str] = None):
     recent date with predictions). Returns all 50 (filtered later by
     the UI to non-NEUTRAL if desired)."""
     from finagent.paper_trading import store
+
     if date is None:
         date = store.latest_prediction_date()
     if not date:
@@ -809,9 +859,9 @@ async def paper_trading_predictions(date: Optional[str] = None):
 
 
 class PaperTradingPredictionPayload(BaseModel):
-    date: str                          # 'YYYY-MM-DD'
+    date: str  # 'YYYY-MM-DD'
     ticker: str
-    direction: int                     # -1 / 0 / +1
+    direction: int  # -1 / 0 / +1
     confidence: Optional[float] = None
     reasoning: Optional[str] = None
     target_price: Optional[float] = None
@@ -825,11 +875,16 @@ async def paper_trading_record_prediction(p: PaperTradingPredictionPayload):
     + the portfolio-agent commit tool. UNIQUE(date, ticker) means a
     second call with the same key overwrites."""
     from finagent.paper_trading import predictions
+
     try:
         pid = predictions.record_prediction(
-            date=p.date, ticker=p.ticker, direction=p.direction,
-            confidence=p.confidence, reasoning=p.reasoning,
-            target_price=p.target_price, stop_loss_price=p.stop_loss_price,
+            date=p.date,
+            ticker=p.ticker,
+            direction=p.direction,
+            confidence=p.confidence,
+            reasoning=p.reasoning,
+            target_price=p.target_price,
+            stop_loss_price=p.stop_loss_price,
             source=p.source or "manual",
         )
         return {"id": pid, "date": p.date, "ticker": p.ticker, "direction": p.direction}
@@ -845,8 +900,10 @@ async def paper_trading_eod_close(date: Optional[str] = None):
     Returns the EodReport for each strategy. Slow (~5-15s) because of
     yfinance batch fetch; the synapse proxy bumps the per-request
     timeout for this route."""
-    from finagent.paper_trading import engine
     from datetime import datetime, timezone
+
+    from finagent.paper_trading import engine
+
     if not date:
         date = datetime.now(timezone.utc).date().isoformat()
     reports = await engine.run_eod_close_all(date)
@@ -862,11 +919,13 @@ async def paper_trading_trades(
     """Trade history. Returns closed trades with realized PnL + close
     reason; set ``only_closed=false`` to include currently-open trades
     (closed_at=null, realized_pnl=null) for a unified ledger view."""
-    from finagent.paper_trading import store, universe, STRATEGIES
+    from finagent.paper_trading import STRATEGIES, store, universe
+
     if strategy not in STRATEGIES:
         raise HTTPException(400, f"strategy must be one of {STRATEGIES}")
-    trades = store.list_trades(strategy, limit=max(1, min(500, int(limit))),
-                               only_closed=bool(only_closed))
+    trades = store.list_trades(
+        strategy, limit=max(1, min(500, int(limit))), only_closed=bool(only_closed)
+    )
     for t in trades:
         t["sector"] = universe.get_sector(t["ticker"])
     return {"strategy": strategy, "n": len(trades), "trades": trades}
@@ -879,8 +938,10 @@ async def paper_trading_trades(
 async def paper_trading_capture_opens(date: Optional[str] = None):
     """Phase 1: open today's positions at their opening print. Run
     once per day at ~09:20 IST after the open prints land."""
-    from finagent.paper_trading import intraday
     from datetime import datetime, timezone
+
+    from finagent.paper_trading import intraday
+
     if not date:
         date = datetime.now(timezone.utc).date().isoformat()
     reports = await intraday.capture_open_prices_all(date)
@@ -891,8 +952,10 @@ async def paper_trading_capture_opens(date: Optional[str] = None):
 async def paper_trading_monitor_triggers(date: Optional[str] = None):
     """Phase 2: scan open trades for SL/TP triggers using the latest
     LTPs. Idempotent — run every 5-15 min during market hours."""
-    from finagent.paper_trading import intraday
     from datetime import datetime, timezone
+
+    from finagent.paper_trading import intraday
+
     if not date:
         date = datetime.now(timezone.utc).date().isoformat()
     reports = await intraday.monitor_triggers_all(date)
@@ -904,8 +967,10 @@ async def paper_trading_intraday_replay(date: Optional[str] = None):
     """EOD intraday replay — walk yfinance 1m bars for the day and
     close any open trade whose target/stop_loss was breached between
     the 15-min monitor checks. Idempotent; safe to re-run."""
-    from finagent.paper_trading import intraday
     from datetime import datetime, timezone
+
+    from finagent.paper_trading import intraday
+
     if not date:
         date = datetime.now(timezone.utc).date().isoformat()
     reports = await intraday.replay_intraday_triggers_all(date)
@@ -918,8 +983,10 @@ async def paper_trading_run_stock_analyses(date: Optional[str] = None):
     Writes direction + target + stop_loss + max_hold_days into the
     predictions table for ``date`` (default: today UTC). ~$0.05 of
     LLM calls in ~90s."""
-    from finagent.agents.stock_analyst import run_daily_all_50
     from datetime import datetime, timezone
+
+    from finagent.agents.stock_analyst import run_daily_all_50
+
     if not date:
         date = datetime.now(timezone.utc).date().isoformat()
     return await run_daily_all_50(date)
@@ -935,10 +1002,17 @@ async def paper_trading_diagnostics_groww():
     the VM.
     """
     import asyncio as _asyncio
-    out: dict = {"token_minted": False, "token_len": 0,
-                 "sdk_imported": False, "feed_imported": False, "tests": []}
+
+    out: dict = {
+        "token_minted": False,
+        "token_len": 0,
+        "sdk_imported": False,
+        "feed_imported": False,
+        "tests": [],
+    }
     try:
         from growwapi import GrowwAPI, GrowwFeed  # noqa: F401
+
         out["sdk_imported"] = True
         out["feed_imported"] = True
     except ImportError as e:
@@ -946,6 +1020,7 @@ async def paper_trading_diagnostics_groww():
         return out
     try:
         from finagent.paper_trading import groww_auth
+
         token = groww_auth.get_token()
         out["token_minted"] = True
         out["token_len"] = len(token)
@@ -957,7 +1032,8 @@ async def paper_trading_diagnostics_groww():
     SEGMENT_CASH = getattr(GrowwAPI, "SEGMENT_CASH", "CASH")
 
     def _shrink(obj, depth: int = 0):
-        if depth > 4: return "<...>"
+        if depth > 4:
+            return "<...>"
         if isinstance(obj, dict):
             return {k: _shrink(v, depth + 1) for k, v in list(obj.items())[:20]}
         if isinstance(obj, (list, tuple)):
@@ -970,25 +1046,45 @@ async def paper_trading_diagnostics_groww():
         try:
             result = fn(*args, **kwargs)
         except Exception as e:
-            return {"name": name, "ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+            return {
+                "name": name,
+                "ok": False,
+                "error": f"{type(e).__name__}: {str(e)[:200]}",
+            }
         return {"name": name, "ok": True, "result": _shrink(result)}
 
-    out["tests"].append(await _asyncio.to_thread(
-        _try, "get_quote(RELIANCE/NSE/CASH)",
-        client.get_quote, "RELIANCE", "NSE", SEGMENT_CASH, 10,
-    ))
-    out["tests"].append(await _asyncio.to_thread(
-        _try, "get_ltp([RELIANCE,TCS,HDFCBANK]/CASH)",
-        client.get_ltp, ("RELIANCE", "TCS", "HDFCBANK"), SEGMENT_CASH, 10,
-    ))
+    out["tests"].append(
+        await _asyncio.to_thread(
+            _try,
+            "get_quote(RELIANCE/NSE/CASH)",
+            client.get_quote,
+            "RELIANCE",
+            "NSE",
+            SEGMENT_CASH,
+            10,
+        )
+    )
+    out["tests"].append(
+        await _asyncio.to_thread(
+            _try,
+            "get_ltp([RELIANCE,TCS,HDFCBANK]/CASH)",
+            client.get_ltp,
+            ("RELIANCE", "TCS", "HDFCBANK"),
+            SEGMENT_CASH,
+            10,
+        )
+    )
 
     # Feed-based NIFTY 50 index value — separate connection (WebSocket).
     def _probe_index():
         try:
             feed = GrowwFeed(token)
         except Exception as e:
-            return {"name": "feed get_index_value(NIFTY)", "ok": False,
-                    "error": f"GrowwFeed init: {type(e).__name__}: {e}"}
+            return {
+                "name": "feed get_index_value(NIFTY)",
+                "ok": False,
+                "error": f"GrowwFeed init: {type(e).__name__}: {e}",
+            }
         attempts: list[dict] = []
         for cand in (
             [{"exchange": "NSE", "trading_symbol": "NIFTY", "segment": "INDEX"}],
@@ -999,6 +1095,7 @@ async def paper_trading_diagnostics_groww():
             try:
                 feed.subscribe_index_value(cand)  # type: ignore[attr-defined]
                 import time as _time
+
                 _time.sleep(3.0)
                 a["result"] = _shrink(feed.get_index_value())
                 a["ok"] = True
@@ -1008,9 +1105,11 @@ async def paper_trading_diagnostics_groww():
             attempts.append(a)
             if a.get("ok") and a.get("result"):
                 break
-        return {"name": "feed get_index_value(NIFTY)",
-                "ok": any(a.get("ok") for a in attempts),
-                "attempts": attempts}
+        return {
+            "name": "feed get_index_value(NIFTY)",
+            "ok": any(a.get("ok") for a in attempts),
+            "attempts": attempts,
+        }
 
     out["tests"].append(await _asyncio.to_thread(_probe_index))
     return out
@@ -1033,8 +1132,10 @@ async def paper_trading_rebalance(date: Optional[str] = None):
     Replaces the old start-of-day-open / EOD-close split with a
     single rebalance-at-close that lets positions persist across days.
     """
-    from finagent.paper_trading import intraday
     from datetime import datetime, timezone
+
+    from finagent.paper_trading import intraday
+
     if not date:
         date = datetime.now(timezone.utc).date().isoformat()
     reports = await intraday.rebalance_at_close_all(date)
@@ -1046,8 +1147,10 @@ async def paper_trading_finalize_eod(date: Optional[str] = None):
     """Phase 3: end-of-day reconciliation. Closes direction-change
     trades at today's close, MTMs remaining open positions, writes
     the daily snapshot. Run once at ~15:35 IST."""
-    from finagent.paper_trading import intraday
     from datetime import datetime, timezone
+
+    from finagent.paper_trading import intraday
+
     if not date:
         date = datetime.now(timezone.utc).date().isoformat()
     reports = await intraday.finalize_eod_all(date)
@@ -1059,8 +1162,10 @@ async def paper_trading_seed_from_debates(date: Optional[str] = None):
     """Convert today's existing debate verdicts into predictions.
     Lets a freshly-deployed paper book bootstrap from the daily-debate
     history without spinning up the portfolio agent first."""
-    from finagent.paper_trading import predictions
     from datetime import datetime, timezone
+
+    from finagent.paper_trading import predictions
+
     if not date:
         date = datetime.now(timezone.utc).date().isoformat()
     return predictions.seed_from_debates(date)
@@ -1075,7 +1180,9 @@ async def list_signals_route(
     status. Sort: most recently updated first."""
     from finagent.experiments import list_signals_db
 
-    signals = [s.as_public_dict() for s in list_signals_db(project=project, status=status)]
+    signals = [
+        s.as_public_dict() for s in list_signals_db(project=project, status=status)
+    ]
     return {"signals": signals}
 
 
@@ -1105,6 +1212,7 @@ async def get_signal_series_route(name: str, tail: int = 0):
     """
     try:
         import pandas as pd  # noqa: WPS433
+
         from panel import load_signal
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"panel unavailable: {e}")
@@ -1207,12 +1315,14 @@ async def start_debate(req: _DebateSubmission):
     async def _emit_and_capture(evt: dict) -> None:
         # Capture for persistence AND forward to the client stream.
         if evt.get("type") == "message":
-            transcript_accum.append({
-                "speaker": evt.get("speaker"),
-                "phase": evt.get("phase"),
-                "text": evt.get("text"),
-                "ts": evt.get("ts"),
-            })
+            transcript_accum.append(
+                {
+                    "speaker": evt.get("speaker"),
+                    "phase": evt.get("phase"),
+                    "text": evt.get("text"),
+                    "ts": evt.get("ts"),
+                }
+            )
         elif evt.get("type") == "verdict":
             # Persist incrementally so a stream reconnect can hit /get_debate
             # and see the verdict already saved.
@@ -1243,7 +1353,10 @@ async def start_debate(req: _DebateSubmission):
 @app.get("/api/debates")
 async def list_debates(ticker: Optional[str] = None, limit: int = 50):
     from finagent.experiments import get_store
-    debates = get_store().list_debates(ticker=ticker, limit=max(1, min(200, int(limit))))
+
+    debates = get_store().list_debates(
+        ticker=ticker, limit=max(1, min(200, int(limit)))
+    )
     return {"debates": [d.as_public_dict() for d in debates]}
 
 
@@ -1257,7 +1370,8 @@ async def debates_calendar(
     The Nifty 50 daily-cron page consumes this. Filters to scheduled-source
     debates by default; pass source='all' or source='user' to widen.
     """
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
+
     from finagent.experiments import get_store
 
     if month:
@@ -1273,7 +1387,11 @@ async def debates_calendar(
     # Window covers the calendar's visible weeks (Sunday-anchored grid),
     # so a month view always has 5-6 rows pre-filled. Pad ±7 days.
     first = datetime(year, mon, 1, tzinfo=timezone.utc)
-    last = datetime(year + 1, 1, 1, tzinfo=timezone.utc) if mon == 12 else datetime(year, mon + 1, 1, tzinfo=timezone.utc)
+    last = (
+        datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+        if mon == 12
+        else datetime(year, mon + 1, 1, tzinfo=timezone.utc)
+    )
     start_ts = (first - timedelta(days=7)).timestamp()
     end_ts = (last + timedelta(days=7)).timestamp()
 
@@ -1285,20 +1403,24 @@ async def debates_calendar(
             continue
         if source != "all" and d.source != source:
             continue
-        date_str = datetime.fromtimestamp(d.started_at, tz=timezone.utc).strftime("%Y-%m-%d")
+        date_str = datetime.fromtimestamp(d.started_at, tz=timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
         verdict = d.verdict() or {}
-        out_by_day.setdefault(date_str, []).append({
-            "id": d.id,
-            "ticker": d.ticker,
-            "asset_class": d.asset_class,
-            "status": d.status,
-            "started_at": d.started_at,
-            "verdict_action": verdict.get("action"),
-            "verdict_target": verdict.get("target_price"),
-            "verdict_stoploss": verdict.get("stoploss"),
-            "verdict_horizon": verdict.get("time_horizon"),
-            "verdict_confidence": verdict.get("confidence"),
-        })
+        out_by_day.setdefault(date_str, []).append(
+            {
+                "id": d.id,
+                "ticker": d.ticker,
+                "asset_class": d.asset_class,
+                "status": d.status,
+                "started_at": d.started_at,
+                "verdict_action": verdict.get("action"),
+                "verdict_target": verdict.get("target_price"),
+                "verdict_stoploss": verdict.get("stoploss"),
+                "verdict_horizon": verdict.get("time_horizon"),
+                "verdict_confidence": verdict.get("confidence"),
+            }
+        )
     # Sort each day's bucket by started_at ascending so the row reads in
     # execution order.
     for k in out_by_day:
@@ -1333,8 +1455,9 @@ async def health():
     is still returned. Cheap (no DB, no LLM, no GROWW mint) — safe
     to poll from monitoring.
     """
-    from finagent.scheduler import get_registered_jobs, get_last_fire_table
     from datetime import datetime, timezone
+
+    from finagent.scheduler import get_last_fire_table, get_registered_jobs
 
     uptime = max(0.0, _time.time() - _PROCESS_STARTED_AT)
 
@@ -1342,9 +1465,14 @@ async def health():
     # confirm the GH-Actions deploy actually wrote the .env on the VM
     # without exposing the keys to anyone reading /api/health.
     env_keys = [
-        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "FRED_API_KEY",
-        "GROWW_API_KEY", "GROWW_API_SECRET", "GROWW_ACCESS_TOKEN",
-        "GROWW_TOTP_SECRET", "MCP_PUBLIC_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "FRED_API_KEY",
+        "GROWW_API_KEY",
+        "GROWW_API_SECRET",
+        "GROWW_ACCESS_TOKEN",
+        "GROWW_TOTP_SECRET",
+        "MCP_PUBLIC_KEY",
         "PAPER_TRADING_QUOTE_SOURCE",
     ]
     env_present = {k: bool(os.environ.get(k, "").strip()) for k in env_keys}
@@ -1371,31 +1499,34 @@ async def health():
     # because it's a holiday" without ssh'ing the VM to read logs.
     try:
         from finagent.paper_trading.calendar import (
-            is_nse_trading_day, next_nse_trading_day, calendar_backend,
+            calendar_backend,
+            is_nse_trading_day,
+            next_nse_trading_day,
         )
+
         today = datetime.now(timezone.utc).date()
         calendar_state = {
-            "today_iso":              today.isoformat(),
-            "is_trading_day":         is_nse_trading_day(today),
-            "next_trading_day":       next_nse_trading_day(today).isoformat(),
-            "backend":                calendar_backend(),
+            "today_iso": today.isoformat(),
+            "is_trading_day": is_nse_trading_day(today),
+            "next_trading_day": next_nse_trading_day(today).isoformat(),
+            "backend": calendar_backend(),
         }
     except Exception as e:
         calendar_state = {"error": f"{type(e).__name__}: {e}"}
 
     return {
         "ok": True,
-        "now":             datetime.now(timezone.utc).isoformat(),
-        "uptime_seconds":  round(uptime, 1),
-        "commit":          _COMMIT_INFO,
+        "now": datetime.now(timezone.utc).isoformat(),
+        "uptime_seconds": round(uptime, 1),
+        "commit": _COMMIT_INFO,
         "scheduler": {
-            "started":     len(jobs) > 0,
-            "jobs":        jobs,
-            "last_fire":   last_fire,
+            "started": len(jobs) > 0,
+            "jobs": jobs,
+            "last_fire": last_fire,
         },
-        "env_present":     env_present,
+        "env_present": env_present,
         "quote_source_resolved": quote_source_pred,
-        "nse_calendar":    calendar_state,
+        "nse_calendar": calendar_state,
     }
 
 
@@ -1411,6 +1542,7 @@ async def trigger_paper_trading_now():
     of the yfinance fetch) so the caller sees the result.
     """
     from finagent.scheduler import run_paper_trading_rebalance
+
     return await run_paper_trading_rebalance()
 
 
@@ -1421,7 +1553,7 @@ async def trigger_scheduler_now(n: int = 5, rounds: int = 2):
     Runs in the background — returns immediately with the queued
     ticker list so the caller can check progress on /api/debates.
     """
-    from finagent.scheduler import select_least_recent, run_daily_nifty_debates
+    from finagent.scheduler import run_daily_nifty_debates, select_least_recent
 
     selected = select_least_recent(max(1, min(50, int(n))))
     asyncio.create_task(run_daily_nifty_debates(n=len(selected), rounds=rounds))
@@ -1447,7 +1579,8 @@ async def debate_performance(debate_id: str):
     Falls back to a structured 'no_data' shape if the ticker can't be
     fetched (delisted, tz-mismatch, illiquid).
     """
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
+
     from finagent.experiments import get_store
 
     d = get_store().get_debate(debate_id)
@@ -1478,6 +1611,7 @@ async def debate_performance(debate_id: str):
 
     try:
         from findata.equity_prices import get_equity_prices
+
         df = await asyncio.to_thread(
             get_equity_prices,
             tickers=[d.ticker],
@@ -1494,6 +1628,7 @@ async def debate_performance(debate_id: str):
 
     # Normalise to a flat Close series.
     import pandas as pd
+
     if isinstance(df.columns, pd.MultiIndex):
         try:
             close = df["Close"][d.ticker].dropna()
@@ -1523,9 +1658,8 @@ async def debate_performance(debate_id: str):
     direction_correct = None
     action = (verdict.get("action") or "").lower()
     if return_pct is not None and action in ("buy", "sell"):
-        direction_correct = (
-            (action == "buy" and return_pct > 0) or
-            (action == "sell" and return_pct < 0)
+        direction_correct = (action == "buy" and return_pct > 0) or (
+            action == "sell" and return_pct < 0
         )
 
     target_progress_pct = None
@@ -1539,22 +1673,25 @@ async def debate_performance(debate_id: str):
         progress = (latest_price - entry_price) / (target - entry_price)
         target_progress_pct = max(-2.0, min(2.0, progress))
 
-    out.update({
-        "entry_price": entry_price,
-        "entry_date": entry_date,
-        "latest_price": latest_price,
-        "latest_date": latest_date,
-        "return_pct": return_pct,
-        "direction_correct": direction_correct,
-        "target_progress_pct": target_progress_pct,
-        "status": "ok",
-    })
+    out.update(
+        {
+            "entry_price": entry_price,
+            "entry_date": entry_date,
+            "latest_price": latest_price,
+            "latest_date": latest_date,
+            "return_pct": return_pct,
+            "direction_correct": direction_correct,
+            "target_progress_pct": target_progress_pct,
+            "status": "ok",
+        }
+    )
     return out
 
 
 @app.get("/api/debates/{debate_id}")
 async def get_debate(debate_id: str):
     from finagent.experiments import get_store
+
     d = get_store().get_debate(debate_id)
     if not d:
         raise HTTPException(status_code=404, detail="debate not found")
@@ -1564,6 +1701,7 @@ async def get_debate(debate_id: str):
 @app.delete("/api/debates/{debate_id}")
 async def delete_debate(debate_id: str):
     from finagent.experiments import get_store
+
     get_store().delete_debate(debate_id)
     return {"ok": True}
 
@@ -1578,6 +1716,7 @@ async def run_tearsheet(run_id: str):
     browser print already covers).
     """
     from fastapi.responses import HTMLResponse
+
     from finagent.experiments import get_store
     from finagent.tearsheet import render_tearsheet
 
@@ -1625,6 +1764,7 @@ async def admin_llm_config():
       OPENAI_MODEL=gpt-4o     # global default applied when role-specific is unset
     """
     from finagent.llm import list_roles
+
     return {role: {"provider": p, "model": m} for role, (p, m) in list_roles().items()}
 
 
@@ -1728,11 +1868,14 @@ async def analytics_track(p: TrackVisitPayload, request: Request):
     the beacon never breaks the page).
     """
     from finagent.analytics import store as visit_store
+
     ua = p.ua or request.headers.get("user-agent") or ""
     try:
         visit_store.record_visit(
-            path=p.path, anonymous_id=p.anonymous_id,
-            referrer=p.referrer, ua=ua,
+            path=p.path,
+            anonymous_id=p.anonymous_id,
+            referrer=p.referrer,
+            ua=ua,
         )
     except Exception:
         logging.exception("/api/analytics/track: failed to record visit")
@@ -1744,6 +1887,7 @@ async def analytics_summary(exclude_bots: bool = True):
     """Headline numbers — pageviews + uniques over today / 7d / 30d /
     all-time. Admin-gated at the synapse proxy layer."""
     from finagent.analytics import store as visit_store
+
     return visit_store.summary(exclude_bots=exclude_bots)
 
 
@@ -1752,42 +1896,57 @@ async def analytics_timeline(days: int = 30, exclude_bots: bool = True):
     """Day-by-day pageviews + uniques over the last ``days``. Empty
     days are emitted with zeroes so the chart doesn't gap."""
     from finagent.analytics import store as visit_store
+
     return {
         "days": days,
         "exclude_bots": exclude_bots,
-        "series": visit_store.timeline(days=max(1, min(365, days)), exclude_bots=exclude_bots),
+        "series": visit_store.timeline(
+            days=max(1, min(365, days)), exclude_bots=exclude_bots
+        ),
     }
 
 
 @app.get("/api/analytics/top-pages")
-async def analytics_top_pages(days: int = 7, limit: int = 20, exclude_bots: bool = True):
+async def analytics_top_pages(
+    days: int = 7, limit: int = 20, exclude_bots: bool = True
+):
     from finagent.analytics import store as visit_store
+
     return {
         "days": days,
-        "rows": visit_store.top_pages(days=max(1, min(365, days)),
-                                      limit=max(1, min(100, limit)),
-                                      exclude_bots=exclude_bots),
+        "rows": visit_store.top_pages(
+            days=max(1, min(365, days)),
+            limit=max(1, min(100, limit)),
+            exclude_bots=exclude_bots,
+        ),
     }
 
 
 @app.get("/api/analytics/top-referrers")
-async def analytics_top_referrers(days: int = 7, limit: int = 20, exclude_bots: bool = True):
+async def analytics_top_referrers(
+    days: int = 7, limit: int = 20, exclude_bots: bool = True
+):
     from finagent.analytics import store as visit_store
+
     return {
         "days": days,
-        "rows": visit_store.top_referrers(days=max(1, min(365, days)),
-                                          limit=max(1, min(100, limit)),
-                                          exclude_bots=exclude_bots),
+        "rows": visit_store.top_referrers(
+            days=max(1, min(365, days)),
+            limit=max(1, min(100, limit)),
+            exclude_bots=exclude_bots,
+        ),
     }
 
 
 @app.get("/api/analytics/devices")
 async def analytics_devices(days: int = 30, exclude_bots: bool = False):
     from finagent.analytics import store as visit_store
+
     return {
         "days": days,
-        "rows": visit_store.device_breakdown(days=max(1, min(365, days)),
-                                             exclude_bots=exclude_bots),
+        "rows": visit_store.device_breakdown(
+            days=max(1, min(365, days)), exclude_bots=exclude_bots
+        ),
     }
 
 
@@ -1935,6 +2094,7 @@ async def get_notebook_lineage(name: str, method: str = "ast", refresh: bool = F
     if it was computed during the workflow. Pass `refresh=true` to recompute.
     """
     import nbformat as _nbformat
+
     from finagent.lineage import extract_lineage_ast, extract_lineage_runtime
 
     if method not in ("ast", "runtime"):
@@ -1964,16 +2124,23 @@ _VECTOR_STORE_ID = os.environ.get(
 )
 _UPLOAD_MAX_BYTES = 25 * 1024 * 1024  # 25 MB
 
+
 @app.post("/uploads/pdf")
 async def upload_pdf(file: UploadFile = File(...)):
-    if file.content_type and file.content_type not in {"application/pdf", "application/x-pdf"}:
+    if file.content_type and file.content_type not in {
+        "application/pdf",
+        "application/x-pdf",
+    }:
         raise HTTPException(status_code=415, detail="only PDF files are accepted")
 
     data = await file.read()
     if len(data) == 0:
         raise HTTPException(status_code=400, detail="empty file")
     if len(data) > _UPLOAD_MAX_BYTES:
-        raise HTTPException(status_code=413, detail=f"PDF too large (max {_UPLOAD_MAX_BYTES // (1024*1024)} MB)")
+        raise HTTPException(
+            status_code=413,
+            detail=f"PDF too large (max {_UPLOAD_MAX_BYTES // (1024 * 1024)} MB)",
+        )
 
     filename = file.filename or "upload.pdf"
     # PDF upload uses the OpenAI Files + Vector Stores APIs specifically;
@@ -1981,6 +2148,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     # one stays OpenAI-pinned even after the L3 migration. Routing
     # through the dispatcher anyway for telemetry consistency.
     from finagent.llm import get_llm_client
+
     client = get_llm_client("default")
 
     try:
@@ -1999,7 +2167,9 @@ async def upload_pdf(file: UploadFile = File(...)):
         )
     except Exception as e:
         logging.exception("OpenAI vector_stores.files.create failed for %s", filename)
-        raise HTTPException(status_code=502, detail=f"vector_stores.files.create failed: {e}")
+        raise HTTPException(
+            status_code=502, detail=f"vector_stores.files.create failed: {e}"
+        )
 
     return {
         "filename": filename,
@@ -2042,10 +2212,12 @@ def _to_internal_history(messages: List[_WebMessage]) -> list:
     history = []
     for m in messages:
         content_type = "output_text" if m.role == "assistant" else "input_text"
-        history.append({
-            "role": m.role,
-            "content": [{"type": content_type, "text": m.content}],
-        })
+        history.append(
+            {
+                "role": m.role,
+                "content": [{"type": content_type, "text": m.content}],
+            }
+        )
     return history
 
 
@@ -2114,7 +2286,9 @@ async def chat_web(req: _WebChatRequest):
             last_user_idx = i
             break
     if last_user_idx is None:
-        raise HTTPException(status_code=400, detail="request must contain at least one user message")
+        raise HTTPException(
+            status_code=400, detail="request must contain at least one user message"
+        )
 
     last_user = req.messages[last_user_idx].content
     prior_history = _to_internal_history(req.messages[:last_user_idx])
@@ -2135,12 +2309,14 @@ async def chat_web(req: _WebChatRequest):
             )
             notebook_path = result.get("notebook_path") or session["notebook_path"]
             _update_session(_web_session_id(uid), notebook_path, [])
-            await progress_queue.put({
-                "type": "done",
-                "text": result.get("output_text", ""),
-                "mode": result.get("mode", "new"),
-                "notebook_path": notebook_path,
-            })
+            await progress_queue.put(
+                {
+                    "type": "done",
+                    "text": result.get("output_text", ""),
+                    "mode": result.get("mode", "new"),
+                    "notebook_path": notebook_path,
+                }
+            )
         except Exception as e:
             logging.exception("/chat run_workflow failed")
             await progress_queue.put(_client_error_payload(e))

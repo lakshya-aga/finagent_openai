@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -131,10 +130,15 @@ def test_export_signal_round_trip_parquet_manifest_and_db(isolated_outputs):
 
     # In the DB
     conn = sqlite3.connect(str(isolated_outputs / "experiments.db"))
-    row = conn.execute("SELECT * FROM signals WHERE name = ?", ("spy-momentum-252d",)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM signals WHERE name = ?", ("spy-momentum-252d",)
+    ).fetchone()
     assert row is not None
     # PRAGMA table_info returns (cid, name, type, notnull, dflt, pk) — name is index 1.
-    cols = {c[1]: row[i] for i, c in enumerate(conn.execute("PRAGMA table_info(signals)").fetchall())}
+    cols = {
+        c[1]: row[i]
+        for i, c in enumerate(conn.execute("PRAGMA table_info(signals)").fetchall())
+    }
     assert cols["name"] == "spy-momentum-252d"
     assert cols["frequency"] == "daily"
     assert json.loads(cols["universe_json"]) == ["SPY"]
@@ -145,7 +149,9 @@ def test_export_signal_round_trip_parquet_manifest_and_db(isolated_outputs):
     assert cols["n_observations"] == 252
     assert cols["status"] == "active"
 
-    versions = conn.execute("SELECT count(*) FROM signal_versions WHERE signal_id = ?", (cols["id"],)).fetchone()[0]
+    versions = conn.execute(
+        "SELECT count(*) FROM signal_versions WHERE signal_id = ?", (cols["id"],)
+    ).fetchone()[0]
     assert versions == 1
 
 
@@ -161,7 +167,9 @@ def test_export_signal_second_export_is_a_new_version(isolated_outputs):
     assert rows == 3
     rows = conn.execute("SELECT count(*) FROM signals").fetchone()[0]
     assert rows == 1
-    n_obs = conn.execute("SELECT n_observations FROM signals WHERE name = 'foo'").fetchone()[0]
+    n_obs = conn.execute(
+        "SELECT n_observations FROM signals WHERE name = 'foo'"
+    ).fetchone()[0]
     assert n_obs == 30
 
 
@@ -195,7 +203,9 @@ def test_export_signal_accepts_dataframe_with_one_column(isolated_outputs):
 def test_export_signal_rejects_multicolumn_dataframe(isolated_outputs):
     import panel
 
-    df = pd.DataFrame({"a": [1, 2], "b": [3, 4]}, index=pd.date_range("2024-01-01", periods=2))
+    df = pd.DataFrame(
+        {"a": [1, 2], "b": [3, 4]}, index=pd.date_range("2024-01-01", periods=2)
+    )
     with pytest.raises(ValueError, match="single-column"):
         panel.export_signal("multicol", df, metadata={})
 
@@ -253,17 +263,20 @@ def test_get_inference_inputs_lookback_override_wins(isolated_outputs):
 # ── name validation ────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("bad", [
-    "",
-    "a",                    # too short (min 4 with leading + trailing alnum)
-    "Foo",                  # uppercase
-    "foo_bar",              # underscore
-    "foo bar",              # space
-    "foo.bar",              # dot
-    "-foo",                 # leading hyphen
-    "foo-",                 # trailing hyphen
-    "x" * 100,              # too long
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "a",  # too short (min 4 with leading + trailing alnum)
+        "Foo",  # uppercase
+        "foo_bar",  # underscore
+        "foo bar",  # space
+        "foo.bar",  # dot
+        "-foo",  # leading hyphen
+        "foo-",  # trailing hyphen
+        "x" * 100,  # too long
+    ],
+)
 def test_name_validation_rejects_bad_slugs(isolated_outputs, bad):
     import panel
 
@@ -271,13 +284,16 @@ def test_name_validation_rejects_bad_slugs(isolated_outputs, bad):
         panel.save_model(bad, {})
 
 
-@pytest.mark.parametrize("good", [
-    "foo",
-    "spy-momentum-252d",
-    "btc-vol-targeting-12mo",
-    "x-y-z",
-    "abc",
-])
+@pytest.mark.parametrize(
+    "good",
+    [
+        "foo",
+        "spy-momentum-252d",
+        "btc-vol-targeting-12mo",
+        "x-y-z",
+        "abc",
+    ],
+)
 def test_name_validation_accepts_kebab(isolated_outputs, good):
     import panel
 

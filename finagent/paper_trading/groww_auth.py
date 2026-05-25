@@ -34,7 +34,6 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -106,8 +105,8 @@ def _mint_via_totp(api_key: str, totp_secret: str) -> Optional[str]:
     so the operator can see them in container logs without the daily
     cron crashing."""
     try:
-        from growwapi import GrowwAPI  # type: ignore[import-not-found]
         import pyotp
+        from growwapi import GrowwAPI  # type: ignore[import-not-found]
     except ImportError as e:
         logger.warning("groww_auth: SDK or pyotp not installed (%s)", e)
         return None

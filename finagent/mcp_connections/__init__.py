@@ -1,15 +1,29 @@
 import logging
 
 from .servers import (
-    FRUIT_THROWER_URL,
+    DATA_MCP_TOOLS,
     DATA_MCP_URL,
     FRUIT_THROWER_TOOLS,
-    DATA_MCP_TOOLS,
-    make_fruit_thrower,
+    FRUIT_THROWER_URL,
+    file_search,
     make_data_mcp,
     make_file_search,
-    file_search,
+    make_fruit_thrower,
 )
+
+__all__ = [
+    "DATA_MCP_TOOLS",
+    "DATA_MCP_URL",
+    "FRUIT_THROWER_TOOLS",
+    "FRUIT_THROWER_URL",
+    "file_search",
+    "make_data_mcp",
+    "make_file_search",
+    "make_fruit_thrower",
+    "make_knowledge_mcp",
+    "mcp_servers",
+    "optional_knowledge_mcp",
+]
 
 _logger = logging.getLogger(__name__)
 
@@ -24,6 +38,7 @@ _logger = logging.getLogger(__name__)
 #
 # Replace these stubs with a real factory when the knowledge-MCP
 # server lands.
+
 
 def make_knowledge_mcp():
     """Stub: no-op until the real knowledge-MCP server lands."""

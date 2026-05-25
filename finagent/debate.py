@@ -42,9 +42,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
-
 
 EmitFn = Callable[[dict], Awaitable[None]]
 
@@ -94,9 +92,14 @@ async def run_debate(
         # Hatch back to the old SDK-based debate. Kept only as a hot-
         # patch escape route; not the default path.
         from .debate_legacy import run_debate as _legacy
+
         return await _legacy(
-            ticker, asset_class, rounds=rounds, emit=emit,
-            debate_id=debate_id, source=source,
+            ticker,
+            asset_class,
+            rounds=rounds,
+            emit=emit,
+            debate_id=debate_id,
+            source=source,
         )
 
     emit = emit or _noop_emit
@@ -107,10 +110,13 @@ async def run_debate(
     own_row = debate_id is None
     if own_row:
         from .experiments import get_store
+
         try:
             _row = get_store().create_debate(
-                ticker=ticker, asset_class=asset_class,
-                rounds=rounds, source=source,
+                ticker=ticker,
+                asset_class=asset_class,
+                rounds=rounds,
+                source=source,
             )
             debate_id = _row.id
             get_store().update_debate(debate_id, status="running")
@@ -135,6 +141,7 @@ async def run_debate(
             return
         try:
             from .experiments import get_store
+
             get_store().update_debate(
                 debate_id,
                 transcript=transcript,
@@ -172,15 +179,17 @@ async def run_debate(
             return
 
         if typ == "tool_call":
-            evidence.append({
-                "phase": ev.get("phase", ""),
-                "speaker": ev.get("speaker", ""),
-                "tool": ev.get("tool", ""),
-                "args": ev.get("args", ""),
-                "output": ev.get("output", ""),
-                "call_id": ev.get("call_id", ""),
-                "ts": ev.get("ts", time.time()),
-            })
+            evidence.append(
+                {
+                    "phase": ev.get("phase", ""),
+                    "speaker": ev.get("speaker", ""),
+                    "tool": ev.get("tool", ""),
+                    "args": ev.get("args", ""),
+                    "output": ev.get("output", ""),
+                    "call_id": ev.get("call_id", ""),
+                    "ts": ev.get("ts", time.time()),
+                }
+            )
             await emit(ev)
             # Persist evidence so the detail page's EvidenceList stays
             # current. Tool calls fire 4-8 times per analyst, ~30 times
@@ -196,6 +205,7 @@ async def run_debate(
             if debate_id:
                 try:
                     from .experiments import get_store
+
                     get_store().update_debate(
                         debate_id,
                         verdict=final_verdict,
@@ -206,9 +216,16 @@ async def run_debate(
                     logging.exception("run_debate: verdict persist failed")
             return
 
-        if typ in ("phase", "started", "done", "error",
-                   "structured_retry", "research_plan",
-                   "trader_proposal", "portfolio_decision"):
+        if typ in (
+            "phase",
+            "started",
+            "done",
+            "error",
+            "structured_retry",
+            "research_plan",
+            "trader_proposal",
+            "portfolio_decision",
+        ):
             # Pass through — UI either displays them or ignores.
             await emit(ev)
             return
@@ -221,13 +238,14 @@ async def run_debate(
 
     try:
         from .agents.trading_panel import run_panel
+
         result = await run_panel(
             ticker=ticker,
             asset_class=asset_class,
             rounds=rounds,
             emit=_adapter_emit,
             panel_id=debate_id,
-            persist=False,    # we own the persistence here, not the panel
+            persist=False,  # we own the persistence here, not the panel
             source=source,
         )
     except Exception as exc:
@@ -235,16 +253,25 @@ async def run_debate(
         if own_row:
             try:
                 from .experiments import get_store
+
                 get_store().update_debate(
-                    debate_id, status="failed",
-                    transcript=transcript, evidence=evidence,
-                    error=str(exc), finished=True,
+                    debate_id,
+                    status="failed",
+                    transcript=transcript,
+                    evidence=evidence,
+                    error=str(exc),
+                    finished=True,
                 )
             except Exception:
                 logging.exception("run_debate: failed to persist failure")
-        await emit({"type": "error", "phase": "error",
-                    "text": f"{type(exc).__name__}: {exc}",
-                    "ts": time.time()})
+        await emit(
+            {
+                "type": "error",
+                "phase": "error",
+                "text": f"{type(exc).__name__}: {exc}",
+                "ts": time.time(),
+            }
+        )
         raise
 
     finished_at = time.time()
@@ -254,6 +281,7 @@ async def run_debate(
     if own_row:
         try:
             from .experiments import get_store
+
             get_store().update_debate(
                 debate_id,
                 status="completed",

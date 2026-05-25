@@ -9,12 +9,11 @@ Traceability hook: add_cell / replace_cell / insert_cell accept optional
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
 
 import nbformat
-
 from agents import function_tool
 
+from .kernel import _run_code_in_kernel
 from .notebook_io import (
     _ensure_parent_dir,
     _get_current_path,
@@ -23,7 +22,6 @@ from .notebook_io import (
     _make_cell,
     _save_notebook,
 )
-from .kernel import _run_code_in_kernel
 
 
 def _apply_provenance(cell, dag_node_id: str, rationale: str) -> None:
@@ -40,8 +38,9 @@ def _apply_provenance(cell, dag_node_id: str, rationale: str) -> None:
 @function_tool
 def create_notebook():
     """Create an empty notebook at the next-available outputs/notebook_N.ipynb path."""
-    from nbformat.v4 import new_notebook
     import sys
+
+    from nbformat.v4 import new_notebook
 
     path = _get_latest_path()
     logging.info(f"TOOL CALL: create_notebook {path}")
@@ -108,7 +107,9 @@ def replace_cell(
 ):
     """Replace a cell in place. Re-state dag_node_id / rationale so provenance survives."""
     path = _get_current_path()
-    logging.info(f"TOOL CALL: replace_cell idx={cell_index} type={cell_type} node={dag_node_id!r}")
+    logging.info(
+        f"TOOL CALL: replace_cell idx={cell_index} type={cell_type} node={dag_node_id!r}"
+    )
 
     nb = _load_notebook()
     if cell_index < 0 or cell_index >= len(nb.cells):
@@ -145,10 +146,15 @@ def insert_cell(
 ):
     """Insert a new cell at cell_index, shifting subsequent cells down."""
     path = _get_current_path()
-    logging.info(f"TOOL CALL: insert_cell idx={cell_index} type={cell_type} node={dag_node_id!r}")
+    logging.info(
+        f"TOOL CALL: insert_cell idx={cell_index} type={cell_type} node={dag_node_id!r}"
+    )
     nb = _load_notebook()
     if cell_index < 0 or cell_index > len(nb.cells):
-        return {"success": False, "error": f"cell_index {cell_index} out of range (0–{len(nb.cells)})"}
+        return {
+            "success": False,
+            "error": f"cell_index {cell_index} out of range (0–{len(nb.cells)})",
+        }
     cell = _make_cell(cell_type, content)
     _apply_provenance(cell, dag_node_id, rationale)
     nb.cells.insert(cell_index, cell)
@@ -163,7 +169,10 @@ def delete_cell(cell_index: int):
     logging.info(f"TOOL CALL: delete_cell idx={cell_index}")
     nb = _load_notebook()
     if cell_index < 0 or cell_index >= len(nb.cells):
-        return {"success": False, "error": f"cell_index {cell_index} out of range (0–{len(nb.cells)-1})"}
+        return {
+            "success": False,
+            "error": f"cell_index {cell_index} out of range (0–{len(nb.cells) - 1})",
+        }
     del nb.cells[cell_index]
     _save_notebook(nb, path)
     return {"success": True, "deleted_index": cell_index, "num_cells": len(nb.cells)}

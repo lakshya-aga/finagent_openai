@@ -115,7 +115,9 @@ def next_nse_trading_day(when=None) -> _date_t:
     default). If ``when`` is a Friday the answer is the following
     Monday (or later if Monday is a holiday).
     """
-    start = _coerce_date(when) if when is not None else datetime.now(timezone.utc).date()
+    start = (
+        _coerce_date(when) if when is not None else datetime.now(timezone.utc).date()
+    )
     # Search up to 14 days forward — covers any conceivable holiday
     # cluster (e.g. Diwali + weekend + bank holiday).
     for delta in range(1, 15):
@@ -136,4 +138,6 @@ def calendar_backend() -> str:
     fallback (production should never be on this — install
     ``pandas_market_calendars``).
     """
-    return "pandas_market_calendars" if _get_nse_calendar() is not None else "weekend_only"
+    return (
+        "pandas_market_calendars" if _get_nse_calendar() is not None else "weekend_only"
+    )

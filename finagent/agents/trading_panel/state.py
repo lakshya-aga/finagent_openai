@@ -18,11 +18,12 @@ from typing import Any, Optional, TypedDict
 
 class InvestDebateState(TypedDict, total=False):
     """Bull/bear back-and-forth state."""
-    bull_history: str          # full bullish argument so far
-    bear_history: str          # full bearish argument so far
-    current_response: str      # most recent response
-    last_speaker: str          # "bull" | "bear"
-    count: int                 # number of turns taken (2 = one full round)
+
+    bull_history: str  # full bullish argument so far
+    bear_history: str  # full bearish argument so far
+    current_response: str  # most recent response
+    last_speaker: str  # "bull" | "bear"
+    count: int  # number of turns taken (2 = one full round)
 
 
 class PanelState(TypedDict, total=False):
@@ -34,12 +35,13 @@ class PanelState(TypedDict, total=False):
     keys, which is fine since we don't have parallel writers to the
     same key.
     """
+
     # ── Inputs (set once at the start) ──
     ticker: str
-    asset_class: str           # "us_equity" | "indian_equity" | "crypto" | ...
-    today_iso: str             # "2026-05-08" — anchors date-relative reasoning
-    panel_id: str              # uuid for tracing + persistence
-    rounds: int                # debate rounds (default 2)
+    asset_class: str  # "us_equity" | "indian_equity" | "crypto" | ...
+    today_iso: str  # "2026-05-08" — anchors date-relative reasoning
+    panel_id: str  # uuid for tracing + persistence
+    rounds: int  # debate rounds (default 2)
 
     # ── Stage 1: analyst reports (markdown strings) ──
     market_report: Optional[str]
@@ -56,16 +58,16 @@ class PanelState(TypedDict, total=False):
     investment_debate: InvestDebateState
 
     # ── Stage 3: research manager output ──
-    research_plan: Optional[dict[str, Any]]   # ResearchPlan.model_dump()
+    research_plan: Optional[dict[str, Any]]  # ResearchPlan.model_dump()
 
     # ── Stage 4: trader output ──
-    trader_proposal: Optional[dict[str, Any]] # TraderProposal.model_dump()
+    trader_proposal: Optional[dict[str, Any]]  # TraderProposal.model_dump()
 
     # ── Stage 5: risk debator output (single LLM call, 3 perspectives) ──
-    risk_review: Optional[str]                # markdown summary
+    risk_review: Optional[str]  # markdown summary
 
     # ── Stage 6: final portfolio decision ──
-    portfolio_decision: Optional[dict[str, Any]]   # PortfolioDecision.model_dump()
+    portfolio_decision: Optional[dict[str, Any]]  # PortfolioDecision.model_dump()
 
 
 def initial_state(

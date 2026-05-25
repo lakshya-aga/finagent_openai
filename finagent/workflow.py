@@ -9,11 +9,9 @@ import uuid
 from typing import Optional
 
 import nbformat
-from openai import AsyncOpenAI
-from pydantic import BaseModel
-
 from agents import RunConfig, Runner, TResponseInputItem, trace
 from agents.mcp import MCPServerManager
+from pydantic import BaseModel
 
 from .agents import (
     analysis_orchestration_agent,
@@ -30,7 +28,6 @@ from .functions.notebook_io import _get_current_path
 from .hooks import StreamingHooks, build_notebook_outline, emit_phase
 from .lineage import extract_lineage_ast, extract_lineage_runtime
 from .mcp_connections import mcp_servers
-
 
 logging.basicConfig(
     filename="finagent.log",
@@ -96,10 +93,10 @@ def _build_notebook_context(path: Optional[str]) -> str:
         head = f"[Cell {i} | {ctype}{f' | {node}' if node else ''}]"
         lines.append(f"{head}\n{src}")
         if ctype == "code":
-            for out in (cell.get("outputs") or []):
+            for out in cell.get("outputs") or []:
                 otype = out.get("output_type")
                 if otype == "stream":
-                    txt = (out.get("text") or "")
+                    txt = out.get("text") or ""
                     if isinstance(txt, list):
                         txt = "".join(txt)
                     if txt.strip():
@@ -117,7 +114,7 @@ def _build_notebook_context(path: Optional[str]) -> str:
                         break
                 elif otype == "error":
                     lines.append(
-                        f"  [error] {out.get('ename','')}: {out.get('evalue','')}"
+                        f"  [error] {out.get('ename', '')}: {out.get('evalue', '')}"
                     )
                     break
     return "\n\n".join(lines)
@@ -152,6 +149,7 @@ async def _classify_intent(message: str, has_notebook: bool) -> str:
     backtest on a one-row dataframe and answers nothing.
     """
     from .llm import get_llm_client, get_model_name
+
     client = get_llm_client("intent_classifier")
     resp = await client.chat.completions.create(
         model=get_model_name("intent_classifier"),
@@ -205,7 +203,9 @@ async def run_workflow(
     async def _emit_outline(path: Optional[str]):
         if progress_cb and path:
             try:
-                await progress_cb({"type": "event", "data": build_notebook_outline(path)})
+                await progress_cb(
+                    {"type": "event", "data": build_notebook_outline(path)}
+                )
             except Exception:
                 logging.exception("emit_outline failed for %s", path)
 
@@ -221,13 +221,18 @@ async def run_workflow(
             ast_lin = extract_lineage_ast(path)
             _stash_lineage_metadata(path, "ast", ast_lin)
             if progress_cb:
-                await progress_cb({"type": "event", "data": {
-                    "type": "notebook_lineage",
-                    "method": "ast",
-                    "path": str(path),
-                    "node_count": len(ast_lin.get("nodes", [])),
-                    "edge_count": len(ast_lin.get("edges", [])),
-                }})
+                await progress_cb(
+                    {
+                        "type": "event",
+                        "data": {
+                            "type": "notebook_lineage",
+                            "method": "ast",
+                            "path": str(path),
+                            "node_count": len(ast_lin.get("nodes", [])),
+                            "edge_count": len(ast_lin.get("edges", [])),
+                        },
+                    }
+                )
         except Exception:
             logging.exception("AST lineage failed for %s", path)
 
@@ -239,14 +244,19 @@ async def run_workflow(
                 rt_lin = await asyncio.to_thread(extract_lineage_runtime, path)
                 _stash_lineage_metadata(path, "runtime", rt_lin)
                 if progress_cb:
-                    await progress_cb({"type": "event", "data": {
-                        "type": "notebook_lineage",
-                        "method": "runtime",
-                        "path": str(path),
-                        "node_count": len(rt_lin.get("nodes", [])),
-                        "edge_count": len(rt_lin.get("edges", [])),
-                        "error": rt_lin.get("error"),
-                    }})
+                    await progress_cb(
+                        {
+                            "type": "event",
+                            "data": {
+                                "type": "notebook_lineage",
+                                "method": "runtime",
+                                "path": str(path),
+                                "node_count": len(rt_lin.get("nodes", [])),
+                                "edge_count": len(rt_lin.get("edges", [])),
+                                "error": rt_lin.get("error"),
+                            },
+                        }
+                    )
             except Exception:
                 logging.exception("runtime lineage failed for %s", path)
 
@@ -265,12 +275,17 @@ async def run_workflow(
         if not progress_cb:
             return
         text = prompt if len(prompt) <= 2000 else prompt[:2000] + "…"
-        await progress_cb({"type": "event", "data": {
-            "type": "agent_input",
-            "phase": phase,
-            "agent": agent_name,
-            "prompt": text,
-        }})
+        await progress_cb(
+            {
+                "type": "event",
+                "data": {
+                    "type": "agent_input",
+                    "phase": phase,
+                    "agent": agent_name,
+                    "prompt": text,
+                },
+            }
+        )
 
     # One workflow_id per request — trace_metadata gets a fresh value each run
     # so OpenAI traces filter cleanly per-conversation.
@@ -285,7 +300,9 @@ async def run_workflow(
         conversation_history: list[TResponseInputItem] = list(prior_history or [])
 
         # ── CLASSIFY INTENT ──────────────────────────────────────────────────
-        intent = await _classify_intent(workflow["input_as_text"], bool(existing_notebook_path))
+        intent = await _classify_intent(
+            workflow["input_as_text"], bool(existing_notebook_path)
+        )
         logging.info(f"run_workflow intent={intent}")
 
         # ── QUESTION MODE ────────────────────────────────────────────────────
@@ -315,7 +332,10 @@ async def run_workflow(
                 question_agent,
                 input=[
                     *conversation_history,
-                    {"role": "user", "content": [{"type": "input_text", "text": q_input}]},
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": q_input}],
+                    },
                 ],
                 run_config=RunConfig(),
                 hooks=_hooks("question"),
@@ -350,7 +370,12 @@ async def run_workflow(
             await _emit_agent_input("edit_plan", edit_planner.name, edit_planner_input)
             edit_planner_result_temp = await Runner.run(
                 edit_planner,
-                input=[{"role": "user", "content": [{"type": "input_text", "text": edit_planner_input}]}],
+                input=[
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": edit_planner_input}],
+                    }
+                ],
                 run_config=RunConfig(),
                 hooks=_hooks("edit_plan"),
             )
@@ -371,9 +396,13 @@ async def run_workflow(
                 edit_apply_prompt = (
                     f"Apply this diff spec to the current notebook:\n{diff_spec_raw}"
                 )
-                await _emit_agent_input("edit_apply", edit_orchestration_agent.name, edit_apply_prompt)
+                await _emit_agent_input(
+                    "edit_apply", edit_orchestration_agent.name, edit_apply_prompt
+                )
                 async with MCPServerManager(mcp_servers()) as _edit_mcp_mgr:
-                    _edit_orch = edit_orchestration_agent.clone(mcp_servers=_edit_mcp_mgr.active_servers)
+                    _edit_orch = edit_orchestration_agent.clone(
+                        mcp_servers=_edit_mcp_mgr.active_servers
+                    )
                     edit_orch_result_temp = await Runner.run(
                         _edit_orch,
                         input=[
@@ -394,7 +423,9 @@ async def run_workflow(
                     )
                 await emit_phase(progress_cb, "edit_apply", "end")
                 await _emit_trace(edit_orch_result_temp)
-                conversation_history.extend([item.to_input_item() for item in edit_orch_result_temp.new_items])
+                conversation_history.extend(
+                    [item.to_input_item() for item in edit_orch_result_temp.new_items]
+                )
                 # Notebook structure has changed; emit a fresh outline so the
                 # frontend's Outline panel matches the new cell layout.
                 await _emit_outline(existing_notebook_path)
@@ -407,7 +438,9 @@ async def run_workflow(
                     f"Validate the edited notebook at {existing_notebook_path}.",
                 )
                 async with MCPServerManager(mcp_servers()) as _val_mcp_mgr:
-                    _val = validatorandfixingagent.clone(mcp_servers=_val_mcp_mgr.active_servers)
+                    _val = validatorandfixingagent.clone(
+                        mcp_servers=_val_mcp_mgr.active_servers
+                    )
                     val_result_temp = await Runner.run(
                         _val,
                         input=conversation_history,
@@ -441,10 +474,12 @@ async def run_workflow(
             _intent_orchestrator = orchestration_agent
             mode_label = "new"
 
-        conversation_history.append({
-            "role": "user",
-            "content": [{"type": "input_text", "text": workflow["input_as_text"]}],
-        })
+        conversation_history.append(
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": workflow["input_as_text"]}],
+            }
+        )
 
         # Phase 1 of the signal-dashboard pipeline: give every chat-driven
         # notebook a meaningful filename instead of the opaque
@@ -456,31 +491,42 @@ async def run_workflow(
         await _emit("Naming notebook...")
         try:
             from .agents.name_suggester import suggest_notebook_name
-            from .functions.notebook_io import set_next_notebook_name, _path_for_named
+            from .functions.notebook_io import _path_for_named, set_next_notebook_name
+
             slug = await suggest_notebook_name(workflow["input_as_text"])
             set_next_notebook_name(slug)
             preview_path = _path_for_named(slug)
             if progress_cb:
-                await progress_cb({"type": "event", "data": {
-                    "type": "notebook_named",
-                    "slug": slug,
-                    "path": str(preview_path),
-                    "filename": preview_path.name,
-                }})
-            logging.info("workflow: notebook named slug=%s preview=%s",
-                         slug, preview_path.name)
+                await progress_cb(
+                    {
+                        "type": "event",
+                        "data": {
+                            "type": "notebook_named",
+                            "slug": slug,
+                            "path": str(preview_path),
+                            "filename": preview_path.name,
+                        },
+                    }
+                )
+            logging.info(
+                "workflow: notebook named slug=%s preview=%s", slug, preview_path.name
+            )
         except Exception:
             # Naming is best-effort — never block the build on a name-
             # suggester failure. Falls back to the legacy notebook_N
             # counter inside _get_latest_path.
             logging.exception("workflow: name suggester failed (non-fatal)")
 
-        await _emit("Planning research..." if mode_label == "new" else "Planning analysis...")
+        await _emit(
+            "Planning research..." if mode_label == "new" else "Planning analysis..."
+        )
         await emit_phase(progress_cb, "plan", "start")
         plan_prompt = f"Research request: {workflow['input_as_text']}"
         await _emit_agent_input("plan", _intent_planner.name, plan_prompt)
         async with MCPServerManager(mcp_servers()) as _planner_mcp_mgr:
-            _planner = _intent_planner.clone(mcp_servers=_planner_mcp_mgr.active_servers)
+            _planner = _intent_planner.clone(
+                mcp_servers=_planner_mcp_mgr.active_servers
+            )
             planner_result_temp = await Runner.run(
                 _planner,
                 input=[
@@ -495,7 +541,9 @@ async def run_workflow(
             )
         await emit_phase(progress_cb, "plan", "end")
         await _emit_trace(planner_result_temp)
-        conversation_history.extend([item.to_input_item() for item in planner_result_temp.new_items])
+        conversation_history.extend(
+            [item.to_input_item() for item in planner_result_temp.new_items]
+        )
         planner_result = {"output_text": planner_result_temp.final_output_as(str)}
 
         await _emit("Building notebook...")
@@ -510,7 +558,9 @@ async def run_workflow(
         )
         await _emit_agent_input("build", _intent_orchestrator.name, build_prompt)
         async with MCPServerManager(mcp_servers()) as _orch_mcp_mgr:
-            _orchestration_agent = _intent_orchestrator.clone(mcp_servers=_orch_mcp_mgr.active_servers)
+            _orchestration_agent = _intent_orchestrator.clone(
+                mcp_servers=_orch_mcp_mgr.active_servers
+            )
             try:
                 orchestration_agent_result_temp = await Runner.run(
                     _orchestration_agent,
@@ -518,9 +568,7 @@ async def run_workflow(
                         *conversation_history,
                         {
                             "role": "user",
-                            "content": [
-                                {"type": "input_text", "text": build_prompt}
-                            ],
+                            "content": [{"type": "input_text", "text": build_prompt}],
                         },
                     ],
                     run_config=RunConfig(trace_metadata=trace_metadata),
@@ -541,7 +589,9 @@ async def run_workflow(
                 # user as a structured event AND we re-raise so the outer
                 # error handler still records the failure.
                 logging.exception("orchestrator build phase failed")
-                await _emit(f"⚠ Build phase failed: {type(exc).__name__}: {str(exc)[:200]}")
+                await _emit(
+                    f"⚠ Build phase failed: {type(exc).__name__}: {str(exc)[:200]}"
+                )
                 raise
         await emit_phase(progress_cb, "build", "end")
         await _emit_trace(orchestration_agent_result_temp)
@@ -562,7 +612,9 @@ async def run_workflow(
             "Run it cell-by-cell, fix any errors, escalate if blocked.",
         )
         async with MCPServerManager(mcp_servers()) as _val_mcp_mgr:
-            _validatorandfixingagent = validatorandfixingagent.clone(mcp_servers=_val_mcp_mgr.active_servers)
+            _validatorandfixingagent = validatorandfixingagent.clone(
+                mcp_servers=_val_mcp_mgr.active_servers
+            )
             validatorandfixingagent_result_temp = await Runner.run(
                 _validatorandfixingagent,
                 input=conversation_history,
@@ -573,7 +625,10 @@ async def run_workflow(
         await emit_phase(progress_cb, "validate", "end")
         await _emit_trace(validatorandfixingagent_result_temp)
         conversation_history.extend(
-            [item.to_input_item() for item in validatorandfixingagent_result_temp.new_items]
+            [
+                item.to_input_item()
+                for item in validatorandfixingagent_result_temp.new_items
+            ]
         )
         final_path = str(_get_current_path())
         # Validator may have rewritten cells; emit a final outline reflecting that.

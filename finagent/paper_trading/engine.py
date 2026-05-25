@@ -35,9 +35,7 @@ from dataclasses import dataclass
 from datetime import date as date_cls
 from typing import Optional
 
-from . import STARTING_CAPITAL, TRANSACTION_COST, STRATEGIES
-from . import store
-from . import universe
+from . import STARTING_CAPITAL, STRATEGIES, TRANSACTION_COST, store, universe
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +73,8 @@ def compute_market_cap_weights(
         if mc is None or mc <= 0:
             logger.warning(
                 "paper_trading: market-cap missing for %s — dropping from "
-                "market_cap-weighted portfolio for this day", t,
+                "market_cap-weighted portfolio for this day",
+                t,
             )
             continue
         contributing.append((t, d, mc))
@@ -100,10 +99,15 @@ async def fetch_close_prices(tickers: list[str]) -> dict[str, float]:
 
     def _fetch() -> dict[str, float]:
         import yfinance as yf
+
         # period='5d' so we get a row even on Mondays / post-holiday.
         df = yf.download(
-            tickers=tickers, period="5d", interval="1d",
-            progress=False, auto_adjust=False, group_by="ticker",
+            tickers=tickers,
+            period="5d",
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+            group_by="ticker",
             threads=True,
         )
         out: dict[str, float] = {}
@@ -171,8 +175,9 @@ async def run_eod_close(
         target = compute_equal_weights(directions)
     else:
         mcaps_table = store.get_market_caps()
-        mcaps = {t: v["market_cap"] for t, v in mcaps_table.items()
-                 if v.get("market_cap")}
+        mcaps = {
+            t: v["market_cap"] for t, v in mcaps_table.items() if v.get("market_cap")
+        }
         if not mcaps:
             # First-run: refresh in-band so we don't return an empty
             # MCW portfolio on day one.
@@ -189,8 +194,8 @@ async def run_eod_close(
     target_tickers = set(target.keys())
     open_tickers = set(by_ticker.keys())
 
-    to_open  = target_tickers - open_tickers
-    to_keep  = target_tickers & open_tickers
+    to_open = target_tickers - open_tickers
+    to_keep = target_tickers & open_tickers
     to_close = open_tickers - target_tickers
     # Also close any open trade whose direction flipped sign.
     for t in list(to_keep):
@@ -225,19 +230,28 @@ async def run_eod_close(
         trades_closed += 1
         reason = "neutral" if ticker not in target else "direction_change"
         store.close_trade(
-            trade["id"], closed_at=date, close_price=px,
-            realized_pnl=pnl, close_reason=reason,
+            trade["id"],
+            closed_at=date,
+            close_price=px,
+            realized_pnl=pnl,
+            close_reason=reason,
         )
 
     for ticker in to_open:
         if ticker not in close_prices:
-            logger.warning("paper_trading: no close price for %s — skipping open", ticker)
+            logger.warning(
+                "paper_trading: no close price for %s — skipping open", ticker
+            )
             continue
         direction = 1 if target[ticker] > 0 else -1
         store.open_trade(
-            strategy=strategy, ticker=ticker, direction=direction,
-            opened_at=date, open_price=close_prices[ticker],
-            open_weight=target[ticker], transaction_cost=TRANSACTION_COST,
+            strategy=strategy,
+            ticker=ticker,
+            direction=direction,
+            opened_at=date,
+            open_price=close_prices[ticker],
+            open_weight=target[ticker],
+            transaction_cost=TRANSACTION_COST,
         )
         transaction_costs += TRANSACTION_COST
         trades_opened += 1
@@ -266,61 +280,86 @@ async def run_eod_close(
         gross_notional += notional_at_entry
         net_notional += trade["direction"] * notional_at_entry
         days_held = _days_between(trade["opened_at"], date)
-        store.upsert_position_snapshot({
-            "date": date,
-            "strategy": strategy,
-            "ticker": ticker,
-            "direction": trade["direction"],
-            "weight": trade["open_weight"],
-            "notional": notional_at_entry,
-            "entry_date": trade["opened_at"],
-            "entry_price": trade["open_price"],
-            "current_price": px,
-            "days_held": days_held,
-            "unrealized_pnl": unrealized,
-            "unrealized_pnl_pct": pct_move * trade["direction"],
-        })
+        store.upsert_position_snapshot(
+            {
+                "date": date,
+                "strategy": strategy,
+                "ticker": ticker,
+                "direction": trade["direction"],
+                "weight": trade["open_weight"],
+                "notional": notional_at_entry,
+                "entry_date": trade["opened_at"],
+                "entry_price": trade["open_price"],
+                "current_price": px,
+                "days_held": days_held,
+                "unrealized_pnl": unrealized,
+                "unrealized_pnl_pct": pct_move * trade["direction"],
+            }
+        )
 
     # 8. daily PnL = realized (from closes) + Δunrealized − transaction costs.
     # Δunrealized over the day: today's unrealized − yesterday's unrealized
     # for positions that were open yesterday. For positions opened today
     # the contribution is 0 (open_price = today's close_price → no move yet).
     # For positions closed today the realized term already captures it.
-    yesterday_unrealized_total = sum(
-        p["unrealized_pnl"]
-        for p in store.list_positions(strategy, prev_snap["date"]) if prev_snap
-    ) if prev_snap else 0.0
+    yesterday_unrealized_total = (
+        sum(
+            p["unrealized_pnl"]
+            for p in store.list_positions(strategy, prev_snap["date"])
+            if prev_snap
+        )
+        if prev_snap
+        else 0.0
+    )
 
-    daily_pnl = realized_pnl + (unrealized_pnl_total - yesterday_unrealized_total) - transaction_costs
+    daily_pnl = (
+        realized_pnl
+        + (unrealized_pnl_total - yesterday_unrealized_total)
+        - transaction_costs
+    )
     equity_today = prev_equity + daily_pnl
     daily_return = daily_pnl / prev_equity if prev_equity > 0 else 0.0
 
     # 9. write portfolio snapshot
-    store.upsert_portfolio_snapshot({
-        "date": date,
-        "strategy": strategy,
-        "equity_value": equity_today,
-        "cash": equity_today,                # see __init__ note: cash folded in
-        "gross_exposure": gross_notional / equity_today if equity_today else 0.0,
-        "net_exposure":   net_notional   / equity_today if equity_today else 0.0,
-        "daily_pnl": daily_pnl,
-        "daily_return_pct": daily_return,
-        "transaction_costs": transaction_costs,
-        "n_long": n_long, "n_short": n_short, "n_neutral": n_neutral,
-    })
+    store.upsert_portfolio_snapshot(
+        {
+            "date": date,
+            "strategy": strategy,
+            "equity_value": equity_today,
+            "cash": equity_today,  # see __init__ note: cash folded in
+            "gross_exposure": gross_notional / equity_today if equity_today else 0.0,
+            "net_exposure": net_notional / equity_today if equity_today else 0.0,
+            "daily_pnl": daily_pnl,
+            "daily_return_pct": daily_return,
+            "transaction_costs": transaction_costs,
+            "n_long": n_long,
+            "n_short": n_short,
+            "n_neutral": n_neutral,
+        }
+    )
 
     logger.info(
         "paper_trading: eod-close %s %s — equity=₹%.2f daily_pnl=₹%+.2f "
         "(%+.2f%%) opened=%d closed=%d open=%d costs=₹%.2f",
-        date, strategy, equity_today, daily_pnl, daily_return * 100,
-        trades_opened, trades_closed, len(current_open), transaction_costs,
+        date,
+        strategy,
+        equity_today,
+        daily_pnl,
+        daily_return * 100,
+        trades_opened,
+        trades_closed,
+        len(current_open),
+        transaction_costs,
     )
 
     return EodReport(
-        date=date, strategy=strategy,
-        equity_value=equity_today, daily_pnl=daily_pnl,
+        date=date,
+        strategy=strategy,
+        equity_value=equity_today,
+        daily_pnl=daily_pnl,
         transaction_costs=transaction_costs,
-        trades_opened=trades_opened, trades_closed=trades_closed,
+        trades_opened=trades_opened,
+        trades_closed=trades_closed,
         n_open_positions=len(current_open),
     )
 

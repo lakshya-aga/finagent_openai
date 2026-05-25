@@ -15,29 +15,27 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 from agents import Agent, ModelSettings, WebSearchTool
-from openai.types.shared.reasoning import Reasoning
 from pydantic import BaseModel, Field
 
 from finagent.llm import get_model_name
 
 from .tools import (
-    # News + sentiment
-    fetch_gdelt_news,
-    fetch_yfinance_news,
-    # Fundamentals + analyst grounding
-    fetch_equity_fundamentals,
-    fetch_analyst_consensus,
-    fetch_earnings_calendar,
-    fetch_returns_stats,
-    # Technical analysis
-    detect_candlestick_patterns,
+    arima_forecast,
     compute_support_resistance,
     compute_trend_indicators,
     compute_trend_regime,
-    arima_forecast,
+    # Technical analysis
+    detect_candlestick_patterns,
+    fetch_analyst_consensus,
+    fetch_earnings_calendar,
+    # Fundamentals + analyst grounding
+    fetch_equity_fundamentals,
+    # News + sentiment
+    fetch_gdelt_news,
+    fetch_returns_stats,
+    fetch_yfinance_news,
     plot_ohlc_chart,
 )
-
 
 # ─── Verdict schema (moderator structured output) ────────────────────
 
@@ -45,9 +43,13 @@ from .tools import (
 class KeyMetric(BaseModel):
     """One quantitative anchor the verdict relies on."""
 
-    name: str = Field(..., description="Metric name (e.g. 'Forward P/E', 'BTC dominance')")
+    name: str = Field(
+        ..., description="Metric name (e.g. 'Forward P/E', 'BTC dominance')"
+    )
     value: str = Field(..., description="Current value as a string (preserves units)")
-    why_it_matters: str = Field(..., description="One sentence — why this number drove the call")
+    why_it_matters: str = Field(
+        ..., description="One sentence — why this number drove the call"
+    )
 
 
 class DebateVerdict(BaseModel):
@@ -57,10 +59,12 @@ class DebateVerdict(BaseModel):
         ..., description="The decision. 'avoid' = neither long nor short here."
     )
     target_price: Optional[float] = Field(
-        None, description="Price target in the asset's quote currency. None when 'avoid'."
+        None,
+        description="Price target in the asset's quote currency. None when 'avoid'.",
     )
     stoploss: Optional[float] = Field(
-        None, description="Stop-loss level in the asset's quote currency. None when 'avoid'."
+        None,
+        description="Stop-loss level in the asset's quote currency. None when 'avoid'.",
     )
     time_horizon: str = Field(
         ..., description="Trade horizon (e.g. '1-3 months', '6-12 months', 'intraday')."
@@ -73,8 +77,10 @@ class DebateVerdict(BaseModel):
         ..., description="2-4 sentences explaining the call in PM terms."
     )
     confidence: float = Field(
-        ..., ge=0.0, le=1.0,
-        description="Subjective confidence (0-1). 0.5 means 'genuinely uncertain'."
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Subjective confidence (0-1). 0.5 means 'genuinely uncertain'.",
     )
 
 

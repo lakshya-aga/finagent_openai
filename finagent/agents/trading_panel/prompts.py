@@ -13,7 +13,6 @@ in each report — TradingAgents skips this; we keep it.
 
 from __future__ import annotations
 
-
 # ── Stage 1: analysts ───────────────────────────────────────────────
 
 

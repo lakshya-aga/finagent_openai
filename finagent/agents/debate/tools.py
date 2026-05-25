@@ -27,7 +27,6 @@ from typing import Optional
 
 from agents import function_tool
 
-
 # ─── News ────────────────────────────────────────────────────────────
 
 
@@ -47,6 +46,7 @@ async def fetch_yfinance_news(ticker: str, max_records: int = 15) -> str:
     """
     try:
         from findata.news_yfinance import get_yfinance_news
+
         df = get_yfinance_news(ticker, max_records=max_records)
         if df.empty:
             return json.dumps({"ticker": ticker, "articles": []})
@@ -92,6 +92,7 @@ async def fetch_gdelt_news(
     """
     try:
         from findata.news_gdelt import get_gdelt_news
+
         result = get_gdelt_news(
             company_query=company_query,
             sector_query=sector_query,
@@ -104,13 +105,17 @@ async def fetch_gdelt_news(
             if "seendate" in df2.columns:
                 df2["seendate"] = df2["seendate"].astype(str)
             out[kind] = {
-                "query": str(df2["query"].iloc[0]) if not df2.empty and "query" in df2 else "",
+                "query": str(df2["query"].iloc[0])
+                if not df2.empty and "query" in df2
+                else "",
                 "articles": df2.to_dict(orient="records"),
             }
         return json.dumps(out, default=str)
     except Exception as exc:
         logging.exception("fetch_gdelt_news failed company_query=%r", company_query)
-        return json.dumps({"error": str(exc), "company": {"articles": []}, "sector": {"articles": []}})
+        return json.dumps(
+            {"error": str(exc), "company": {"articles": []}, "sector": {"articles": []}}
+        )
 
 
 # ─── Fundamentals / consensus / events / risk stats ──────────────────
@@ -133,6 +138,7 @@ async def fetch_equity_fundamentals(tickers: list[str]) -> str:
     """
     try:
         from findata.fundamentals import get_equity_fundamentals
+
         df = get_equity_fundamentals(tickers)
         if df.empty:
             return json.dumps({"tickers": {}})
@@ -162,6 +168,7 @@ async def fetch_analyst_consensus(tickers: list[str]) -> str:
     """
     try:
         from findata.analyst_consensus import get_analyst_consensus
+
         df = get_analyst_consensus(tickers)
         if df.empty:
             return json.dumps({"tickers": {}})
@@ -194,12 +201,17 @@ async def fetch_earnings_calendar(
     """
     try:
         from findata.earnings_calendar import get_earnings_calendar
-        df = get_earnings_calendar(ticker, days_back=days_back, days_forward=days_forward)
+
+        df = get_earnings_calendar(
+            ticker, days_back=days_back, days_forward=days_forward
+        )
         if df.empty:
             return json.dumps({"ticker": ticker, "events": []})
         df = df.reset_index()
         df["date"] = df["date"].astype(str)
-        return json.dumps({"ticker": ticker, "events": df.to_dict(orient="records")}, default=str)
+        return json.dumps(
+            {"ticker": ticker, "events": df.to_dict(orient="records")}, default=str
+        )
     except Exception as exc:
         logging.exception("fetch_earnings_calendar failed ticker=%r", ticker)
         return json.dumps({"error": str(exc), "ticker": ticker, "events": []})
@@ -231,9 +243,12 @@ async def fetch_returns_stats(
     """
     try:
         from findata.returns_stats import compute_returns_stats
+
         s = compute_returns_stats(
-            ticker, window_days=window_days,
-            benchmark=benchmark, risk_free_rate=risk_free_rate,
+            ticker,
+            window_days=window_days,
+            benchmark=benchmark,
+            risk_free_rate=risk_free_rate,
         )
         return json.dumps(s.to_dict(), default=str)
     except Exception as exc:
@@ -265,6 +280,7 @@ async def detect_candlestick_patterns(ticker: str, lookback_days: int = 90) -> s
     """
     try:
         from findata.candlestick_patterns import detect_candlestick_patterns as _detect
+
         return json.dumps(_detect(ticker, lookback_days=lookback_days), default=str)
     except Exception as exc:
         logging.exception("detect_candlestick_patterns failed ticker=%r", ticker)
@@ -299,9 +315,14 @@ async def compute_support_resistance(
     """
     try:
         from findata.support_resistance import compute_support_resistance as _sr
+
         return json.dumps(
-            _sr(ticker, lookback_days=lookback_days,
-                n_levels=n_levels, tolerance_pct=tolerance_pct),
+            _sr(
+                ticker,
+                lookback_days=lookback_days,
+                n_levels=n_levels,
+                tolerance_pct=tolerance_pct,
+            ),
             default=str,
         )
     except Exception as exc:
@@ -329,6 +350,7 @@ async def compute_trend_indicators(ticker: str, window_days: int = 252) -> str:
     """
     try:
         from findata.trend_indicators import compute_trend_indicators as _ti
+
         return json.dumps(_ti(ticker, window_days=window_days), default=str)
     except Exception as exc:
         logging.exception("compute_trend_indicators failed ticker=%r", ticker)
@@ -357,6 +379,7 @@ async def compute_trend_regime(ticker: str, window_days: int = 252) -> str:
     """
     try:
         from findata.trend_regime import compute_trend_regime as _tr
+
         return json.dumps(_tr(ticker, window_days=window_days), default=str)
     except Exception as exc:
         logging.exception("compute_trend_regime failed ticker=%r", ticker)
@@ -396,19 +419,22 @@ async def arima_forecast(
     """
     try:
         from findata.arima_forecast import fit_arima_forecast as _fit
+
         return json.dumps(
             _fit(ticker, lookback_days=lookback_days, forecast_days=forecast_days),
             default=str,
         )
     except Exception as exc:
         logging.exception("arima_forecast failed ticker=%r", ticker)
-        return json.dumps({
-            "ticker": ticker,
-            "status": "wrapper_error",
-            "error": f"{type(exc).__name__}: {exc}",
-            "signal": "neutral",
-            "summary": f"ARIMA unavailable for {ticker}: {exc}",
-        })
+        return json.dumps(
+            {
+                "ticker": ticker,
+                "status": "wrapper_error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "signal": "neutral",
+                "summary": f"ARIMA unavailable for {ticker}: {exc}",
+            }
+        )
 
 
 @function_tool
@@ -450,6 +476,7 @@ async def plot_ohlc_chart(
     """
     try:
         from findata.ohlc_chart import plot_ohlc_chart as _plot
+
         result = _plot(
             ticker,
             lookback_days=lookback_days,
@@ -468,13 +495,15 @@ async def plot_ohlc_chart(
         # Synthesise a paste-ready italic fallback so the agent can still
         # follow the "paste markdown_image verbatim" instruction without
         # improvising an apologetic generic-error sentence.
-        return json.dumps({
-            "ticker": ticker,
-            "error": msg,
-            "image_base64": "",
-            "markdown_image": f"*Chart unavailable for {ticker}: {msg}*",
-            "chart_status": "wrapper_error",
-        })
+        return json.dumps(
+            {
+                "ticker": ticker,
+                "error": msg,
+                "image_base64": "",
+                "markdown_image": f"*Chart unavailable for {ticker}: {msg}*",
+                "chart_status": "wrapper_error",
+            }
+        )
 
 
 # Public surface — keep this list explicit so it's obvious which tools

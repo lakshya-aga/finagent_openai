@@ -29,7 +29,6 @@ from typing import Any, Mapping
 
 from . import _store
 
-
 logger = logging.getLogger(__name__)
 
 

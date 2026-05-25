@@ -6,7 +6,6 @@ from agents import Agent, ModelSettings
 
 from ..functions import read_notebook
 
-
 QUESTION_INSTRUCTIONS = """You are a helpful quantitative research assistant with deep knowledge of
 financial mathematics, statistics, and Python-based research workflows.
 
@@ -33,7 +32,6 @@ read-only. Do not write to disk, install packages, or fabricate cell outputs.
 
 
 from finagent.llm import get_model_name
-
 
 question_agent = Agent(
     name="QuestionAgent",

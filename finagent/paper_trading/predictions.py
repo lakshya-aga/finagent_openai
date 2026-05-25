@@ -33,12 +33,12 @@ logger = logging.getLogger(__name__)
 # Anything outside these three falls through to 0 — better than
 # guessing wrong on edge cases ("hold", "underweight", etc.).
 _ACTION_TO_DIRECTION: dict[str, int] = {
-    "buy":   +1,
-    "long":  +1,
-    "sell":  -1,
+    "buy": +1,
+    "long": +1,
+    "sell": -1,
     "short": -1,
-    "avoid":  0,
-    "hold":   0,
+    "avoid": 0,
+    "hold": 0,
 }
 
 
@@ -62,15 +62,22 @@ def record_prediction(
             "only covers Nifty 50 in v1"
         )
     return store.upsert_prediction(
-        date=date, ticker=ticker, direction=direction,
-        confidence=confidence, reasoning=reasoning,
-        target_price=target_price, stop_loss_price=stop_loss_price,
-        time_horizon=time_horizon, max_hold_days=max_hold_days,
+        date=date,
+        ticker=ticker,
+        direction=direction,
+        confidence=confidence,
+        reasoning=reasoning,
+        target_price=target_price,
+        stop_loss_price=stop_loss_price,
+        time_horizon=time_horizon,
+        max_hold_days=max_hold_days,
         source=source,
     )
 
 
-def commit_predictions(date: str, directions: dict[str, int], *, source: str = "manual") -> dict:
+def commit_predictions(
+    date: str, directions: dict[str, int], *, source: str = "manual"
+) -> dict:
     """Batch insert. Used by the portfolio-agent's commit tool +
     the admin POST endpoint.
 
@@ -107,10 +114,15 @@ def seed_from_debates(
     override survive a re-seed.
     """
     from finagent.experiments import get_store
+
     debate_store = get_store()
 
     target_tickers = set(tickers or universe.NIFTY50_TICKERS)
-    existing = {p["ticker"] for p in store.list_predictions(date=date)} if not overwrite else set()
+    existing = (
+        {p["ticker"] for p in store.list_predictions(date=date)}
+        if not overwrite
+        else set()
+    )
 
     # Pull a generous slab — we don't have a per-date debate query, so
     # we scan the last N and filter.
@@ -123,15 +135,25 @@ def seed_from_debates(
         if not d.finished_at:
             continue
         from datetime import datetime, timezone
-        finished_dt = datetime.fromtimestamp(d.finished_at, tz=timezone.utc).date().isoformat()
+
+        finished_dt = (
+            datetime.fromtimestamp(d.finished_at, tz=timezone.utc).date().isoformat()
+        )
         if finished_dt != date:
             continue
         verdict = d.verdict() or {}
         if not verdict.get("action"):
             continue
         # Most-recent-wins on ties.
-        if d.ticker not in chosen_by_ticker or d.finished_at > chosen_by_ticker[d.ticker]["finished_at"]:
-            chosen_by_ticker[d.ticker] = {"verdict": verdict, "finished_at": d.finished_at, "debate_id": d.id}
+        if (
+            d.ticker not in chosen_by_ticker
+            or d.finished_at > chosen_by_ticker[d.ticker]["finished_at"]
+        ):
+            chosen_by_ticker[d.ticker] = {
+                "verdict": verdict,
+                "finished_at": d.finished_at,
+                "debate_id": d.id,
+            }
 
     accepted = 0
     skipped_existing = 0
@@ -145,11 +167,16 @@ def seed_from_debates(
         direction = _ACTION_TO_DIRECTION.get(action)
         if direction is None:
             skipped_no_mapping += 1
-            logger.warning("paper_trading.seed: unknown action %r for %s — skipping",
-                           verdict.get("action"), ticker)
+            logger.warning(
+                "paper_trading.seed: unknown action %r for %s — skipping",
+                verdict.get("action"),
+                ticker,
+            )
             continue
         record_prediction(
-            date=date, ticker=ticker, direction=direction,
+            date=date,
+            ticker=ticker,
+            direction=direction,
             confidence=verdict.get("confidence"),
             reasoning=verdict.get("rationale") or verdict.get("rationale_short"),
             target_price=verdict.get("target_price"),
@@ -161,8 +188,12 @@ def seed_from_debates(
     logger.info(
         "paper_trading.seed_from_debates(%s): accepted=%d skipped_existing=%d "
         "skipped_no_mapping=%d coverage=%d/%d tickers",
-        date, accepted, skipped_existing, skipped_no_mapping,
-        accepted + skipped_existing, len(target_tickers),
+        date,
+        accepted,
+        skipped_existing,
+        skipped_no_mapping,
+        accepted + skipped_existing,
+        len(target_tickers),
     )
     return {
         "date": date,

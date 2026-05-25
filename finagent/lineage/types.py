@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional, TypedDict
-
+from typing import Literal, Optional, TypedDict
 
 NodeKind = Literal["data", "call", "input", "output"]
 
@@ -24,7 +23,7 @@ class LineageEdge(TypedDict, total=False):
 
 
 class Lineage(TypedDict, total=False):
-    method: str          # "ast" | "runtime"
+    method: str  # "ast" | "runtime"
     generated_at: str
     nodes: list[LineageNode]
     edges: list[LineageEdge]

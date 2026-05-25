@@ -29,10 +29,9 @@ status fires the moment the kernel finishes.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
-
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +234,7 @@ async def audit_run(
     # Agents SDK isn't installed (tests, alternative runtimes, ops scripts
     # that just want to deserialize a stored audit).
     try:
-        from agents import Agent, Runner, ModelSettings
+        from agents import Agent, ModelSettings, Runner
     except ImportError as exc:
         logger.warning("bias_auditor: agents SDK unavailable (%s)", exc)
         return BiasAudit(
@@ -246,6 +245,7 @@ async def audit_run(
 
     try:
         from finagent.llm import get_model_name
+
         model_name = get_model_name("bias_auditor")
     except Exception as exc:
         logger.warning("bias_auditor: model resolution failed, falling back (%s)", exc)
@@ -253,7 +253,10 @@ async def audit_run(
 
     try:
         user_payload = _build_user_payload(
-            notebook_json or {}, recipe, metrics, template_name,
+            notebook_json or {},
+            recipe,
+            metrics,
+            template_name,
         )
     except Exception as exc:
         logger.exception("bias_auditor: payload build failed")

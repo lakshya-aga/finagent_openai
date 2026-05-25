@@ -5,6 +5,7 @@ should use. The compiler turns it into a notebook deterministically when
 a matching template exists; otherwise the existing AI planner takes over.
 """
 
+from .compiler import available_templates, compile_recipe
 from .types import (
     DataSource,
     Evaluation,
@@ -14,7 +15,6 @@ from .types import (
     Target,
     recipe_from_yaml,
 )
-from .compiler import compile_recipe, available_templates
 
 __all__ = [
     "DataSource",

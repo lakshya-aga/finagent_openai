@@ -55,16 +55,15 @@ caring about submodule layout.
 
 from __future__ import annotations
 
-from .models import save_model, load_model, model_manifest, list_models
+from .inputs import get_inference_inputs
+from .models import list_models, load_model, model_manifest, save_model
 from .signals import (
     export_signal,
-    load_signal,
-    signal_manifest,
     list_signals,
+    load_signal,
     register_signal,  # exposed for tests; real callers use export_signal
+    signal_manifest,
 )
-from .inputs import get_inference_inputs
-
 
 __all__ = [
     # Model lifecycle
