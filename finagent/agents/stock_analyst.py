@@ -27,11 +27,13 @@ Recommendation shape mirrors a triple-barrier method:
   - lower barrier   : stop_loss_price (stop-out)
   - vertical barrier: max_hold_days (time exit)
 
-For the on-demand /app/debate UI, ``trading_panel.run_panel`` is
-called directly (with persist=True so it shows up in the debates
-table). The stock_analyst path passes persist=False — these daily
-50-ticker runs are ephemeral; only the resulting Recommendation
-matters and that lands in the predictions table.
+All 50 daily panel runs persist to the debates table tagged
+``source='agent:stock_analyst'`` so they show up on the Past Debates
+page alongside the 5 scheduled-cron debates (tagged ``source='scheduled'``).
+The frontend uses the source field to distinguish the two flows.
+The resulting Recommendation ALSO lands in the predictions table
+via record_prediction(source='agent:stock_analyst') — that's what the
+rebalance reads to size positions.
 """
 
 from __future__ import annotations
@@ -179,8 +181,14 @@ async def _analyse_via_panel(ticker: str) -> Optional[StockRecommendation]:
             asset_class="indian_equity",
             rounds=rounds,
             emit=None,  # no SSE — server-side only
-            persist=False,  # daily 50-ticker runs are ephemeral;
-            # only the prediction row matters
+            # persist=True so all 50 daily panel runs show up on the
+            # Past Debates page (tagged source='agent:stock_analyst' so
+            # the UI can distinguish them from the 5 scheduled-cron
+            # debates tagged source='scheduled'). Was False originally;
+            # operator complained "still only 5 ticker analysis" — the
+            # 50 were running invisibly. Storage cost is ~30 KB/row ×
+            # 50/day = ~1.5 MB/day, acceptable for SQLite.
+            persist=True,
             source="agent:stock_analyst",
         )
     except Exception as e:
