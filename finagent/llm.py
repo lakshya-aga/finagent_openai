@@ -36,33 +36,46 @@ from typing import Any
 # Provider is informational today (only "openai" is wired); becomes
 # load-bearing in L3 once we switch agent runtimes.
 
+# Default model is gpt-5-mini everywhere except the chat-orchestration
+# stack, which keeps full gpt-5 for the heavy plan / orchestrate / edit
+# reasoning loops. Operator preference (2026-05-25): consolidate on
+# gpt-5-mini for cost + rate-limit headroom; gpt-5-mini's structured-
+# output adherence is good enough that we don't need gpt-4o uplift on
+# the smaller roles.
+#
+# The trading_panel (finagent.agents.trading_panel) has its own
+# defaults dict (llm_factory._ROLE_DEFAULTS) — also already gpt-5-mini
+# across all panel roles. Keep them in sync.
 _DEFAULTS: dict[str, tuple[str, str]] = {
-    # Chat workflow
-    "intent_classifier": ("openai", "gpt-4o-mini"),
+    # Chat workflow — gpt-5 retained for the deep-reasoning roles.
+    "intent_classifier": ("openai", "gpt-5-mini"),
     "chat_planner": ("openai", "gpt-5"),
     "chat_orchestrator": ("openai", "gpt-5"),
     "chat_validator": ("openai", "gpt-5"),
-    "chat_question": ("openai", "gpt-4o"),
+    "chat_question": ("openai", "gpt-5-mini"),
     "chat_edit_planner": ("openai", "gpt-5"),
     "chat_edit_orchestrator": ("openai", "gpt-5"),
     # Recipe / template authoring
     "template_author": ("openai", "gpt-5"),
     # Audit + verdict layers
-    "bias_auditor": ("openai", "gpt-4o-mini"),
+    "bias_auditor": ("openai", "gpt-5-mini"),
     # Paper-trading daily per-ticker analyst (50 calls/day → keep cheap).
-    # This is the sole writer to the predictions table — the old batch
+    # This is the SOLE writer to the predictions table — the old batch
     # portfolio_manager agent was removed; the Tauric-style multi-agent
     # debate panel (finagent.agents.trading_panel) is the per-ticker
-    # methodology going forward.
-    "stock_analyst": ("openai", "gpt-4o-mini"),
+    # methodology going forward. The role here drives the legacy
+    # single-call rescue path; the panel itself uses panel_* roles.
+    "stock_analyst": ("openai", "gpt-5-mini"),
     # Notebook-name suggester — one-shot, lowest tier.
-    "name_suggester": ("openai", "gpt-4o-mini"),
-    # Debate package
-    "debate_bull": ("openai", "gpt-4o"),
-    "debate_bear": ("openai", "gpt-4o"),
-    "debate_moderator": ("openai", "gpt-4o"),
+    "name_suggester": ("openai", "gpt-5-mini"),
+    # Debate package — legacy roles; the trading_panel replaced these
+    # for the live UI, but the roles are still referenced by old debate
+    # code paths. Kept on gpt-5-mini for consistency.
+    "debate_bull": ("openai", "gpt-5-mini"),
+    "debate_bear": ("openai", "gpt-5-mini"),
+    "debate_moderator": ("openai", "gpt-5-mini"),
     # Generic fallback for un-keyed callers
-    "default": ("openai", "gpt-4o"),
+    "default": ("openai", "gpt-5-mini"),
 }
 
 
