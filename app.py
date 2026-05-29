@@ -1351,13 +1351,40 @@ async def start_debate(req: _DebateSubmission):
 
 
 @app.get("/api/debates")
-async def list_debates(ticker: Optional[str] = None, limit: int = 50):
+async def list_debates(
+    ticker: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Paginated debates list. ``total`` lets the UI render
+    'X of Y' counters and decide whether the Load More button still
+    has more rows to fetch."""
     from finagent.experiments import get_store
 
-    debates = get_store().list_debates(
-        ticker=ticker, limit=max(1, min(200, int(limit)))
-    )
-    return {"debates": [d.as_public_dict() for d in debates]}
+    store = get_store()
+    limit = max(1, min(200, int(limit)))
+    offset = max(0, min(2000, int(offset)))
+    debates = store.list_debates(ticker=ticker, limit=limit, offset=offset)
+    total = store.count_debates(ticker=ticker)
+    return {
+        "debates": [d.as_public_dict() for d in debates],
+        "limit": limit,
+        "offset": offset,
+        "total": total,
+        "has_more": (offset + len(debates)) < total,
+    }
+
+
+@app.post("/api/debates/cleanup-stranded")
+async def cleanup_stranded_debates(older_than_secs: int = 1800):
+    """Admin: mark any queued/running debates older than ``older_than_secs``
+    (default 30 min) as failed. Cleans up rows stranded by the
+    pre-22db0e0 run_panel(persist=True) lifecycle bug where rows were
+    created but never finalised."""
+    from finagent.experiments import get_store
+
+    n = get_store().cleanup_stranded_debates(older_than_secs=older_than_secs)
+    return {"rows_marked_failed": n, "older_than_secs": older_than_secs}
 
 
 @app.get("/api/debates/calendar")

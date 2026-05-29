@@ -786,18 +786,70 @@ class ExperimentStore:
         return _row_to_debate(row) if row else None
 
     def list_debates(
-        self, ticker: Optional[str] = None, limit: int = 100
+        self,
+        ticker: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
     ) -> list[Debate]:
+        """List debates newest-first, with offset-based pagination.
+
+        ``limit + offset`` is clamped to 2000 so a single call can
+        never scan more than ~2000 rows — keeps the API endpoint
+        cheap even under abuse.
+        """
         sql = "SELECT * FROM debates"
         args: list[Any] = []
         if ticker:
             sql += " WHERE ticker = ?"
             args.append(ticker)
-        sql += " ORDER BY started_at DESC LIMIT ?"
-        args.append(limit)
+        # Clamp + sanitise.
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, min(int(offset), 2000))
+        sql += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
+        args.extend([limit, offset])
         with self._conn() as conn:
             rows = conn.execute(sql, args).fetchall()
         return [_row_to_debate(r) for r in rows]
+
+    def count_debates(self, ticker: Optional[str] = None) -> int:
+        """Total row count — used by the UI to show 'X of Y total' and
+        decide whether the Load More button should still render."""
+        sql = "SELECT COUNT(*) FROM debates"
+        args: list[Any] = []
+        if ticker:
+            sql += " WHERE ticker = ?"
+            args.append(ticker)
+        with self._conn() as conn:
+            (count,) = conn.execute(sql, args).fetchone()
+        return int(count)
+
+    def cleanup_stranded_debates(self, older_than_secs: int = 1800) -> int:
+        """Mark queued/running debates older than ``older_than_secs``
+        as ``failed`` with a clear error message.
+
+        Existed to clean up rows stranded by the pre-22db0e0
+        ``run_panel(persist=True)`` bug — those rows were created in
+        status='queued' but never updated. With the run_debate switch
+        the lifecycle is correct for new runs, but the old rows still
+        sit there. This endpoint is the one-shot fix.
+
+        Returns the number of rows updated."""
+        cutoff = time.time() - max(60, int(older_than_secs))
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE debates "
+                "SET status = 'failed', "
+                "    error = COALESCE(error, 'stranded by deploy churn — "
+                "lifecycle never completed; cleanup at ' || ?), "
+                "    finished_at = ? "
+                "WHERE status IN ('queued', 'running') AND started_at < ?",
+                (
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    time.time(),
+                    cutoff,
+                ),
+            )
+            return cursor.rowcount
 
     def delete_debate(self, debate_id: str) -> None:
         with self._conn() as conn:
