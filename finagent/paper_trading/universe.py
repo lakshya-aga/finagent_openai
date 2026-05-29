@@ -1,8 +1,10 @@
 """Nifty 50 universe + sector classification + market-cap refresh.
 
-The ticker list is sourced from `finagent.scheduler.NIFTY_50` so the
-paper-trading book stays in sync with whatever the daily debate
-scheduler is also covering — they share the same universe by design.
+The ticker list lives here (it used to be in finagent.scheduler.NIFTY_50
+when the now-removed daily-5-debate cron also consumed it; the
+stock_analyst panel run is now the only daily writer over the
+universe so the canonical location moved to paper_trading where it
+gets used).
 
 Sectors are hardcoded here because yfinance's sector field is
 unreliable for Indian tickers (it sometimes returns "Industrials"
@@ -22,7 +24,63 @@ import logging
 import time
 from typing import Iterable, Optional
 
-from finagent.scheduler import NIFTY_50 as NIFTY50_TICKERS
+
+# ─── Nifty 50 universe ──────────────────────────────────────────────
+# Source: NSE indices listing as of 2026-05. The Nifty 50 changes
+# occasionally; refresh this list when the index reconstitutes.
+# Tickers use the .NS suffix so yfinance routes them to NSE.
+NIFTY50_TICKERS: list[str] = [
+    "RELIANCE.NS",
+    "TCS.NS",
+    "HDFCBANK.NS",
+    "BHARTIARTL.NS",
+    "ICICIBANK.NS",
+    "INFY.NS",
+    "SBIN.NS",
+    "LT.NS",
+    "HINDUNILVR.NS",
+    "ITC.NS",
+    "BAJFINANCE.NS",
+    "HCLTECH.NS",
+    "KOTAKBANK.NS",
+    "MARUTI.NS",
+    "AXISBANK.NS",
+    "M&M.NS",
+    "SUNPHARMA.NS",
+    "ULTRACEMCO.NS",
+    "TITAN.NS",
+    "NTPC.NS",
+    "BAJAJFINSV.NS",
+    "ASIANPAINT.NS",
+    "ONGC.NS",
+    "ADANIENT.NS",
+    "POWERGRID.NS",
+    "WIPRO.NS",
+    "JSWSTEEL.NS",
+    "TATAMOTORS.NS",
+    "ADANIPORTS.NS",
+    "COALINDIA.NS",
+    "BAJAJ-AUTO.NS",
+    "NESTLEIND.NS",
+    "BEL.NS",
+    "TATASTEEL.NS",
+    "GRASIM.NS",
+    "HDFCLIFE.NS",
+    "TRENT.NS",
+    "SBILIFE.NS",
+    "EICHERMOT.NS",
+    "HINDALCO.NS",
+    "TECHM.NS",
+    "DRREDDY.NS",
+    "CIPLA.NS",
+    "INDUSINDBK.NS",
+    "APOLLOHOSP.NS",
+    "BPCL.NS",
+    "TATACONSUM.NS",
+    "BRITANNIA.NS",
+    "SHRIRAMFIN.NS",
+    "HEROMOTOCO.NS",
+]
 
 logger = logging.getLogger(__name__)
 

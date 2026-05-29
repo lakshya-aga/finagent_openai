@@ -1546,20 +1546,6 @@ async def trigger_paper_trading_now():
     return await run_paper_trading_rebalance()
 
 
-@app.post("/api/debates/scheduler/run-now")
-async def trigger_scheduler_now(n: int = 5, rounds: int = 2):
-    """Manually fire the daily Nifty cron (admin / smoke-test).
-
-    Runs in the background — returns immediately with the queued
-    ticker list so the caller can check progress on /api/debates.
-    """
-    from finagent.scheduler import run_daily_nifty_debates, select_least_recent
-
-    selected = select_least_recent(max(1, min(50, int(n))))
-    asyncio.create_task(run_daily_nifty_debates(n=len(selected), rounds=rounds))
-    return {"queued": selected, "rounds": rounds}
-
-
 @app.get("/api/debates/{debate_id}/performance")
 async def debate_performance(debate_id: str):
     """Compute the actual return on a debate's underlying ticker since
