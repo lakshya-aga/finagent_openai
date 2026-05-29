@@ -162,37 +162,43 @@ async def _analyse_via_panel(ticker: str) -> Optional[StockRecommendation]:
     """Run the full trading panel for one ticker and project the
     PortfolioDecision into a StockRecommendation.
 
-    Returns ``None`` on hard failure (panel raised); the caller then
-    falls back to the cheap single-call path. Returns a
+    Goes through ``finagent.debate.run_debate`` rather than
+    ``trading_panel.run_panel`` directly. ``run_debate`` handles the
+    full debates-row lifecycle (create → status=running → transcript
+    accumulated incrementally → status=completed + verdict + finished_at,
+    or status=failed + error on exception). The Past Debates UI reads
+    that table and only renders rows whose lifecycle finished, so
+    going through ``run_debate`` is what makes the 50 daily analyses
+    show up on the page tagged source='agent:stock_analyst'.
+
+    Previously we called ``run_panel(persist=True)`` which only did
+    the create step — every row was stuck in status='queued' and
+    invisible to the UI ("Still not reflected on the debates page").
+
+    Returns ``None`` on hard failure (run_debate raised); the caller
+    then falls back to the cheap single-call path. Returns a
     ``StockRecommendation(action='avoid', ...)`` on soft failures
     (panel ran but produced no decision) so the row still persists
     with a reason rather than silently dropping.
     """
     try:
-        from .trading_panel import run_panel
+        from ..debate import run_debate
     except ImportError as e:
-        logger.warning("stock_analyst: trading_panel unavailable (%s)", e)
+        logger.warning("stock_analyst: debate runner unavailable (%s)", e)
         return None
 
     rounds = _panel_rounds()
     try:
-        result = await run_panel(
+        result = await run_debate(
             ticker=ticker,
             asset_class="indian_equity",
             rounds=rounds,
             emit=None,  # no SSE — server-side only
-            # persist=True so all 50 daily panel runs show up on the
-            # Past Debates page (tagged source='agent:stock_analyst' so
-            # the UI can distinguish them from the 5 scheduled-cron
-            # debates tagged source='scheduled'). Was False originally;
-            # operator complained "still only 5 ticker analysis" — the
-            # 50 were running invisibly. Storage cost is ~30 KB/row ×
-            # 50/day = ~1.5 MB/day, acceptable for SQLite.
-            persist=True,
+            debate_id=None,  # have run_debate mint a fresh row
             source="agent:stock_analyst",
         )
     except Exception as e:
-        logger.warning("stock_analyst: panel raised for %s (%s)", ticker, e)
+        logger.warning("stock_analyst: run_debate raised for %s (%s)", ticker, e)
         return None
 
     verdict = result.get("verdict") or {}
