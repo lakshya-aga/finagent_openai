@@ -15,6 +15,7 @@ runtime the workflow swaps them out via `agent.clone(mcp_servers=...)`.
 from __future__ import annotations
 
 import os
+from agents import function_tool
 from agents.mcp import (
     MCPServerSse,
     MCPServerSseParams,
@@ -71,14 +72,33 @@ def file_search_tools() -> list:
     return hosted_file_search_tools()
 
 
+@function_tool
+def unavailable_file_search(query: str = ""):
+    """Explain that hosted file search is unavailable for this knowledge backend."""
+    backend = os.environ.get("KNOWLEDGE_STORE_BACKEND", "openai")
+    return {
+        "success": False,
+        "error": (
+            "Hosted file search is unavailable for "
+            f"KNOWLEDGE_STORE_BACKEND={backend!r}. Use "
+            "KNOWLEDGE_STORE_BACKEND=openai with OPENAI_VECTOR_STORE_ID for "
+            "OpenAI hosted file search, or migrate this call site to a "
+            "provider-neutral retrieval backend."
+        ),
+        "query": query,
+    }
+
+
 def make_file_search():
     """Backward-compatible single-tool helper.
 
     Prefer ``file_search_tools()`` in new code because non-hosted knowledge
-    stores may expose zero tools.
+    stores may expose zero hosted tools. Legacy callers still receive a valid
+    tool object so they do not accidentally pass ``None`` into an Agents SDK
+    tool list.
     """
     tools = file_search_tools()
-    return tools[0] if tools else None
+    return tools[0] if tools else unavailable_file_search
 
 
 file_search = make_file_search()

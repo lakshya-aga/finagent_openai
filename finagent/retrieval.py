@@ -57,9 +57,9 @@ class OpenAIVectorStoreKnowledgeStore:
         self.vector_store_id = vector_store_id
 
     async def upload_pdf(self, *, filename: str, data: bytes) -> UploadResult:
-        from finagent.llm import get_llm_client
+        from openai import AsyncOpenAI
 
-        client = get_llm_client("default")
+        client = AsyncOpenAI()
         uploaded = await client.files.create(
             file=(filename, data, "application/pdf"),
             purpose="assistants",
