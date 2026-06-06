@@ -35,8 +35,7 @@ def _apply_provenance(cell, dag_node_id: str, rationale: str) -> None:
         md["rationale"] = rationale
 
 
-@function_tool
-def create_notebook():
+def create_notebook_impl():
     """Create an empty notebook at the next-available outputs/notebook_N.ipynb path."""
     import sys
 
@@ -66,7 +65,11 @@ def create_notebook():
 
 
 @function_tool
-def add_cell(
+def create_notebook():
+    return create_notebook_impl()
+
+
+def add_cell_impl(
     cell_type: str,
     content: str,
     dag_node_id: str = "",
@@ -98,7 +101,16 @@ def add_cell(
 
 
 @function_tool
-def replace_cell(
+def add_cell(
+    cell_type: str,
+    content: str,
+    dag_node_id: str = "",
+    rationale: str = "",
+):
+    return add_cell_impl(cell_type, content, dag_node_id, rationale)
+
+
+def replace_cell_impl(
     cell_index: int,
     cell_type: str,
     content: str,
@@ -137,7 +149,17 @@ def replace_cell(
 
 
 @function_tool
-def insert_cell(
+def replace_cell(
+    cell_index: int,
+    cell_type: str,
+    content: str,
+    dag_node_id: str = "",
+    rationale: str = "",
+):
+    return replace_cell_impl(cell_index, cell_type, content, dag_node_id, rationale)
+
+
+def insert_cell_impl(
     cell_index: int,
     cell_type: str,
     content: str,
@@ -163,7 +185,17 @@ def insert_cell(
 
 
 @function_tool
-def delete_cell(cell_index: int):
+def insert_cell(
+    cell_index: int,
+    cell_type: str,
+    content: str,
+    dag_node_id: str = "",
+    rationale: str = "",
+):
+    return insert_cell_impl(cell_index, cell_type, content, dag_node_id, rationale)
+
+
+def delete_cell_impl(cell_index: int):
     """Delete the cell at cell_index, shifting subsequent cells up."""
     path = _get_current_path()
     logging.info(f"TOOL CALL: delete_cell idx={cell_index}")
@@ -179,7 +211,11 @@ def delete_cell(cell_index: int):
 
 
 @function_tool
-def run_cell(path: str, cell_index: int, timeout: int):
+def delete_cell(cell_index: int):
+    return delete_cell_impl(cell_index)
+
+
+def run_cell_impl(path: str, cell_index: int, timeout: int):
     """Run a single cell after executing all preceding code cells as prelude."""
     path = _get_current_path()
     logging.info(f"TOOL CALL: run_cell idx={cell_index}")
@@ -253,3 +289,8 @@ def run_cell(path: str, cell_index: int, timeout: int):
         "outputs": target_result["outputs"],
         "error": target_result["error"],
     }
+
+
+@function_tool
+def run_cell(path: str, cell_index: int, timeout: int):
+    return run_cell_impl(path, cell_index, timeout)

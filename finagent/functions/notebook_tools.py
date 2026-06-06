@@ -17,8 +17,7 @@ from .kernel import _serialize_output
 from .notebook_io import _get_current_path, _load_notebook, _save_notebook
 
 
-@function_tool
-def read_notebook() -> Dict[str, Any]:
+def read_notebook_impl() -> Dict[str, Any]:
     """Read the full current notebook: every cell with index, type, source, and outputs."""
     logging.info("TOOL CALL: read_notebook")
     nb = _load_notebook()
@@ -40,7 +39,11 @@ def read_notebook() -> Dict[str, Any]:
 
 
 @function_tool
-def find_regex_in_notebook_code(regex_pattern: str, case_sensitive: bool):
+def read_notebook() -> Dict[str, Any]:
+    return read_notebook_impl()
+
+
+def find_regex_in_notebook_code_impl(regex_pattern: str, case_sensitive: bool):
     """Search the current notebook for a regex; return matches with surrounding snippets."""
     logging.info(f"TOOL CALL: find_regex_in_notebook_code {regex_pattern!r}")
     flags = 0 if case_sensitive else re.IGNORECASE
@@ -75,6 +78,11 @@ def find_regex_in_notebook_code(regex_pattern: str, case_sensitive: bool):
         "num_matches": len(matches),
         "matches": matches,
     }
+
+
+@function_tool
+def find_regex_in_notebook_code(regex_pattern: str, case_sensitive: bool):
+    return find_regex_in_notebook_code_impl(regex_pattern, case_sensitive)
 
 
 def lint_notebook_imports(path: str) -> dict:
@@ -284,8 +292,7 @@ def run_all_cells_to_disk(path: str, timeout: int = 120) -> dict:
     }
 
 
-@function_tool
-def validate_run(max_cells: int, timeout: int, prelude: str):
+def validate_run_impl(max_cells: int, timeout: int, prelude: str):
     """Run the full notebook in one persistent kernel, write outputs back, save to disk."""
     path = _get_current_path()
     logging.info(
@@ -441,3 +448,8 @@ def validate_run(max_cells: int, timeout: int, prelude: str):
         "outputs": [],
         "error": error_output,
     }
+
+
+@function_tool
+def validate_run(max_cells: int, timeout: int, prelude: str):
+    return validate_run_impl(max_cells, timeout, prelude)
