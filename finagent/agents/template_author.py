@@ -24,8 +24,6 @@ attributes exist) — but does not run ``compile()`` against a recipe yet.
 
 from __future__ import annotations
 
-from agents import Agent, ModelSettings
-from openai.types.shared.reasoning import Reasoning
 from pydantic import BaseModel, Field
 
 
@@ -266,16 +264,6 @@ TEMPLATE_NAME, METADATA, supports, compile.
 NO explanation text outside the structured output.
 """
 
-
-from finagent.llm import get_model_name
-
-template_author_agent = Agent(
-    name="TemplateAuthor",
-    instructions=TEMPLATE_AUTHOR_INSTRUCTIONS,
-    model=get_model_name("template_author"),
-    output_type=TemplateDraft,
-    model_settings=ModelSettings(
-        store=True,
-        reasoning=Reasoning(effort="high"),
-    ),
-)
+# The runtime path lives in finagent.templates_authoring and uses
+# finagent.llm.ainvoke_structured(...). Keeping this module schema-only avoids
+# constructing an OpenAI Agents SDK object at import time.

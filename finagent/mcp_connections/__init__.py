@@ -5,9 +5,8 @@ from .servers import (
     DATA_MCP_URL,
     FRUIT_THROWER_TOOLS,
     FRUIT_THROWER_URL,
-    file_search,
+    file_search_tools,
     make_data_mcp,
-    make_file_search,
     make_fruit_thrower,
 )
 
@@ -16,9 +15,8 @@ __all__ = [
     "DATA_MCP_URL",
     "FRUIT_THROWER_TOOLS",
     "FRUIT_THROWER_URL",
-    "file_search",
+    "file_search_tools",
     "make_data_mcp",
-    "make_file_search",
     "make_fruit_thrower",
     "make_knowledge_mcp",
     "mcp_servers",

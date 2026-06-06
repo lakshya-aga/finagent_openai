@@ -29,9 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agents import Runner
-
-from .agents.template_author import template_author_agent
+from .agents.template_author import TEMPLATE_AUTHOR_INSTRUCTIONS, TemplateDraft
+from .llm import ainvoke_structured
 
 logger = logging.getLogger(__name__)
 
@@ -75,32 +74,19 @@ async def draft_template(description: str) -> dict[str, Any]:
         }
 
     try:
-        result = await Runner.run(
-            template_author_agent,
-            input=[
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": description.strip()}],
-                }
-            ],
-            max_turns=4,
+        draft = await ainvoke_structured(
+            "template_author",
+            TemplateDraft,
+            system=TEMPLATE_AUTHOR_INSTRUCTIONS,
+            user=description.strip(),
         )
     except Exception as exc:
-        logger.exception("template author agent failed")
+        logger.exception("template authoring LLM failed")
         return {
             "status": "error",
             "slug": "",
             "path": "",
-            "errors": [f"author agent failed: {type(exc).__name__}: {exc}"],
-        }
-
-    draft = result.final_output
-    if draft is None:
-        return {
-            "status": "error",
-            "slug": "",
-            "path": "",
-            "errors": ["author agent returned no structured output"],
+            "errors": [f"author LLM failed: {type(exc).__name__}: {exc}"],
         }
 
     slug = _slugify(getattr(draft, "slug", "") or "")

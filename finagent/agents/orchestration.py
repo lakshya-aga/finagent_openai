@@ -12,7 +12,7 @@ from agents import Agent, ModelSettings
 from openai.types.shared.reasoning import Reasoning
 
 from ..functions import add_cell, create_notebook
-from ..mcp_connections import file_search, make_data_mcp, make_fruit_thrower
+from ..mcp_connections import file_search_tools, make_data_mcp, make_fruit_thrower
 
 ORCHESTRATION_INSTRUCTIONS = """You are a NOTEBOOK ASSEMBLY AGENT.
 Your responsibility is to assemble and execute a Jupyter notebook
@@ -135,7 +135,7 @@ orchestration_agent = Agent(
     name="Orchestration Agent",
     instructions=ORCHESTRATION_INSTRUCTIONS,
     model=get_model_name("chat_orchestrator"),
-    tools=[add_cell, create_notebook, file_search],
+    tools=[add_cell, create_notebook, *file_search_tools()],
     mcp_servers=[make_fruit_thrower(), make_data_mcp()],
     model_settings=ModelSettings(
         parallel_tool_calls=True,

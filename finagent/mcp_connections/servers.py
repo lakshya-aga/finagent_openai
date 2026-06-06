@@ -15,8 +15,6 @@ runtime the workflow swaps them out via `agent.clone(mcp_servers=...)`.
 from __future__ import annotations
 
 import os
-
-from agents import FileSearchTool
 from agents.mcp import (
     MCPServerSse,
     MCPServerSseParams,
@@ -62,16 +60,12 @@ def make_data_mcp() -> MCPServerSse:
     )
 
 
-# Default vector store for the agent's curated PDFs / research notes.
-_VECTOR_STORE_ID = os.environ.get(
-    "OPENAI_VECTOR_STORE_ID", "vs_69a81b0197a481919e14c2d66197af7d"
-)
+def file_search_tools() -> list:
+    """Return hosted file-search tools for legacy Agents SDK agents.
 
+    Non-OpenAI knowledge backends can return an empty list, which keeps agent
+    construction clean while making the missing hosted capability explicit.
+    """
+    from finagent.retrieval import hosted_file_search_tools
 
-def make_file_search() -> FileSearchTool:
-    return FileSearchTool(vector_store_ids=[_VECTOR_STORE_ID])
-
-
-# Single shared FileSearchTool instance — it has no per-call state and is safe
-# to share across agents.
-file_search = make_file_search()
+    return hosted_file_search_tools()

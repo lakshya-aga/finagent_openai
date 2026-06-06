@@ -1776,9 +1776,9 @@ async def admin_llm_config():
       <ROLE>_PROVIDER=openai  <ROLE>_MODEL=gpt-5
       OPENAI_MODEL=gpt-4o     # global default applied when role-specific is unset
     """
-    from finagent.llm import list_roles
+    from finagent.llm import list_role_configs
 
-    return {role: {"provider": p, "model": m} for role, (p, m) in list_roles().items()}
+    return list_role_configs()
 
 
 @app.get("/api/admin/costs")
@@ -2132,9 +2132,6 @@ async def get_notebook_lineage(name: str, method: str = "ast", refresh: bool = F
         raise HTTPException(status_code=500, detail=f"lineage failed: {exc}")
 
 
-_VECTOR_STORE_ID = os.environ.get(
-    "OPENAI_VECTOR_STORE_ID", "vs_69a81b0197a481919e14c2d66197af7d"
-)
 _UPLOAD_MAX_BYTES = 25 * 1024 * 1024  # 25 MB
 
 
@@ -2156,42 +2153,15 @@ async def upload_pdf(file: UploadFile = File(...)):
         )
 
     filename = file.filename or "upload.pdf"
-    # PDF upload uses the OpenAI Files + Vector Stores APIs specifically;
-    # they don't have a clean LangChain / Anthropic equivalent, so this
-    # one stays OpenAI-pinned even after the L3 migration. Routing
-    # through the dispatcher anyway for telemetry consistency.
-    from finagent.llm import get_llm_client
-
-    client = get_llm_client("default")
-
     try:
-        uploaded = await client.files.create(
-            file=(filename, data, "application/pdf"),
-            purpose="assistants",
-        )
-    except Exception as e:
-        logging.exception("OpenAI Files.create failed for %s", filename)
-        raise HTTPException(status_code=502, detail=f"files.create failed: {e}")
+        from finagent.retrieval import get_knowledge_store
 
-    try:
-        vsf = await client.vector_stores.files.create(
-            vector_store_id=_VECTOR_STORE_ID,
-            file_id=uploaded.id,
-        )
+        result = await get_knowledge_store().upload_pdf(filename=filename, data=data)
     except Exception as e:
-        logging.exception("OpenAI vector_stores.files.create failed for %s", filename)
-        raise HTTPException(
-            status_code=502, detail=f"vector_stores.files.create failed: {e}"
-        )
+        logging.exception("knowledge-store PDF upload failed for %s", filename)
+        raise HTTPException(status_code=502, detail=f"knowledge upload failed: {e}")
 
-    return {
-        "filename": filename,
-        "file_id": uploaded.id,
-        "vector_store_id": _VECTOR_STORE_ID,
-        "vector_store_file_id": vsf.id,
-        "status": getattr(vsf, "status", "queued"),
-        "bytes": len(data),
-    }
+    return result.as_response()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

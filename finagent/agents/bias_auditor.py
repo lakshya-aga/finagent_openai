@@ -230,27 +230,6 @@ async def audit_run(
     ``BiasAudit(verdict="PENDING", reasons=[], summary="auditor unavailable: <reason>")``
     so the run completion path is never blocked.
     """
-    # Lazy imports — keep this module loadable in environments where the
-    # Agents SDK isn't installed (tests, alternative runtimes, ops scripts
-    # that just want to deserialize a stored audit).
-    try:
-        from agents import Agent, ModelSettings, Runner
-    except ImportError as exc:
-        logger.warning("bias_auditor: agents SDK unavailable (%s)", exc)
-        return BiasAudit(
-            verdict="PENDING",
-            reasons=[],
-            summary=f"auditor unavailable: agents SDK not installed ({exc})",
-        )
-
-    try:
-        from finagent.llm import get_model_name
-
-        model_name = get_model_name("bias_auditor")
-    except Exception as exc:
-        logger.warning("bias_auditor: model resolution failed, falling back (%s)", exc)
-        model_name = "gpt-4o-mini"
-
     try:
         user_payload = _build_user_payload(
             notebook_json or {},
@@ -267,19 +246,14 @@ async def audit_run(
         )
 
     try:
-        agent = Agent(
-            name="BiasAuditor",
-            instructions=_BIAS_AUDITOR_INSTRUCTIONS,
-            model=model_name,
-            model_settings=ModelSettings(),
-            output_type=BiasAudit,
+        from finagent.llm import ainvoke_structured
+
+        verdict = await ainvoke_structured(
+            "bias_auditor",
+            BiasAudit,
+            system=_BIAS_AUDITOR_INSTRUCTIONS,
+            user=user_payload,
         )
-        result = await Runner.run(
-            agent,
-            input=user_payload,
-            max_turns=1,
-        )
-        verdict = result.final_output_as(BiasAudit)
     except Exception as exc:
         logger.warning("bias_auditor: LLM call failed (%s)", exc)
         return BiasAudit(

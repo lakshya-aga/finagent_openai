@@ -77,7 +77,7 @@ langgraph>=0.2
 langchain-openai>=0.2          # always installed — OpenAI is the fallback
 langchain-anthropic>=0.2        # for users who flip the panel to Claude
 langchain-ollama>=0.2           # for the default Qwen-via-Ollama path
-# langchain-google-genai is optional — install separately if needed.
+langchain-google-genai>=2.0     # Gemini / Google AI Studio provider
 
 # Internal libraries the generated notebooks call.
 # fin-kit is installed separately in the Dockerfile with

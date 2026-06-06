@@ -106,32 +106,14 @@ async def suggest_notebook_name(user_request: str) -> str:
     falls back to ``notebook`` on any LLM failure so the build proceeds
     even if the agent is unavailable."""
     try:
-        # Lazy imports — keep this module loadable in environments where
-        # the Agents SDK isn't installed (tests, alternative runtimes).
-        from agents import Agent, ModelSettings, Runner
-    except ImportError as e:
-        logger.warning(
-            "name_suggester: SDK unavailable, falling back to 'notebook' (%s)", e
-        )
-        return "notebook"
+        from finagent.llm import ainvoke_structured
 
-    try:
-        agent = Agent(
-            name="NotebookNameSuggester",
-            instructions=_NAME_SUGGESTER_INSTRUCTIONS,
-            # Reuse the cheap quick-thinking model for this one-shot call.
-            # Hard-coded to gpt-4o-mini if the dispatcher entry isn't set
-            # so this stays fast even if the user flips the panel models.
-            model=_resolve_model_name(),
-            model_settings=ModelSettings(),
-            output_type=NotebookName,
+        out = await ainvoke_structured(
+            "name_suggester",
+            NotebookName,
+            system=_NAME_SUGGESTER_INSTRUCTIONS,
+            user=f"User request:\n\n{user_request}",
         )
-        result = await Runner.run(
-            agent,
-            input=f"User request:\n\n{user_request}",
-            max_turns=1,
-        )
-        out: NotebookName = result.final_output_as(NotebookName)
     except Exception as exc:
         logger.warning("name_suggester: LLM call failed, using fallback (%s)", exc)
         return "notebook"
@@ -141,19 +123,3 @@ async def suggest_notebook_name(user_request: str) -> str:
         return "notebook"
     return slug
 
-
-def _resolve_model_name() -> str:
-    """Pick the model for the name-suggester role. Tries the existing
-    finagent.llm dispatcher first; falls back to a known-cheap default
-    so this never blocks on misconfiguration."""
-    try:
-        from finagent.llm import get_model_name
-
-        return get_model_name("name_suggester")
-    except Exception:
-        try:
-            from finagent.llm import get_model_name
-
-            return get_model_name("intent_classifier")
-        except Exception:
-            return "gpt-4o-mini"

@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
-from typing import Optional
+from typing import Optional, TypedDict
 
 import nbformat
 from agents import RunConfig, Runner, TResponseInputItem, trace
@@ -17,12 +18,12 @@ from .agents import (
     analysis_orchestration_agent,
     analysis_planner,
     edit_orchestration_agent,
-    edit_planner,
     orchestration_agent,
     planner,
-    question_agent,
     validatorandfixingagent,
 )
+from .agents.edit_planner import EDIT_PLANNER_INSTRUCTIONS
+from .agents.question import answer_question
 from .functions import extract_trace_markdown
 from .functions.notebook_io import _get_current_path
 from .hooks import StreamingHooks, build_notebook_outline, emit_phase
@@ -148,43 +149,119 @@ async def _classify_intent(message: str, has_notebook: bool) -> str:
     plotting request through the strategy pipeline produces a synthetic
     backtest on a one-row dataframe and answers nothing.
     """
-    from .llm import get_llm_client, get_model_name
+    from .llm import ainvoke_text
 
-    client = get_llm_client("intent_classifier")
-    resp = await client.chat.completions.create(
-        model=get_model_name("intent_classifier"),
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Classify the user message as exactly one of:\n"
-                    "- question: asking for explanation, analysis, clarification, or general info "
-                    "(no chart, no dataframe — just an answer in chat)\n"
-                    "- edit: requesting a change, addition, or fix to an existing notebook\n"
-                    "- explore: requesting an ad-hoc analysis, plot, chart, or computation "
-                    "of REAL DATA (e.g. 'plot historical P/E of MU', 'show correlation matrix', "
-                    "'compare returns of A vs B'). The deliverable is the chart/dataframe, "
-                    "NOT a trading strategy.\n"
-                    "- new: requesting a brand-new TRADING STRATEGY notebook (the deliverable "
-                    "is asset weights + returns over time, suitable for backtesting).\n\n"
-                    "Reply with only the single word."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Has existing notebook: {has_notebook}\nMessage: {message}",
-            },
-        ],
-        max_tokens=5,
-        temperature=0,
-    )
-    intent = resp.choices[0].message.content.strip().lower()
+    intent = (
+        await ainvoke_text(
+            "intent_classifier",
+            system=(
+                "Classify the user message as exactly one of:\n"
+                "- question: asking for explanation, analysis, clarification, "
+                "or general info (no chart, no dataframe — just an answer in chat)\n"
+                "- edit: requesting a change, addition, or fix to an existing notebook\n"
+                "- explore: requesting an ad-hoc analysis, plot, chart, or computation "
+                "of REAL DATA (e.g. 'plot historical P/E of MU', "
+                "'show correlation matrix', 'compare returns of A vs B'). "
+                "The deliverable is the chart/dataframe, NOT a trading strategy.\n"
+                "- new: requesting a brand-new TRADING STRATEGY notebook "
+                "(the deliverable is asset weights + returns over time, suitable "
+                "for backtesting).\n\n"
+                "Reply with only the single word."
+            ),
+            user=f"Has existing notebook: {has_notebook}\nMessage: {message}",
+        )
+    ).strip().lower()
     if intent not in ("question", "edit", "explore", "new"):
         intent = "edit" if has_notebook else "explore"
     return intent
 
 
-async def run_workflow(
+class _GraphWorkflowState(TypedDict, total=False):
+    workflow_input: WorkflowInput
+    existing_notebook_path: Optional[str]
+    prior_history: Optional[list]
+    progress_cb: object
+    intent: str
+    result: dict
+
+
+async def _run_langgraph_workflow(
+    workflow_input: WorkflowInput,
+    existing_notebook_path: Optional[str] = None,
+    prior_history: Optional[list] = None,
+    progress_cb=None,
+):
+    """LangGraph entrypoint for the product workflow.
+
+    The graph currently owns routing and provider-neutral question mode. The
+    tool-heavy plan/build/validate/edit branches delegate to the legacy Agents
+    SDK loop while MCP tool execution is migrated to LangChain-native adapters.
+    This keeps the public API stable and makes the remaining legacy boundary
+    explicit instead of hidden in individual call sites.
+    """
+    from langgraph.graph import END, START, StateGraph
+
+    async def classify_node(state: _GraphWorkflowState) -> dict:
+        wf = state["workflow_input"]
+        intent = await _classify_intent(
+            wf.input_as_text,
+            bool(state.get("existing_notebook_path")),
+        )
+        return {"intent": intent}
+
+    async def route_question_node(state: _GraphWorkflowState) -> dict:
+        wf = state["workflow_input"]
+        nb_path = state.get("existing_notebook_path")
+        progress = state.get("progress_cb")
+        if progress:
+            await progress({"type": "status", "message": "Thinking..."})
+        nb_context = _build_notebook_context(nb_path)
+        answer = await answer_question(wf.input_as_text, notebook_context=nb_context)
+        return {
+            "result": {
+                "output_text": answer,
+                "notebook_path": nb_path,
+                "mode": "question",
+            }
+        }
+
+    async def legacy_tool_loop_node(state: _GraphWorkflowState) -> dict:
+        result = await _run_agents_workflow(
+            state["workflow_input"],
+            existing_notebook_path=state.get("existing_notebook_path"),
+            prior_history=state.get("prior_history"),
+            progress_cb=state.get("progress_cb"),
+        )
+        return {"result": result}
+
+    def choose_branch(state: _GraphWorkflowState) -> str:
+        return "question" if state.get("intent") == "question" else "legacy_tool_loop"
+
+    graph = StateGraph(_GraphWorkflowState)
+    graph.add_node("classify", classify_node)
+    graph.add_node("question", route_question_node)
+    graph.add_node("legacy_tool_loop", legacy_tool_loop_node)
+    graph.add_edge(START, "classify")
+    graph.add_conditional_edges(
+        "classify",
+        choose_branch,
+        {"question": "question", "legacy_tool_loop": "legacy_tool_loop"},
+    )
+    graph.add_edge("question", END)
+    graph.add_edge("legacy_tool_loop", END)
+    compiled = graph.compile()
+    final_state = await compiled.ainvoke(
+        {
+            "workflow_input": workflow_input,
+            "existing_notebook_path": existing_notebook_path,
+            "prior_history": prior_history,
+            "progress_cb": progress_cb,
+        }
+    )
+    return final_state["result"]
+
+
+async def _run_agents_workflow(
     workflow_input: WorkflowInput,
     existing_notebook_path: Optional[str] = None,
     prior_history: Optional[list] = None,
@@ -327,26 +404,14 @@ async def run_workflow(
                 q_input = workflow["input_as_text"]
 
             await emit_phase(progress_cb, "question", "start")
-            await _emit_agent_input("question", question_agent.name, q_input)
-            q_result = await Runner.run(
-                question_agent,
-                input=[
-                    *conversation_history,
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": q_input}],
-                    },
-                ],
-                run_config=RunConfig(),
-                hooks=_hooks("question"),
-                # One optional read_notebook + final answer is plenty.
-                # Without this cap an empty model turn could hang here.
-                max_turns=6,
+            await _emit_agent_input("question", "QuestionAgent", q_input)
+            q_answer = await answer_question(
+                workflow["input_as_text"],
+                notebook_context=nb_context,
             )
             await emit_phase(progress_cb, "question", "end")
-            await _emit_trace(q_result)
             return {
-                "output_text": q_result.final_output_as(str),
+                "output_text": q_answer,
                 "notebook_path": existing_notebook_path,
                 "mode": "question",
             }
@@ -367,21 +432,17 @@ async def run_workflow(
                 f"USER REQUEST: {workflow['input_as_text']}"
             )
             await emit_phase(progress_cb, "edit_plan", "start")
-            await _emit_agent_input("edit_plan", edit_planner.name, edit_planner_input)
-            edit_planner_result_temp = await Runner.run(
-                edit_planner,
-                input=[
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": edit_planner_input}],
-                    }
-                ],
-                run_config=RunConfig(),
-                hooks=_hooks("edit_plan"),
-            )
+            await _emit_agent_input("edit_plan", "EditPlanner", edit_planner_input)
+            from .llm import ainvoke_text
+
+            diff_spec_raw = (
+                await ainvoke_text(
+                    "chat_edit_planner",
+                    system=EDIT_PLANNER_INSTRUCTIONS,
+                    user=edit_planner_input,
+                )
+            ).strip()
             await emit_phase(progress_cb, "edit_plan", "end")
-            await _emit_trace(edit_planner_result_temp)
-            diff_spec_raw = edit_planner_result_temp.final_output_as(str).strip()
 
             try:
                 diff_spec = json.loads(diff_spec_raw)
@@ -642,3 +703,30 @@ async def run_workflow(
             "notebook_path": final_path,
             "mode": mode_label,
         }
+
+
+async def run_workflow(
+    workflow_input: WorkflowInput,
+    existing_notebook_path: Optional[str] = None,
+    prior_history: Optional[list] = None,
+    progress_cb=None,
+):
+    runtime = os.environ.get("FINAGENT_WORKFLOW_RUNTIME", "langgraph").strip().lower()
+    if runtime in {"langgraph", "graph"}:
+        return await _run_langgraph_workflow(
+            workflow_input,
+            existing_notebook_path=existing_notebook_path,
+            prior_history=prior_history,
+            progress_cb=progress_cb,
+        )
+    if runtime in {"agents", "legacy", "openai_agents"}:
+        return await _run_agents_workflow(
+            workflow_input,
+            existing_notebook_path=existing_notebook_path,
+            prior_history=prior_history,
+            progress_cb=progress_cb,
+        )
+    raise ValueError(
+        "FINAGENT_WORKFLOW_RUNTIME must be 'langgraph' or 'agents', "
+        f"got {runtime!r}"
+    )
