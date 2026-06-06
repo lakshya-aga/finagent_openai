@@ -69,3 +69,16 @@ def file_search_tools() -> list:
     from finagent.retrieval import hosted_file_search_tools
 
     return hosted_file_search_tools()
+
+
+def make_file_search():
+    """Backward-compatible single-tool helper.
+
+    Prefer ``file_search_tools()`` in new code because non-hosted knowledge
+    stores may expose zero tools.
+    """
+    tools = file_search_tools()
+    return tools[0] if tools else None
+
+
+file_search = make_file_search()

@@ -231,6 +231,7 @@ async def _run_langgraph_workflow(
             existing_notebook_path=state.get("existing_notebook_path"),
             prior_history=state.get("prior_history"),
             progress_cb=state.get("progress_cb"),
+            forced_intent=state.get("intent"),
         )
         return {"result": result}
 
@@ -266,6 +267,7 @@ async def _run_agents_workflow(
     existing_notebook_path: Optional[str] = None,
     prior_history: Optional[list] = None,
     progress_cb=None,
+    forced_intent: Optional[str] = None,
 ):
     async def _emit(msg: str):
         if progress_cb:
@@ -377,7 +379,7 @@ async def _run_agents_workflow(
         conversation_history: list[TResponseInputItem] = list(prior_history or [])
 
         # ── CLASSIFY INTENT ──────────────────────────────────────────────────
-        intent = await _classify_intent(
+        intent = forced_intent or await _classify_intent(
             workflow["input_as_text"], bool(existing_notebook_path)
         )
         logging.info(f"run_workflow intent={intent}")

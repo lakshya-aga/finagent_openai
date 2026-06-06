@@ -16,6 +16,7 @@ LangChain ``BaseChatModel`` without hard-coding a vendor SDK.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -276,6 +277,39 @@ _PROVIDER_FACTORIES = {
 }
 
 
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or part.get("content") or part))
+            else:
+                parts.append(str(part))
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def _extract_json_object(text: str) -> str:
+    """Extract the first plausible JSON object from a model text response."""
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    if cleaned.startswith("{"):
+        return cleaned
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
+
+
 def make_chat(spec: str, **kw: Any):
     """Construct a LangChain chat model from a provider/model spec."""
     provider, model = parse_model_spec(spec)
@@ -308,11 +342,10 @@ async def ainvoke_text(
     from langchain_core.messages import HumanMessage, SystemMessage
 
     llm = make_chat_for_role(role, **model_kwargs)
-    result = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
-    content = getattr(result, "content", result)
-    if isinstance(content, list):
-        return "\n".join(str(part) for part in content)
-    return str(content or "")
+    result = await llm.ainvoke(
+        [SystemMessage(content=system), HumanMessage(content=user)]
+    )
+    return _content_to_text(getattr(result, "content", result))
 
 
 async def ainvoke_structured(
@@ -323,19 +356,48 @@ async def ainvoke_structured(
     user: str,
     **model_kwargs: Any,
 ) -> SchemaT:
-    """Provider-neutral one-shot structured-output call."""
+    """Provider-neutral one-shot structured-output call.
+
+    Providers with strong tool/function-calling support use LangChain's native
+    ``with_structured_output``. Local runtimes such as Ollama can be weaker
+    here, so we fall back to a JSON-only text prompt and Pydantic validation.
+    """
     from langchain_core.messages import HumanMessage, SystemMessage
 
+    cfg = get_role(role)
     llm = make_chat_for_role(role, **model_kwargs)
-    structured = llm.with_structured_output(schema)
-    result = await structured.ainvoke(
-        [SystemMessage(content=system), HumanMessage(content=user)]
+
+    if cfg.capabilities.structured_output:
+        try:
+            structured = llm.with_structured_output(schema)
+            result = await structured.ainvoke(
+                [SystemMessage(content=system), HumanMessage(content=user)]
+            )
+            if isinstance(result, schema):
+                return result
+            if isinstance(result, dict):
+                return schema.model_validate(result)
+            return schema.model_validate_json(str(result))
+        except Exception:
+            logger.exception(
+                "structured-output call failed for role=%s provider=%s; "
+                "falling back to JSON text parsing",
+                role,
+                cfg.provider,
+            )
+
+    schema_json = json.dumps(schema.model_json_schema(), indent=2)
+    fallback_system = (
+        f"{system}\n\n"
+        "Return ONLY valid JSON matching this JSON Schema. Do not include "
+        "markdown fences or explanatory text.\n\n"
+        f"{schema_json}"
     )
-    if isinstance(result, schema):
-        return result
-    if isinstance(result, dict):
-        return schema.model_validate(result)
-    return schema.model_validate_json(str(result))
+    result = await llm.ainvoke(
+        [SystemMessage(content=fallback_system), HumanMessage(content=user)]
+    )
+    text = _content_to_text(getattr(result, "content", result))
+    return schema.model_validate_json(_extract_json_object(text))
 
 
 def get_llm_client(role: str) -> Any:
