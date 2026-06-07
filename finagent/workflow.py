@@ -192,6 +192,41 @@ class _GraphWorkflowState(TypedDict, total=False):
     result: dict
 
 
+def _prior_history_text(prior_history: Optional[list], *, limit: int = 4000) -> str:
+    """Render compact conversation history for provider-neutral prompt paths."""
+    if not prior_history:
+        return ""
+    lines: list[str] = []
+    for item in prior_history:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role", "user")
+        content = item.get("content", "")
+        if isinstance(content, list):
+            text = "\n".join(
+                str(part.get("text") or part.get("content") or "")
+                if isinstance(part, dict)
+                else str(part)
+                for part in content
+            )
+        else:
+            text = str(content or "")
+        text = text.strip()
+        if text:
+            lines.append(f"{role}: {text}")
+    rendered = "\n\n".join(lines)
+    if len(rendered) > limit:
+        return rendered[-limit:]
+    return rendered
+
+
+def _with_prior_history(prompt: str, prior_history: Optional[list]) -> str:
+    history = _prior_history_text(prior_history)
+    if not history:
+        return prompt
+    return f"CONVERSATION SO FAR:\n{history}\n\nCURRENT USER REQUEST:\n{prompt}"
+
+
 async def _emit_status(progress_cb, msg: str):
     if progress_cb:
         await progress_cb({"type": "status", "message": msg})
@@ -305,9 +340,22 @@ async def _run_langchain_notebook_workflow(
     *,
     intent: str,
     existing_notebook_path: Optional[str] = None,
+    prior_history: Optional[list] = None,
     progress_cb=None,
+    mcp_tools: Optional[list] = None,
 ) -> dict:
     """Run notebook creation/edit/validation via LangChain tools only."""
+    if mcp_tools is None:
+        async with LangChainMCPToolContext() as mcp:
+            return await _run_langchain_notebook_workflow(
+                workflow_input,
+                intent=intent,
+                existing_notebook_path=existing_notebook_path,
+                prior_history=prior_history,
+                progress_cb=progress_cb,
+                mcp_tools=mcp.tools,
+            )
+
     from .agents.analysis_orchestration import ANALYSIS_ORCHESTRATION_INSTRUCTIONS
     from .agents.analysis_planner import ANALYSIS_PLANNER_INSTRUCTIONS
     from .agents.edit_orchestration import EDIT_ORCHESTRATION_INSTRUCTIONS
@@ -327,7 +375,7 @@ async def _run_langchain_notebook_workflow(
         )
         edit_planner_input = (
             f"EXISTING NOTEBOOK ({existing_notebook_path}):\n{nb_summary}\n\n"
-            f"USER REQUEST: {user_request}"
+            f"{_with_prior_history(f'USER REQUEST: {user_request}', prior_history)}"
         )
         await _emit_status(progress_cb, "Planning changes...")
         await emit_phase(progress_cb, "edit_plan", "start")
@@ -365,16 +413,16 @@ async def _run_langchain_notebook_workflow(
                 "EditOrchestrationAgent",
                 edit_apply_prompt,
             )
-            async with LangChainMCPToolContext() as mcp:
-                edit_output = await run_tool_loop(
-                    role="chat_edit_orchestrator",
-                    system=EDIT_ORCHESTRATION_INSTRUCTIONS,
-                    user=edit_apply_prompt,
-                    tools=[*notebook_edit_tools(), *mcp.tools],
-                    max_turns=40,
-                    progress_cb=progress_cb,
-                    phase="edit_apply",
-                )
+            edit_output = await run_tool_loop(
+                role="chat_edit_orchestrator",
+                system=EDIT_ORCHESTRATION_INSTRUCTIONS,
+                user=edit_apply_prompt,
+                tools=[*notebook_edit_tools(), *mcp_tools],
+                max_turns=80,
+                progress_cb=progress_cb,
+                phase="edit_apply",
+                prior_history=prior_history,
+            )
             await emit_phase(progress_cb, "edit_apply", "end")
             await _emit_outline(progress_cb, existing_notebook_path)
 
@@ -390,16 +438,16 @@ async def _run_langchain_notebook_workflow(
                 "ValidatorAndFixingAgent",
                 validate_prompt,
             )
-            async with LangChainMCPToolContext() as mcp:
-                val_output = await run_tool_loop(
-                    role="chat_validator",
-                    system=VALIDATOR_INSTRUCTIONS,
-                    user=validate_prompt,
-                    tools=[*notebook_validation_tools(), *mcp.tools],
-                    max_turns=24,
-                    progress_cb=progress_cb,
-                    phase="edit_validate",
-                )
+            val_output = await run_tool_loop(
+                role="chat_validator",
+                system=VALIDATOR_INSTRUCTIONS,
+                user=validate_prompt,
+                tools=[*notebook_validation_tools(), *mcp_tools],
+                max_turns=24,
+                progress_cb=progress_cb,
+                phase="edit_validate",
+                prior_history=prior_history,
+            )
             await emit_phase(progress_cb, "edit_validate", "end")
             await _emit_outline(progress_cb, existing_notebook_path)
             await _emit_lineage(progress_cb, existing_notebook_path)
@@ -432,34 +480,34 @@ async def _run_langchain_notebook_workflow(
         "Planning research..." if mode_label == "new" else "Planning analysis...",
     )
     await emit_phase(progress_cb, "plan", "start")
-    plan_prompt = f"Research request: {user_request}"
+    plan_prompt = _with_prior_history(f"Research request: {user_request}", prior_history)
     await _emit_agent_input(progress_cb, "plan", planner_name, plan_prompt)
-    async with LangChainMCPToolContext() as mcp:
-        planner_output = await run_tool_loop(
-            role="chat_planner",
-            system=planner_instructions,
-            user=plan_prompt,
-            tools=mcp.tools,
-            max_turns=24,
-            progress_cb=progress_cb,
-            phase="plan",
-        )
+    planner_output = await run_tool_loop(
+        role="chat_planner",
+        system=planner_instructions,
+        user=plan_prompt,
+        tools=mcp_tools,
+        max_turns=24,
+        progress_cb=progress_cb,
+        phase="plan",
+        prior_history=prior_history,
+    )
     await emit_phase(progress_cb, "plan", "end")
 
     await _emit_status(progress_cb, "Building notebook...")
     await emit_phase(progress_cb, "build", "start")
     build_prompt = f"User request: {user_request}\n\nDAG plan from planner:\n{planner_output}"
     await _emit_agent_input(progress_cb, "build", orchestrator_name, build_prompt)
-    async with LangChainMCPToolContext() as mcp:
-        build_output = await run_tool_loop(
-            role="chat_orchestrator",
-            system=orchestrator_instructions,
-            user=build_prompt,
-            tools=[*notebook_build_tools(), *mcp.tools],
-            max_turns=80,
-            progress_cb=progress_cb,
-            phase="build",
-        )
+    build_output = await run_tool_loop(
+        role="chat_orchestrator",
+        system=orchestrator_instructions,
+        user=build_prompt,
+        tools=[*notebook_build_tools(), *mcp_tools],
+        max_turns=80,
+        progress_cb=progress_cb,
+        phase="build",
+        prior_history=prior_history,
+    )
     await emit_phase(progress_cb, "build", "end")
     nb_path_after_build = str(_get_current_path())
     await _emit_outline(progress_cb, nb_path_after_build)
@@ -476,16 +524,16 @@ async def _run_langchain_notebook_workflow(
         "ValidatorAndFixingAgent",
         validate_prompt,
     )
-    async with LangChainMCPToolContext() as mcp:
-        validator_output = await run_tool_loop(
-            role="chat_validator",
-            system=VALIDATOR_INSTRUCTIONS,
-            user=validate_prompt,
-            tools=[*notebook_validation_tools(), *mcp.tools],
-            max_turns=24,
-            progress_cb=progress_cb,
-            phase="validate",
-        )
+    validator_output = await run_tool_loop(
+        role="chat_validator",
+        system=VALIDATOR_INSTRUCTIONS,
+        user=validate_prompt,
+        tools=[*notebook_validation_tools(), *mcp_tools],
+        max_turns=24,
+        progress_cb=progress_cb,
+        phase="validate",
+        prior_history=prior_history,
+    )
     await emit_phase(progress_cb, "validate", "end")
 
     final_path = str(_get_current_path())
@@ -508,9 +556,9 @@ async def _run_langgraph_workflow(
     """LangGraph entrypoint for the product workflow.
 
     The graph owns routing, question mode, and the notebook plan/build/validate
-    path. Tool execution is LangChain-native; the OpenAI Agents SDK path remains
-    available only through FINAGENT_WORKFLOW_RUNTIME=agents as an emergency
-    rollback.
+    path. Tool execution is LangChain-native. Operators opt into this path with
+    FINAGENT_WORKFLOW_RUNTIME=langgraph while the default Agents SDK path soaks
+    for one deploy cycle.
     """
     from langgraph.graph import END, START, StateGraph
 
@@ -529,7 +577,10 @@ async def _run_langgraph_workflow(
         if progress:
             await progress({"type": "status", "message": "Thinking..."})
         nb_context = _build_notebook_context(nb_path)
-        answer = await answer_question(wf.input_as_text, notebook_context=nb_context)
+        answer = await answer_question(
+            _with_prior_history(wf.input_as_text, state.get("prior_history")),
+            notebook_context=nb_context,
+        )
         return {
             "result": {
                 "output_text": answer,
@@ -539,12 +590,15 @@ async def _run_langgraph_workflow(
         }
 
     async def notebook_tool_loop_node(state: _GraphWorkflowState) -> dict:
-        result = await _run_langchain_notebook_workflow(
-            state["workflow_input"],
-            intent=state["intent"],
-            existing_notebook_path=state.get("existing_notebook_path"),
-            progress_cb=state.get("progress_cb"),
-        )
+        async with LangChainMCPToolContext() as mcp:
+            result = await _run_langchain_notebook_workflow(
+                state["workflow_input"],
+                intent=state["intent"],
+                existing_notebook_path=state.get("existing_notebook_path"),
+                prior_history=state.get("prior_history"),
+                progress_cb=state.get("progress_cb"),
+                mcp_tools=mcp.tools,
+            )
         return {"result": result}
 
     def choose_branch(state: _GraphWorkflowState) -> str:
@@ -794,7 +848,7 @@ async def _run_agents_workflow(
                         ],
                         run_config=RunConfig(),
                         hooks=_hooks("edit_apply"),
-                        max_turns=40,
+                        max_turns=80,
                     )
                 await emit_phase(progress_cb, "edit_apply", "end")
                 await _emit_trace(edit_orch_result_temp)
@@ -1025,7 +1079,7 @@ async def run_workflow(
     prior_history: Optional[list] = None,
     progress_cb=None,
 ):
-    runtime = os.environ.get("FINAGENT_WORKFLOW_RUNTIME", "langgraph").strip().lower()
+    runtime = os.environ.get("FINAGENT_WORKFLOW_RUNTIME", "agents").strip().lower()
     if runtime in {"langgraph", "graph"}:
         return await _run_langgraph_workflow(
             workflow_input,

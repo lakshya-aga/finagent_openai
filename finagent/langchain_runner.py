@@ -23,6 +23,40 @@ def _stringify(value: Any) -> str:
         return str(value)
 
 
+def _history_item_text(item: Any) -> str:
+    if not isinstance(item, dict):
+        return str(item)
+    content = item.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or part.get("content") or ""))
+            else:
+                parts.append(str(part))
+        return "\n".join(p for p in parts if p)
+    return str(content or "")
+
+
+def _history_to_messages(prior_history: Iterable[Any] | None) -> list[Any]:
+    """Convert web/Agents-style history dictionaries into LangChain messages."""
+    messages: list[Any] = []
+    for item in prior_history or []:
+        role = item.get("role") if isinstance(item, dict) else None
+        text = _history_item_text(item).strip()
+        if not text:
+            continue
+        if role == "assistant":
+            messages.append(AIMessage(content=text))
+        elif role == "system":
+            messages.append(SystemMessage(content=text))
+        else:
+            messages.append(HumanMessage(content=text))
+    return messages
+
+
 async def run_tool_loop(
     *,
     role: str,
@@ -32,6 +66,7 @@ async def run_tool_loop(
     max_turns: int,
     progress_cb=None,
     phase: str = "",
+    prior_history: Iterable[Any] | None = None,
 ) -> str:
     """Run a LangChain chat model with bound tools until it returns text.
 
@@ -43,7 +78,11 @@ async def run_tool_loop(
     tool_list = list(tools)
     by_name = {tool.name: tool for tool in tool_list}
     llm = make_chat_for_role(role).bind_tools(tool_list)
-    messages = [SystemMessage(content=system), HumanMessage(content=user)]
+    messages = [
+        SystemMessage(content=system),
+        *_history_to_messages(prior_history),
+        HumanMessage(content=user),
+    ]
     last_text = ""
 
     for turn in range(max_turns):
@@ -94,6 +133,21 @@ async def run_tool_loop(
             )
 
     logger.warning("LangChain tool loop reached max_turns=%s phase=%s", max_turns, phase)
+    if progress_cb:
+        await progress_cb(
+            {
+                "type": "event",
+                "data": {
+                    "type": "turn_cap_exceeded",
+                    "phase": phase,
+                    "max_turns": max_turns,
+                    "message": (
+                        f"{phase or 'tool loop'} reached the {max_turns}-turn cap "
+                        "before producing a final response."
+                    ),
+                },
+            }
+        )
     if last_text:
         return last_text
     return (
