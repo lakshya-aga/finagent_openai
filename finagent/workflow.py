@@ -151,8 +151,19 @@ async def _classify_intent(message: str, has_notebook: bool) -> str:
     from .llm import get_llm_client, get_model_name
 
     client = get_llm_client("intent_classifier")
+    model_name = get_model_name("intent_classifier")
+    # Model-agnostic params: newer OpenAI models (gpt-5 / gpt-5-mini / o-series)
+    # REJECT `max_tokens` (require `max_completion_tokens`) and reject any
+    # `temperature` other than the default. Using `max_completion_tokens`
+    # works on gpt-4o/4o-mini too, so this is the universal choice.
+    #
+    # The token budget is generous on purpose: reasoning models (gpt-5-mini
+    # is the default here) spend completion tokens on internal reasoning
+    # BEFORE the visible answer. A tight cap like 5 would be entirely
+    # consumed by reasoning and return empty content. 2000 leaves ample room
+    # for the one-word classification regardless of reasoning effort.
     resp = await client.chat.completions.create(
-        model=get_model_name("intent_classifier"),
+        model=model_name,
         messages=[
             {
                 "role": "system",
@@ -175,10 +186,11 @@ async def _classify_intent(message: str, has_notebook: bool) -> str:
                 "content": f"Has existing notebook: {has_notebook}\nMessage: {message}",
             },
         ],
-        max_tokens=5,
-        temperature=0,
+        max_completion_tokens=2000,
     )
-    intent = resp.choices[0].message.content.strip().lower()
+    # Guard against None content — a reasoning model that exhausts its token
+    # budget on reasoning returns content=None, which would crash .strip().
+    intent = (resp.choices[0].message.content or "").strip().lower()
     if intent not in ("question", "edit", "explore", "new"):
         intent = "edit" if has_notebook else "explore"
     return intent
