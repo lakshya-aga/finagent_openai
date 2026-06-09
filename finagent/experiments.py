@@ -855,6 +855,23 @@ class ExperimentStore:
         with self._conn() as conn:
             conn.execute("DELETE FROM debates WHERE id = ?", (debate_id,))
 
+    def count_debates_by_status(self, status: str) -> int:
+        with self._conn() as conn:
+            (n,) = conn.execute(
+                "SELECT COUNT(*) FROM debates WHERE status = ?", (status,)
+            ).fetchone()
+        return int(n)
+
+    def delete_debates_by_status(self, status: str) -> int:
+        """Hard-delete every debate row with the given status. Returns the
+        number of rows removed. Used to clear failed ticker runs from the
+        Past Debates history (e.g. rate-limit / model-error failures)."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM debates WHERE status = ?", (status,)
+            )
+            return cursor.rowcount
+
     # ── tags (existing) ──────────────────────────────────────────────
 
     def update_run_tags(self, run_id: str, tags_json: str) -> None:

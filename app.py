@@ -1566,6 +1566,23 @@ async def cleanup_stranded_debates(older_than_secs: int = 1800):
     return {"rows_marked_failed": n, "older_than_secs": older_than_secs}
 
 
+@app.post("/api/debates/cleanup-failed")
+async def cleanup_failed_debates(dry_run: bool = False):
+    """Admin: hard-delete every debate with status='failed' from history.
+
+    Clears failed ticker runs (rate-limit / model-error failures etc.) from
+    the Past Debates list. ``dry_run=true`` returns the count WITHOUT
+    deleting so you can preview first; default actually deletes."""
+    from finagent.experiments import get_store
+
+    store = get_store()
+    n = store.count_debates_by_status("failed")
+    if dry_run:
+        return {"dry_run": True, "would_delete": n, "status": "failed"}
+    deleted = store.delete_debates_by_status("failed")
+    return {"dry_run": False, "deleted": deleted, "status": "failed"}
+
+
 @app.get("/api/debates/calendar")
 async def debates_calendar(
     month: Optional[str] = None,  # "YYYY-MM"; default current month
