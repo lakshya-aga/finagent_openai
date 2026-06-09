@@ -661,6 +661,185 @@ async def download_notebook_by_name(name: str):
     )
 
 
+# ─── Cleanup admin endpoints ──────────────────────────────────────────
+#
+# Before-demo housekeeping: prune notebooks that won't actually run so
+# the Notebooks listing isn't littered with empty / failed artifacts.
+#
+# Classification rules for a "broken" notebook:
+#   - empty: zero cells, OR only-empty-source cells
+#   - error: at least one code cell has an `error` output (ename present)
+#   - no_outputs: every code cell has empty outputs AND no execution_count
+#                 (i.e. it was never run successfully). Skipped if the
+#                 notebook has >= 1 markdown cell only — those are valid.
+#
+# Both endpoints move files to outputs/_quarantine/ rather than rm-ing
+# so a misclassification is recoverable. The operator can purge the
+# quarantine dir manually when satisfied.
+
+
+_QUARANTINE_DIR = (Path(__file__).parent / "outputs" / "_quarantine").resolve()
+
+
+def _classify_notebook_health(path: Path) -> dict:
+    """Return {status, reason, n_cells, n_errors, n_code, n_with_outputs}.
+
+    status is one of: "ok" / "empty" / "error" / "no_outputs" / "unreadable".
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            nb = json.load(f)
+    except Exception as e:
+        return {"status": "unreadable", "reason": f"{type(e).__name__}: {e}"}
+
+    cells = nb.get("cells") or []
+    n_cells = len(cells)
+    n_code = 0
+    n_errors = 0
+    n_with_outputs = 0
+    code_cells_non_empty = 0
+    for c in cells:
+        if not isinstance(c, dict):
+            continue
+        if c.get("cell_type") == "code":
+            n_code += 1
+            src = c.get("source") or ""
+            if isinstance(src, list):
+                src = "".join(src)
+            if src.strip():
+                code_cells_non_empty += 1
+            outs = c.get("outputs") or []
+            for o in outs:
+                if isinstance(o, dict):
+                    if o.get("output_type") == "error" or o.get("ename"):
+                        n_errors += 1
+            if outs:
+                n_with_outputs += 1
+
+    if n_cells == 0 or (n_code > 0 and code_cells_non_empty == 0):
+        return {
+            "status": "empty",
+            "reason": "no cells or every code cell has empty source",
+            "n_cells": n_cells,
+            "n_errors": 0,
+            "n_code": n_code,
+            "n_with_outputs": n_with_outputs,
+        }
+    if n_errors > 0:
+        return {
+            "status": "error",
+            "reason": f"{n_errors} error output(s) in code cells",
+            "n_cells": n_cells,
+            "n_errors": n_errors,
+            "n_code": n_code,
+            "n_with_outputs": n_with_outputs,
+        }
+    if n_code > 0 and n_with_outputs == 0:
+        return {
+            "status": "no_outputs",
+            "reason": "code cells exist but none were executed",
+            "n_cells": n_cells,
+            "n_errors": 0,
+            "n_code": n_code,
+            "n_with_outputs": 0,
+        }
+    return {
+        "status": "ok",
+        "reason": "",
+        "n_cells": n_cells,
+        "n_errors": 0,
+        "n_code": n_code,
+        "n_with_outputs": n_with_outputs,
+    }
+
+
+@app.delete("/api/notebooks/{name}")
+async def delete_notebook(name: str):
+    """Move a single notebook into outputs/_quarantine/. Recoverable —
+    use shell to permanently delete from quarantine once satisfied."""
+    path = _safe_notebook_path(name)
+    _QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _QUARANTINE_DIR / path.name
+    # If the same filename was quarantined before, append a counter.
+    if dest.exists():
+        i = 2
+        while True:
+            cand = _QUARANTINE_DIR / f"{path.stem}__qd{i}.ipynb"
+            if not cand.exists():
+                dest = cand
+                break
+            i += 1
+    path.rename(dest)
+    return {"ok": True, "quarantined": str(dest), "original": str(path)}
+
+
+@app.post("/api/notebooks/cleanup-errors")
+async def cleanup_error_notebooks(
+    dry_run: bool = True,
+    include_no_outputs: bool = True,
+    include_empty: bool = True,
+):
+    """Bulk-quarantine notebooks classified as broken.
+
+    ``dry_run=True`` (default) returns the candidate list WITHOUT moving
+    anything — preview before destructive action. Call again with
+    ``dry_run=false`` to actually move them.
+
+    ``include_no_outputs`` quarantines notebooks where code cells exist
+    but none were executed (typical for a build phase that ran but the
+    validator didn't get to). Set False if you want to keep dry shells.
+
+    ``include_empty`` quarantines zero-cell / all-empty-source notebooks.
+    """
+    if not _OUTPUTS_DIR.exists():
+        return {"ok": True, "dry_run": dry_run, "candidates": [], "moved": []}
+
+    candidates: list[dict] = []
+    for p in sorted(_OUTPUTS_DIR.glob("*.ipynb")):
+        verdict = _classify_notebook_health(p)
+        status = verdict["status"]
+        if status == "ok":
+            continue
+        if status == "error":
+            candidates.append({"name": p.name, **verdict})
+        elif status == "empty" and include_empty:
+            candidates.append({"name": p.name, **verdict})
+        elif status == "no_outputs" and include_no_outputs:
+            candidates.append({"name": p.name, **verdict})
+        elif status == "unreadable":
+            candidates.append({"name": p.name, **verdict})
+
+    moved: list[dict] = []
+    if not dry_run and candidates:
+        _QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+        for c in candidates:
+            src = _OUTPUTS_DIR / c["name"]
+            dest = _QUARANTINE_DIR / c["name"]
+            if dest.exists():
+                i = 2
+                while True:
+                    cand = _QUARANTINE_DIR / f"{src.stem}__qd{i}.ipynb"
+                    if not cand.exists():
+                        dest = cand
+                        break
+                    i += 1
+            try:
+                src.rename(dest)
+                moved.append({"name": c["name"], "quarantined": str(dest)})
+            except Exception as e:
+                logging.exception("cleanup_error_notebooks: rename failed for %s", c["name"])
+                moved.append({"name": c["name"], "error": f"{type(e).__name__}: {e}"})
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "n_candidates": len(candidates),
+        "candidates": candidates,
+        "moved": moved,
+        "quarantine_dir": str(_QUARANTINE_DIR),
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Recipes / Projects / Runs.
 #
