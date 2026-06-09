@@ -36,27 +36,29 @@ from typing import Any
 # Provider is informational today (only "openai" is wired); becomes
 # load-bearing in L3 once we switch agent runtimes.
 
-# Default model is gpt-5-mini everywhere except the chat-orchestration
-# stack, which keeps full gpt-5 for the heavy plan / orchestrate / edit
-# reasoning loops. Operator preference (2026-05-25): consolidate on
-# gpt-5-mini for cost + rate-limit headroom; gpt-5-mini's structured-
-# output adherence is good enough that we don't need gpt-4o uplift on
-# the smaller roles.
+# Default model is gpt-5-mini for EVERY role (operator preference
+# 2026-06-10): one model across the whole stack keeps cost + rate-limit
+# headroom predictable, and gpt-5-mini is a reasoning model so its
+# structured-output adherence + agentic tool-loop reliability are good
+# enough for the plan / orchestrate / validate loops (gpt-4o, by
+# contrast, intermittently skipped the validate step). Bump any single
+# role back to full gpt-5 via env (e.g. CHAT_ORCHESTRATOR_MODEL=gpt-5)
+# if a specific stage needs the extra horsepower.
 #
 # The trading_panel (finagent.agents.trading_panel) has its own
-# defaults dict (llm_factory._ROLE_DEFAULTS) — also already gpt-5-mini
-# across all panel roles. Keep them in sync.
+# defaults dict (llm_factory._ROLE_DEFAULTS) — also gpt-5-mini across
+# all panel roles. Keep them in sync.
 _DEFAULTS: dict[str, tuple[str, str]] = {
-    # Chat workflow — gpt-5 retained for the deep-reasoning roles.
+    # Chat workflow — uniform gpt-5-mini.
     "intent_classifier": ("openai", "gpt-5-mini"),
-    "chat_planner": ("openai", "gpt-5"),
-    "chat_orchestrator": ("openai", "gpt-5"),
-    "chat_validator": ("openai", "gpt-5"),
+    "chat_planner": ("openai", "gpt-5-mini"),
+    "chat_orchestrator": ("openai", "gpt-5-mini"),
+    "chat_validator": ("openai", "gpt-5-mini"),
     "chat_question": ("openai", "gpt-5-mini"),
-    "chat_edit_planner": ("openai", "gpt-5"),
-    "chat_edit_orchestrator": ("openai", "gpt-5"),
+    "chat_edit_planner": ("openai", "gpt-5-mini"),
+    "chat_edit_orchestrator": ("openai", "gpt-5-mini"),
     # Recipe / template authoring
-    "template_author": ("openai", "gpt-5"),
+    "template_author": ("openai", "gpt-5-mini"),
     # Audit + verdict layers
     "bias_auditor": ("openai", "gpt-5-mini"),
     # Paper-trading daily per-ticker analyst (50 calls/day → keep cheap).
