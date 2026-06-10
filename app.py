@@ -359,6 +359,7 @@ def _web_session_id(uid: str) -> str:
 class ChatRequest(BaseModel):
     session_id: str
     message: str
+    model_overrides: Optional[dict[str, str]] = None
 
 
 @app.get("/")
@@ -387,6 +388,7 @@ async def chat(req: ChatRequest):
                 existing_notebook_path=session["notebook_path"],
                 prior_history=session["history"],
                 progress_cb=progress_queue.put,
+                model_overrides=req.model_overrides,
             )
             # Update session state
             notebook_path = result.get("notebook_path") or session["notebook_path"]
@@ -931,6 +933,7 @@ class _DebateSubmission(BaseModel):
     ticker: str
     asset_class: str = "us_equity"
     rounds: int = 2
+    model_overrides: Optional[dict[str, str]] = None
     # Requesting account (email) — injected by the synapse proxy from the
     # NextAuth session, NOT trusted from raw client input on the public
     # surface. Drives ownership + credit charging.
@@ -1512,6 +1515,7 @@ async def credits_grant(body: _CreditsGrantBody):
 
 class _ForecastSubmission(BaseModel):
     question: str
+    model_overrides: Optional[dict[str, str]] = None
     # Injected server-side by the synapse proxy from the session —
     # same trust model as debates.
     owner: Optional[str] = None
@@ -1583,7 +1587,7 @@ async def start_forecast(req: _ForecastSubmission):
             await queue.put(
                 {"type": "phase", "phase": "research", "state": "start"}
             )
-            result = await run_forecast(question)
+            result = await run_forecast(question, model_overrides=req.model_overrides)
             await queue.put({"type": "phase", "phase": "research", "state": "end"})
 
             if not result.get("forecastable"):
@@ -1750,6 +1754,7 @@ async def start_debate(req: _DebateSubmission):
                 rounds=debate.rounds,
                 emit=_emit_and_capture,
                 debate_id=debate.id,
+                model_overrides=req.model_overrides,
             )
             verdict_accum = result.get("verdict")
             store.update_debate(
@@ -2296,6 +2301,14 @@ async def admin_llm_config():
     return list_role_configs()
 
 
+@app.get("/api/llm-config")
+async def llm_config():
+    """Resolved model-role registry for UI model-selection surfaces."""
+    from finagent.llm import list_role_configs
+
+    return list_role_configs()
+
+
 @app.get("/api/admin/costs")
 async def admin_costs(days: int = 30):
     """Cost ledger summary — total $ spend + breakdowns by day, purpose,
@@ -2330,13 +2343,14 @@ async def admin_metric_keys():
 
 class _TemplateDraftRequest(BaseModel):
     description: str
+    model_overrides: Optional[dict[str, str]] = None
 
 
 @app.post("/api/templates/draft")
 async def draft_template_endpoint(req: _TemplateDraftRequest):
     from finagent.templates_authoring import draft_template
 
-    return await draft_template(req.description)
+    return await draft_template(req.description, model_overrides=req.model_overrides)
 
 
 @app.get("/api/templates/drafts")
@@ -2703,6 +2717,7 @@ class _WebUser(BaseModel):
 class _WebChatRequest(BaseModel):
     messages: List[_WebMessage]
     user: _WebUser
+    model_overrides: Optional[dict[str, str]] = None
 
 
 def _to_internal_history(messages: List[_WebMessage]) -> list:
@@ -2804,6 +2819,7 @@ async def chat_web(req: _WebChatRequest):
                 # Web is authoritative for chat history; use what the client sent.
                 prior_history=prior_history,
                 progress_cb=progress_queue.put,
+                model_overrides=req.model_overrides,
             )
             notebook_path = result.get("notebook_path") or session["notebook_path"]
             _update_session(_web_session_id(uid), notebook_path, [])

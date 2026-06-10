@@ -56,7 +56,11 @@ def _slugify(s: str) -> str:
 # ── core API ────────────────────────────────────────────────────────────
 
 
-async def draft_template(description: str) -> dict[str, Any]:
+async def draft_template(
+    description: str,
+    *,
+    model_overrides: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Run the author agent once; persist the draft if it passes the static check.
 
     Returns
@@ -74,12 +78,15 @@ async def draft_template(description: str) -> dict[str, Any]:
         }
 
     try:
-        draft = await ainvoke_structured(
-            "template_author",
-            TemplateDraft,
-            system=TEMPLATE_AUTHOR_INSTRUCTIONS,
-            user=description.strip(),
-        )
+        from .llm import model_override_context
+
+        with model_override_context(model_overrides):
+            draft = await ainvoke_structured(
+                "template_author",
+                TemplateDraft,
+                system=TEMPLATE_AUTHOR_INSTRUCTIONS,
+                user=description.strip(),
+            )
     except Exception as exc:
         logger.exception("template authoring LLM failed")
         return {

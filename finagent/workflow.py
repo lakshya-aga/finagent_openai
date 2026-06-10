@@ -1082,23 +1082,34 @@ async def run_workflow(
     existing_notebook_path: Optional[str] = None,
     prior_history: Optional[list] = None,
     progress_cb=None,
+    model_overrides: Optional[dict[str, str]] = None,
 ):
+    from .llm import model_override_context
+
     runtime = os.environ.get("FINAGENT_WORKFLOW_RUNTIME", "agents").strip().lower()
-    if runtime in {"langgraph", "graph"}:
-        return await _run_langgraph_workflow(
-            workflow_input,
-            existing_notebook_path=existing_notebook_path,
-            prior_history=prior_history,
-            progress_cb=progress_cb,
+    # Request-scoped UI model choice needs call-time model resolution. The
+    # legacy Agents-SDK notebook path builds several Agent objects at import
+    # time, so overrides cannot reliably reach it. Route overridden notebook
+    # requests through the LangGraph/LangChain path instead of pretending.
+    if model_overrides and runtime in {"agents", "legacy", "openai_agents"}:
+        runtime = "langgraph"
+
+    with model_override_context(model_overrides):
+        if runtime in {"langgraph", "graph"}:
+            return await _run_langgraph_workflow(
+                workflow_input,
+                existing_notebook_path=existing_notebook_path,
+                prior_history=prior_history,
+                progress_cb=progress_cb,
+            )
+        if runtime in {"agents", "legacy", "openai_agents"}:
+            return await _run_agents_workflow(
+                workflow_input,
+                existing_notebook_path=existing_notebook_path,
+                prior_history=prior_history,
+                progress_cb=progress_cb,
+            )
+        raise ValueError(
+            "FINAGENT_WORKFLOW_RUNTIME must be 'langgraph' or 'agents', "
+            f"got {runtime!r}"
         )
-    if runtime in {"agents", "legacy", "openai_agents"}:
-        return await _run_agents_workflow(
-            workflow_input,
-            existing_notebook_path=existing_notebook_path,
-            prior_history=prior_history,
-            progress_cb=progress_cb,
-        )
-    raise ValueError(
-        "FINAGENT_WORKFLOW_RUNTIME must be 'langgraph' or 'agents', "
-        f"got {runtime!r}"
-    )

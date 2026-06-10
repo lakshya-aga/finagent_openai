@@ -69,6 +69,7 @@ async def run_debate(
     debate_id: Optional[str] = None,
     source: str = "user",
     owner: Optional[str] = None,
+    model_overrides: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """Run a multi-agent investment-thesis debate on a single ticker.
 
@@ -93,6 +94,30 @@ async def run_debate(
     Implementation: forwards to trading_panel.run_panel, reshapes its
     multi-stage output into a flat transcript + projected verdict.
     """
+    from .llm import model_override_context
+
+    with model_override_context(model_overrides):
+        return await _run_debate_impl(
+            ticker=ticker,
+            asset_class=asset_class,
+            rounds=rounds,
+            emit=emit,
+            debate_id=debate_id,
+            source=source,
+            owner=owner,
+        )
+
+
+async def _run_debate_impl(
+    *,
+    ticker: str,
+    asset_class: str,
+    rounds: int,
+    emit: Optional[EmitFn],
+    debate_id: Optional[str],
+    source: str,
+    owner: Optional[str],
+) -> dict[str, Any]:
     if _legacy_mode():
         # Hatch back to the old SDK-based debate. Kept only as a hot-
         # patch escape route; not the default path.

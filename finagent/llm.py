@@ -19,14 +19,21 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Iterator, Mapping, TypeVar
 
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+
+_REQUEST_MODEL_OVERRIDES: ContextVar[dict[str, tuple[str, str]]] = ContextVar(
+    "finagent_model_overrides",
+    default={},
+)
 
 
 @dataclass(frozen=True)
@@ -164,6 +171,57 @@ def parse_model_spec(spec: str, *, default_provider: str = "openai") -> tuple[st
     return provider, model
 
 
+def normalize_model_overrides(
+    overrides: Mapping[str, str] | None,
+) -> dict[str, tuple[str, str]]:
+    """Validate request-scoped role -> provider:model overrides.
+
+    The UI sends explicit logical roles, not provider env vars. Unknown roles
+    are rejected so a typo cannot silently fall back to the default model.
+    """
+    if not overrides:
+        return {}
+    normalized: dict[str, tuple[str, str]] = {}
+    valid_roles = set(_DEFAULTS)
+    valid_roles.discard("default")
+    for raw_role, raw_spec in overrides.items():
+        role = str(raw_role or "").strip()
+        if role not in valid_roles:
+            raise ValueError(
+                f"unknown model override role {role!r}; expected one of "
+                f"{sorted(valid_roles)}"
+            )
+        provider, model = parse_model_spec(str(raw_spec or ""))
+        if provider not in _PROVIDER_CAPABILITIES:
+            raise ValueError(
+                f"unsupported provider {provider!r} for role {role!r}; "
+                f"supported providers: {sorted(_PROVIDER_CAPABILITIES)}"
+            )
+        normalized[role] = (provider, model)
+    return normalized
+
+
+@contextmanager
+def model_override_context(
+    overrides: Mapping[str, str] | None,
+) -> Iterator[dict[str, tuple[str, str]]]:
+    """Apply model overrides to the current async context only."""
+    normalized = normalize_model_overrides(overrides)
+    token = _REQUEST_MODEL_OVERRIDES.set(normalized)
+    try:
+        yield normalized
+    finally:
+        _REQUEST_MODEL_OVERRIDES.reset(token)
+
+
+def active_model_overrides() -> dict[str, str]:
+    """Return active request overrides in diagnostics-friendly spec form."""
+    return {
+        role: f"{provider}:{model}"
+        for role, (provider, model) in _REQUEST_MODEL_OVERRIDES.get().items()
+    }
+
+
 def _role_env_key(role: str) -> str:
     return role.upper().replace("-", "_")
 
@@ -203,7 +261,9 @@ def _env_model_override(role: str, default_provider: str) -> tuple[str, str] | N
 def get_role(role: str) -> RoleConfig:
     """Resolve a role to provider/model/capability metadata."""
     default_provider, default_model = _DEFAULTS.get(role, _DEFAULTS["default"])
-    override = _env_model_override(role, default_provider)
+    override = _REQUEST_MODEL_OVERRIDES.get().get(role)
+    if override is None:
+        override = _env_model_override(role, default_provider)
     if override is None:
         provider, model = default_provider, default_model
     else:
