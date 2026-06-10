@@ -29,9 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agents import Runner
-
-from .agents.template_author import template_author_agent
+from .agents.template_author import TEMPLATE_AUTHOR_INSTRUCTIONS, TemplateDraft
+from .llm import ainvoke_structured
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +56,11 @@ def _slugify(s: str) -> str:
 # ── core API ────────────────────────────────────────────────────────────
 
 
-async def draft_template(description: str) -> dict[str, Any]:
+async def draft_template(
+    description: str,
+    *,
+    model_overrides: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Run the author agent once; persist the draft if it passes the static check.
 
     Returns
@@ -75,32 +78,22 @@ async def draft_template(description: str) -> dict[str, Any]:
         }
 
     try:
-        result = await Runner.run(
-            template_author_agent,
-            input=[
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": description.strip()}],
-                }
-            ],
-            max_turns=4,
-        )
-    except Exception as exc:
-        logger.exception("template author agent failed")
-        return {
-            "status": "error",
-            "slug": "",
-            "path": "",
-            "errors": [f"author agent failed: {type(exc).__name__}: {exc}"],
-        }
+        from .llm import model_override_context
 
-    draft = result.final_output
-    if draft is None:
+        with model_override_context(model_overrides):
+            draft = await ainvoke_structured(
+                "template_author",
+                TemplateDraft,
+                system=TEMPLATE_AUTHOR_INSTRUCTIONS,
+                user=description.strip(),
+            )
+    except Exception as exc:
+        logger.exception("template authoring LLM failed")
         return {
             "status": "error",
             "slug": "",
             "path": "",
-            "errors": ["author agent returned no structured output"],
+            "errors": [f"author LLM failed: {type(exc).__name__}: {exc}"],
         }
 
     slug = _slugify(getattr(draft, "slug", "") or "")

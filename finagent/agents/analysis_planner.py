@@ -19,7 +19,7 @@ from __future__ import annotations
 from agents import Agent, ModelSettings
 from openai.types.shared.reasoning import Reasoning
 
-from ..mcp_connections import file_search, make_data_mcp, make_fruit_thrower
+from ..mcp_connections import file_search_tools, make_data_mcp, make_fruit_thrower
 
 ANALYSIS_PLANNER_INSTRUCTIONS = """You are an AD-HOC ANALYSIS planner.
 Your job is to convert a user's analysis / plot / computation request into a
@@ -86,7 +86,7 @@ analysis_planner = Agent(
     # Reuse the same model role — exploratory planning is the same
     # difficulty as strategy planning, no need for a separate config.
     model=get_model_name("chat_planner"),
-    tools=[file_search],
+    tools=[*file_search_tools()],
     mcp_servers=[make_fruit_thrower(), make_data_mcp()],
     model_settings=ModelSettings(
         store=True,

@@ -12,8 +12,7 @@ from agents import function_tool
 PROTECTED_PACKAGES = {"findata", "mlfinlab"}
 
 
-@function_tool
-def install_packages(packages: List[str]) -> Dict[str, Any]:
+def install_packages_impl(packages: List[str]) -> Dict[str, Any]:
     """Install python packages into the current environment.
 
     Refuses to auto-install anything in PROTECTED_PACKAGES — those must be set
@@ -70,3 +69,8 @@ def install_packages(packages: List[str]) -> Dict[str, Any]:
             "user — do NOT keep retrying install_packages."
         )
     return out
+
+
+@function_tool
+def install_packages(packages: List[str]) -> Dict[str, Any]:
+    return install_packages_impl(packages)

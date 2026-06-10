@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
-from typing import Optional
+from typing import Optional, TypedDict
 
 import nbformat
 from agents import RunConfig, Runner, TResponseInputItem, trace
@@ -17,15 +18,22 @@ from .agents import (
     analysis_orchestration_agent,
     analysis_planner,
     edit_orchestration_agent,
-    edit_planner,
     orchestration_agent,
     planner,
-    question_agent,
     validatorandfixingagent,
 )
+from .agents.edit_planner import EDIT_PLANNER_INSTRUCTIONS
+from .agents.question import answer_question
 from .functions import extract_trace_markdown
 from .functions.notebook_io import _get_current_path, set_active_notebook_path
 from .hooks import StreamingHooks, build_notebook_outline, emit_phase
+from .langchain_runner import run_tool_loop
+from .langchain_tools import (
+    LangChainMCPToolContext,
+    notebook_build_tools,
+    notebook_edit_tools,
+    notebook_validation_tools,
+)
 from .lineage import extract_lineage_ast, extract_lineage_runtime
 from .mcp_connections import mcp_servers
 
@@ -148,59 +156,484 @@ async def _classify_intent(message: str, has_notebook: bool) -> str:
     plotting request through the strategy pipeline produces a synthetic
     backtest on a one-row dataframe and answers nothing.
     """
-    from .llm import get_llm_client, get_model_name
+    from .llm import ainvoke_text
 
-    client = get_llm_client("intent_classifier")
-    model_name = get_model_name("intent_classifier")
-    # Model-agnostic params: newer OpenAI models (gpt-5 / gpt-5-mini / o-series)
-    # REJECT `max_tokens` (require `max_completion_tokens`) and reject any
-    # `temperature` other than the default. Using `max_completion_tokens`
-    # works on gpt-4o/4o-mini too, so this is the universal choice.
-    #
-    # The token budget is generous on purpose: reasoning models (gpt-5-mini
-    # is the default here) spend completion tokens on internal reasoning
-    # BEFORE the visible answer. A tight cap like 5 would be entirely
-    # consumed by reasoning and return empty content. 2000 leaves ample room
-    # for the one-word classification regardless of reasoning effort.
-    resp = await client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Classify the user message as exactly one of:\n"
-                    "- question: asking for explanation, analysis, clarification, or general info "
-                    "(no chart, no dataframe — just an answer in chat)\n"
-                    "- edit: requesting a change, addition, or fix to an existing notebook\n"
-                    "- explore: requesting an ad-hoc analysis, plot, chart, or computation "
-                    "of REAL DATA (e.g. 'plot historical P/E of MU', 'show correlation matrix', "
-                    "'compare returns of A vs B'). The deliverable is the chart/dataframe, "
-                    "NOT a trading strategy.\n"
-                    "- new: requesting a brand-new TRADING STRATEGY notebook (the deliverable "
-                    "is asset weights + returns over time, suitable for backtesting).\n\n"
-                    "Reply with only the single word."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Has existing notebook: {has_notebook}\nMessage: {message}",
-            },
-        ],
-        max_completion_tokens=2000,
-    )
-    # Guard against None content — a reasoning model that exhausts its token
-    # budget on reasoning returns content=None, which would crash .strip().
-    intent = (resp.choices[0].message.content or "").strip().lower()
+    intent = (
+        await ainvoke_text(
+            "intent_classifier",
+            system=(
+                "Classify the user message as exactly one of:\n"
+                "- question: asking for explanation, analysis, clarification, "
+                "or general info (no chart, no dataframe — just an answer in chat)\n"
+                "- edit: requesting a change, addition, or fix to an existing notebook\n"
+                "- explore: requesting an ad-hoc analysis, plot, chart, or computation "
+                "of REAL DATA (e.g. 'plot historical P/E of MU', "
+                "'show correlation matrix', 'compare returns of A vs B'). "
+                "The deliverable is the chart/dataframe, NOT a trading strategy.\n"
+                "- new: requesting a brand-new TRADING STRATEGY notebook "
+                "(the deliverable is asset weights + returns over time, suitable "
+                "for backtesting).\n\n"
+                "Reply with only the single word."
+            ),
+            user=f"Has existing notebook: {has_notebook}\nMessage: {message}",
+        )
+    ).strip().lower()
     if intent not in ("question", "edit", "explore", "new"):
         intent = "edit" if has_notebook else "explore"
     return intent
 
 
-async def run_workflow(
+class _GraphWorkflowState(TypedDict, total=False):
+    workflow_input: WorkflowInput
+    existing_notebook_path: Optional[str]
+    prior_history: Optional[list]
+    progress_cb: object
+    intent: str
+    result: dict
+
+
+def _prior_history_text(prior_history: Optional[list], *, limit: int = 4000) -> str:
+    """Render compact conversation history for provider-neutral prompt paths."""
+    if not prior_history:
+        return ""
+    lines: list[str] = []
+    for item in prior_history:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role", "user")
+        content = item.get("content", "")
+        if isinstance(content, list):
+            text = "\n".join(
+                str(part.get("text") or part.get("content") or "")
+                if isinstance(part, dict)
+                else str(part)
+                for part in content
+            )
+        else:
+            text = str(content or "")
+        text = text.strip()
+        if text:
+            lines.append(f"{role}: {text}")
+    rendered = "\n\n".join(lines)
+    if len(rendered) > limit:
+        return rendered[-limit:]
+    return rendered
+
+
+def _with_prior_history(prompt: str, prior_history: Optional[list]) -> str:
+    history = _prior_history_text(prior_history)
+    if not history:
+        return prompt
+    return f"CONVERSATION SO FAR:\n{history}\n\nCURRENT USER REQUEST:\n{prompt}"
+
+
+async def _emit_status(progress_cb, msg: str):
+    if progress_cb:
+        await progress_cb({"type": "status", "message": msg})
+
+
+async def _emit_outline(progress_cb, path: Optional[str]):
+    if progress_cb and path:
+        try:
+            await progress_cb({"type": "event", "data": build_notebook_outline(path)})
+        except Exception:
+            logging.exception("emit_outline failed for %s", path)
+
+
+async def _emit_lineage(progress_cb, path: Optional[str]) -> None:
+    """Compute AST lineage now and runtime lineage in the background."""
+    if not path:
+        return
+    try:
+        ast_lin = extract_lineage_ast(path)
+        _stash_lineage_metadata(path, "ast", ast_lin)
+        if progress_cb:
+            await progress_cb(
+                {
+                    "type": "event",
+                    "data": {
+                        "type": "notebook_lineage",
+                        "method": "ast",
+                        "path": str(path),
+                        "node_count": len(ast_lin.get("nodes", [])),
+                        "edge_count": len(ast_lin.get("edges", [])),
+                    },
+                }
+            )
+    except Exception:
+        logging.exception("AST lineage failed for %s", path)
+
+    async def _runtime_trace():
+        try:
+            rt_lin = await asyncio.to_thread(extract_lineage_runtime, path)
+            _stash_lineage_metadata(path, "runtime", rt_lin)
+            if progress_cb:
+                await progress_cb(
+                    {
+                        "type": "event",
+                        "data": {
+                            "type": "notebook_lineage",
+                            "method": "runtime",
+                            "path": str(path),
+                            "node_count": len(rt_lin.get("nodes", [])),
+                            "edge_count": len(rt_lin.get("edges", [])),
+                            "error": rt_lin.get("error"),
+                        },
+                    }
+                )
+        except Exception:
+            logging.exception("runtime lineage failed for %s", path)
+
+    asyncio.create_task(_runtime_trace())
+
+
+async def _emit_agent_input(
+    progress_cb,
+    phase: str,
+    agent_name: str,
+    prompt: str,
+) -> None:
+    if not progress_cb:
+        return
+    text = prompt if len(prompt) <= 2000 else prompt[:2000] + "…"
+    await progress_cb(
+        {
+            "type": "event",
+            "data": {
+                "type": "agent_input",
+                "phase": phase,
+                "agent": agent_name,
+                "prompt": text,
+            },
+        }
+    )
+
+
+async def _name_next_notebook(progress_cb, user_request: str) -> None:
+    await _emit_status(progress_cb, "Naming notebook...")
+    try:
+        from .agents.name_suggester import suggest_notebook_name
+        from .functions.notebook_io import _path_for_named, set_next_notebook_name
+
+        slug = await suggest_notebook_name(user_request)
+        set_next_notebook_name(slug)
+        preview_path = _path_for_named(slug)
+        if progress_cb:
+            await progress_cb(
+                {
+                    "type": "event",
+                    "data": {
+                        "type": "notebook_named",
+                        "slug": slug,
+                        "path": str(preview_path),
+                        "filename": preview_path.name,
+                    },
+                }
+            )
+        logging.info("workflow: notebook named slug=%s preview=%s", slug, preview_path)
+    except Exception:
+        logging.exception("workflow: name suggester failed (non-fatal)")
+
+
+async def _run_langchain_notebook_workflow(
+    workflow_input: WorkflowInput,
+    *,
+    intent: str,
+    existing_notebook_path: Optional[str] = None,
+    prior_history: Optional[list] = None,
+    progress_cb=None,
+    mcp_tools: Optional[list] = None,
+) -> dict:
+    """Run notebook creation/edit/validation via LangChain tools only."""
+    if mcp_tools is None:
+        async with LangChainMCPToolContext() as mcp:
+            return await _run_langchain_notebook_workflow(
+                workflow_input,
+                intent=intent,
+                existing_notebook_path=existing_notebook_path,
+                prior_history=prior_history,
+                progress_cb=progress_cb,
+                mcp_tools=mcp.tools,
+            )
+
+    from .agents.analysis_orchestration import ANALYSIS_ORCHESTRATION_INSTRUCTIONS
+    from .agents.analysis_planner import ANALYSIS_PLANNER_INSTRUCTIONS
+    from .agents.edit_orchestration import EDIT_ORCHESTRATION_INSTRUCTIONS
+    from .agents.edit_planner import EDIT_PLANNER_INSTRUCTIONS
+    from .agents.orchestration import ORCHESTRATION_INSTRUCTIONS
+    from .agents.planner import PLANNER_INSTRUCTIONS
+    from .agents.validator import VALIDATOR_INSTRUCTIONS
+
+    user_request = workflow_input.input_as_text
+
+    if intent == "edit" and existing_notebook_path:
+        with open(existing_notebook_path, "r", encoding="utf-8") as nb_f:
+            nb = nbformat.read(nb_f, as_version=4)
+        nb_summary = "\n".join(
+            f"  [{i}] ({cell.cell_type}) {cell.source[:200].replace(chr(10), ' ')}"
+            for i, cell in enumerate(nb.cells)
+        )
+        edit_planner_input = (
+            f"EXISTING NOTEBOOK ({existing_notebook_path}):\n{nb_summary}\n\n"
+            f"{_with_prior_history(f'USER REQUEST: {user_request}', prior_history)}"
+        )
+        await _emit_status(progress_cb, "Planning changes...")
+        await emit_phase(progress_cb, "edit_plan", "start")
+        await _emit_agent_input(
+            progress_cb,
+            "edit_plan",
+            "EditPlanner",
+            edit_planner_input,
+        )
+        from .llm import ainvoke_text
+
+        diff_spec_raw = (
+            await ainvoke_text(
+                "chat_edit_planner",
+                system=EDIT_PLANNER_INSTRUCTIONS,
+                user=edit_planner_input,
+            )
+        ).strip()
+        await emit_phase(progress_cb, "edit_plan", "end")
+
+        try:
+            diff_spec = json.loads(diff_spec_raw)
+        except Exception:
+            diff_spec = {"mode": "new"}
+
+        if diff_spec.get("mode") != "new":
+            await _emit_status(progress_cb, "Applying edits...")
+            await emit_phase(progress_cb, "edit_apply", "start")
+            edit_apply_prompt = (
+                f"Apply this diff spec to the current notebook:\n{diff_spec_raw}"
+            )
+            await _emit_agent_input(
+                progress_cb,
+                "edit_apply",
+                "EditOrchestrationAgent",
+                edit_apply_prompt,
+            )
+            edit_output = await run_tool_loop(
+                role="chat_edit_orchestrator",
+                system=EDIT_ORCHESTRATION_INSTRUCTIONS,
+                user=edit_apply_prompt,
+                tools=[*notebook_edit_tools(), *mcp_tools],
+                max_turns=80,
+                progress_cb=progress_cb,
+                phase="edit_apply",
+                prior_history=prior_history,
+            )
+            await emit_phase(progress_cb, "edit_apply", "end")
+            await _emit_outline(progress_cb, existing_notebook_path)
+
+            await _emit_status(progress_cb, "Validating notebook...")
+            await emit_phase(progress_cb, "edit_validate", "start")
+            validate_prompt = (
+                f"Validate the edited notebook at {existing_notebook_path}. "
+                "Run it cell-by-cell, fix any errors, escalate if blocked."
+            )
+            await _emit_agent_input(
+                progress_cb,
+                "edit_validate",
+                "ValidatorAndFixingAgent",
+                validate_prompt,
+            )
+            val_output = await run_tool_loop(
+                role="chat_validator",
+                system=VALIDATOR_INSTRUCTIONS,
+                user=validate_prompt,
+                tools=[*notebook_validation_tools(), *mcp_tools],
+                max_turns=24,
+                progress_cb=progress_cb,
+                phase="edit_validate",
+                prior_history=prior_history,
+            )
+            await emit_phase(progress_cb, "edit_validate", "end")
+            await _emit_outline(progress_cb, existing_notebook_path)
+            await _emit_lineage(progress_cb, existing_notebook_path)
+            return {
+                "output_text": val_output or edit_output,
+                "notebook_path": existing_notebook_path,
+                "mode": "edit",
+            }
+
+        existing_notebook_path = None
+        intent = "new"
+
+    if intent == "explore":
+        planner_instructions = ANALYSIS_PLANNER_INSTRUCTIONS
+        orchestrator_instructions = ANALYSIS_ORCHESTRATION_INSTRUCTIONS
+        planner_name = "AnalysisPlanner"
+        orchestrator_name = "Analysis Orchestration Agent"
+        mode_label = "explore"
+    else:
+        planner_instructions = PLANNER_INSTRUCTIONS
+        orchestrator_instructions = ORCHESTRATION_INSTRUCTIONS
+        planner_name = "Planner"
+        orchestrator_name = "Orchestration Agent"
+        mode_label = "new"
+
+    await _name_next_notebook(progress_cb, user_request)
+
+    await _emit_status(
+        progress_cb,
+        "Planning research..." if mode_label == "new" else "Planning analysis...",
+    )
+    await emit_phase(progress_cb, "plan", "start")
+    plan_prompt = _with_prior_history(f"Research request: {user_request}", prior_history)
+    await _emit_agent_input(progress_cb, "plan", planner_name, plan_prompt)
+    planner_output = await run_tool_loop(
+        role="chat_planner",
+        system=planner_instructions,
+        user=plan_prompt,
+        tools=mcp_tools,
+        max_turns=24,
+        progress_cb=progress_cb,
+        phase="plan",
+        prior_history=prior_history,
+    )
+    await emit_phase(progress_cb, "plan", "end")
+
+    await _emit_status(progress_cb, "Building notebook...")
+    await emit_phase(progress_cb, "build", "start")
+    build_prompt = f"User request: {user_request}\n\nDAG plan from planner:\n{planner_output}"
+    await _emit_agent_input(progress_cb, "build", orchestrator_name, build_prompt)
+    build_output = await run_tool_loop(
+        role="chat_orchestrator",
+        system=orchestrator_instructions,
+        user=build_prompt,
+        tools=[*notebook_build_tools(), *mcp_tools],
+        max_turns=80,
+        progress_cb=progress_cb,
+        phase="build",
+        prior_history=prior_history,
+    )
+    await emit_phase(progress_cb, "build", "end")
+    nb_path_after_build = str(_get_current_path())
+    await _emit_outline(progress_cb, nb_path_after_build)
+
+    await _emit_status(progress_cb, "Validating and fixing...")
+    await emit_phase(progress_cb, "validate", "start")
+    validate_prompt = (
+        f"Validate the freshly built notebook at {nb_path_after_build}. "
+        "Run it cell-by-cell, fix any errors, escalate if blocked."
+    )
+    await _emit_agent_input(
+        progress_cb,
+        "validate",
+        "ValidatorAndFixingAgent",
+        validate_prompt,
+    )
+    validator_output = await run_tool_loop(
+        role="chat_validator",
+        system=VALIDATOR_INSTRUCTIONS,
+        user=validate_prompt,
+        tools=[*notebook_validation_tools(), *mcp_tools],
+        max_turns=24,
+        progress_cb=progress_cb,
+        phase="validate",
+        prior_history=prior_history,
+    )
+    await emit_phase(progress_cb, "validate", "end")
+
+    final_path = str(_get_current_path())
+    await _emit_outline(progress_cb, final_path)
+    await _emit_lineage(progress_cb, final_path)
+
+    return {
+        "output_text": validator_output or build_output,
+        "notebook_path": final_path,
+        "mode": mode_label,
+    }
+
+
+async def _run_langgraph_workflow(
     workflow_input: WorkflowInput,
     existing_notebook_path: Optional[str] = None,
     prior_history: Optional[list] = None,
     progress_cb=None,
+):
+    """LangGraph entrypoint for the product workflow.
+
+    The graph owns routing, question mode, and the notebook plan/build/validate
+    path. Tool execution is LangChain-native. Operators opt into this path with
+    FINAGENT_WORKFLOW_RUNTIME=langgraph while the default Agents SDK path soaks
+    for one deploy cycle.
+    """
+    from langgraph.graph import END, START, StateGraph
+
+    async def classify_node(state: _GraphWorkflowState) -> dict:
+        wf = state["workflow_input"]
+        intent = await _classify_intent(
+            wf.input_as_text,
+            bool(state.get("existing_notebook_path")),
+        )
+        return {"intent": intent}
+
+    async def route_question_node(state: _GraphWorkflowState) -> dict:
+        wf = state["workflow_input"]
+        nb_path = state.get("existing_notebook_path")
+        progress = state.get("progress_cb")
+        if progress:
+            await progress({"type": "status", "message": "Thinking..."})
+        nb_context = _build_notebook_context(nb_path)
+        answer = await answer_question(
+            _with_prior_history(wf.input_as_text, state.get("prior_history")),
+            notebook_context=nb_context,
+        )
+        return {
+            "result": {
+                "output_text": answer,
+                "notebook_path": nb_path,
+                "mode": "question",
+            }
+        }
+
+    async def notebook_tool_loop_node(state: _GraphWorkflowState) -> dict:
+        async with LangChainMCPToolContext() as mcp:
+            result = await _run_langchain_notebook_workflow(
+                state["workflow_input"],
+                intent=state["intent"],
+                existing_notebook_path=state.get("existing_notebook_path"),
+                prior_history=state.get("prior_history"),
+                progress_cb=state.get("progress_cb"),
+                mcp_tools=mcp.tools,
+            )
+        return {"result": result}
+
+    def choose_branch(state: _GraphWorkflowState) -> str:
+        return "question" if state.get("intent") == "question" else "notebook_tool_loop"
+
+    graph = StateGraph(_GraphWorkflowState)
+    graph.add_node("classify", classify_node)
+    graph.add_node("question", route_question_node)
+    graph.add_node("notebook_tool_loop", notebook_tool_loop_node)
+    graph.add_edge(START, "classify")
+    graph.add_conditional_edges(
+        "classify",
+        choose_branch,
+        {"question": "question", "notebook_tool_loop": "notebook_tool_loop"},
+    )
+    graph.add_edge("question", END)
+    graph.add_edge("notebook_tool_loop", END)
+    compiled = graph.compile()
+    final_state = await compiled.ainvoke(
+        {
+            "workflow_input": workflow_input,
+            "existing_notebook_path": existing_notebook_path,
+            "prior_history": prior_history,
+            "progress_cb": progress_cb,
+        }
+    )
+    return final_state["result"]
+
+
+async def _run_agents_workflow(
+    workflow_input: WorkflowInput,
+    existing_notebook_path: Optional[str] = None,
+    prior_history: Optional[list] = None,
+    progress_cb=None,
+    forced_intent: Optional[str] = None,
 ):
     async def _emit(msg: str):
         if progress_cb:
@@ -312,7 +745,7 @@ async def run_workflow(
         conversation_history: list[TResponseInputItem] = list(prior_history or [])
 
         # ── CLASSIFY INTENT ──────────────────────────────────────────────────
-        intent = await _classify_intent(
+        intent = forced_intent or await _classify_intent(
             workflow["input_as_text"], bool(existing_notebook_path)
         )
         logging.info(f"run_workflow intent={intent}")
@@ -339,26 +772,14 @@ async def run_workflow(
                 q_input = workflow["input_as_text"]
 
             await emit_phase(progress_cb, "question", "start")
-            await _emit_agent_input("question", question_agent.name, q_input)
-            q_result = await Runner.run(
-                question_agent,
-                input=[
-                    *conversation_history,
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": q_input}],
-                    },
-                ],
-                run_config=RunConfig(),
-                hooks=_hooks("question"),
-                # One optional read_notebook + final answer is plenty.
-                # Without this cap an empty model turn could hang here.
-                max_turns=6,
+            await _emit_agent_input("question", "QuestionAgent", q_input)
+            q_answer = await answer_question(
+                workflow["input_as_text"],
+                notebook_context=nb_context,
             )
             await emit_phase(progress_cb, "question", "end")
-            await _emit_trace(q_result)
             return {
-                "output_text": q_result.final_output_as(str),
+                "output_text": q_answer,
                 "notebook_path": existing_notebook_path,
                 "mode": "question",
             }
@@ -383,21 +804,17 @@ async def run_workflow(
                 f"USER REQUEST: {workflow['input_as_text']}"
             )
             await emit_phase(progress_cb, "edit_plan", "start")
-            await _emit_agent_input("edit_plan", edit_planner.name, edit_planner_input)
-            edit_planner_result_temp = await Runner.run(
-                edit_planner,
-                input=[
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": edit_planner_input}],
-                    }
-                ],
-                run_config=RunConfig(),
-                hooks=_hooks("edit_plan"),
-            )
+            await _emit_agent_input("edit_plan", "EditPlanner", edit_planner_input)
+            from .llm import ainvoke_text
+
+            diff_spec_raw = (
+                await ainvoke_text(
+                    "chat_edit_planner",
+                    system=EDIT_PLANNER_INSTRUCTIONS,
+                    user=edit_planner_input,
+                )
+            ).strip()
             await emit_phase(progress_cb, "edit_plan", "end")
-            await _emit_trace(edit_planner_result_temp)
-            diff_spec_raw = edit_planner_result_temp.final_output_as(str).strip()
 
             try:
                 diff_spec = json.loads(diff_spec_raw)
@@ -435,7 +852,7 @@ async def run_workflow(
                         ],
                         run_config=RunConfig(),
                         hooks=_hooks("edit_apply"),
-                        max_turns=40,
+                        max_turns=80,
                     )
                 await emit_phase(progress_cb, "edit_apply", "end")
                 await _emit_trace(edit_orch_result_temp)
@@ -658,3 +1075,41 @@ async def run_workflow(
             "notebook_path": final_path,
             "mode": mode_label,
         }
+
+
+async def run_workflow(
+    workflow_input: WorkflowInput,
+    existing_notebook_path: Optional[str] = None,
+    prior_history: Optional[list] = None,
+    progress_cb=None,
+    model_overrides: Optional[dict[str, str]] = None,
+):
+    from .llm import model_override_context
+
+    runtime = os.environ.get("FINAGENT_WORKFLOW_RUNTIME", "agents").strip().lower()
+    # Request-scoped UI model choice needs call-time model resolution. The
+    # legacy Agents-SDK notebook path builds several Agent objects at import
+    # time, so overrides cannot reliably reach it. Route overridden notebook
+    # requests through the LangGraph/LangChain path instead of pretending.
+    if model_overrides and runtime in {"agents", "legacy", "openai_agents"}:
+        runtime = "langgraph"
+
+    with model_override_context(model_overrides):
+        if runtime in {"langgraph", "graph"}:
+            return await _run_langgraph_workflow(
+                workflow_input,
+                existing_notebook_path=existing_notebook_path,
+                prior_history=prior_history,
+                progress_cb=progress_cb,
+            )
+        if runtime in {"agents", "legacy", "openai_agents"}:
+            return await _run_agents_workflow(
+                workflow_input,
+                existing_notebook_path=existing_notebook_path,
+                prior_history=prior_history,
+                progress_cb=progress_cb,
+            )
+        raise ValueError(
+            "FINAGENT_WORKFLOW_RUNTIME must be 'langgraph' or 'agents', "
+            f"got {runtime!r}"
+        )

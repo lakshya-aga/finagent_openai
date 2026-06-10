@@ -5,6 +5,7 @@ from __future__ import annotations
 from agents import Agent, ModelSettings
 
 from ..functions import read_notebook
+from ..llm import ainvoke_text
 
 QUESTION_INSTRUCTIONS = """You are a helpful quantitative research assistant with deep knowledge of
 financial mathematics, statistics, and Python-based research workflows.
@@ -29,6 +30,39 @@ Workflow:
 You may NOT modify the notebook — `read_notebook` is the only tool you have, and it's
 read-only. Do not write to disk, install packages, or fabricate cell outputs.
 """
+
+
+LANGCHAIN_QUESTION_INSTRUCTIONS = """You are a helpful quantitative research assistant with deep knowledge of
+financial mathematics, statistics, and Python-based research workflows.
+
+The caller may provide a compact notebook context. If context is present,
+answer from it directly and cite cell indices or node ids where useful. If the
+context is insufficient, say exactly what is missing instead of fabricating.
+
+You may not modify notebooks, write files, install packages, or claim that a
+cell output exists unless it is visible in the supplied context.
+
+Keep the answer concise and practical.
+"""
+
+
+async def answer_question(question: str, notebook_context: str = "") -> str:
+    """Provider-neutral question-answering path used by the main workflow."""
+    if notebook_context:
+        user = (
+            "NOTEBOOK CONTEXT (truncated):\n"
+            f"{notebook_context}\n\n"
+            f"QUESTION:\n{question}"
+        )
+    else:
+        user = f"QUESTION:\n{question}"
+    return (
+        await ainvoke_text(
+            "chat_question",
+            system=LANGCHAIN_QUESTION_INSTRUCTIONS,
+            user=user,
+        )
+    ).strip()
 
 
 from finagent.llm import get_model_name

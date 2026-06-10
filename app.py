@@ -359,6 +359,7 @@ def _web_session_id(uid: str) -> str:
 class ChatRequest(BaseModel):
     session_id: str
     message: str
+    model_overrides: Optional[dict[str, str]] = None
 
 
 @app.get("/")
@@ -387,6 +388,7 @@ async def chat(req: ChatRequest):
                 existing_notebook_path=session["notebook_path"],
                 prior_history=session["history"],
                 progress_cb=progress_queue.put,
+                model_overrides=req.model_overrides,
             )
             # Update session state
             notebook_path = result.get("notebook_path") or session["notebook_path"]
@@ -931,6 +933,7 @@ class _DebateSubmission(BaseModel):
     ticker: str
     asset_class: str = "us_equity"
     rounds: int = 2
+    model_overrides: Optional[dict[str, str]] = None
     # Requesting account (email) — injected by the synapse proxy from the
     # NextAuth session, NOT trusted from raw client input on the public
     # surface. Drives ownership + credit charging.
@@ -1512,6 +1515,7 @@ async def credits_grant(body: _CreditsGrantBody):
 
 class _ForecastSubmission(BaseModel):
     question: str
+    model_overrides: Optional[dict[str, str]] = None
     # Injected server-side by the synapse proxy from the session —
     # same trust model as debates.
     owner: Optional[str] = None
@@ -1583,7 +1587,7 @@ async def start_forecast(req: _ForecastSubmission):
             await queue.put(
                 {"type": "phase", "phase": "research", "state": "start"}
             )
-            result = await run_forecast(question)
+            result = await run_forecast(question, model_overrides=req.model_overrides)
             await queue.put({"type": "phase", "phase": "research", "state": "end"})
 
             if not result.get("forecastable"):
@@ -1750,6 +1754,7 @@ async def start_debate(req: _DebateSubmission):
                 rounds=debate.rounds,
                 emit=_emit_and_capture,
                 debate_id=debate.id,
+                model_overrides=req.model_overrides,
             )
             verdict_accum = result.get("verdict")
             store.update_debate(
@@ -2088,6 +2093,37 @@ async def trigger_paper_trading_now():
     return await run_paper_trading_rebalance()
 
 
+class _SchedulerRunNowRequest(BaseModel):
+    model_overrides: Optional[dict[str, str]] = None
+
+
+@app.post("/api/debates/scheduler/run-now")
+async def trigger_daily_debate_analyses_now(req: _SchedulerRunNowRequest):
+    """Compatibility endpoint for the Debate Calendar's manual run button.
+
+    The old "5 rotating Nifty debates" cron was replaced by the current
+    tiered Nifty 50 stock-analyst job, which persists panel-backed analyses
+    to the same debates table. Start that job in the background so the admin
+    UI does not hold a multi-minute request open.
+    """
+    from finagent.llm import model_override_context, normalize_model_overrides
+    from finagent.scheduler import run_daily_stock_analyses
+
+    # Validate synchronously so the caller gets a clean 400 instead of a
+    # background task failure that only appears in logs.
+    try:
+        normalize_model_overrides(req.model_overrides)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    async def _runner() -> None:
+        with model_override_context(req.model_overrides):
+            await run_daily_stock_analyses()
+
+    asyncio.create_task(_runner())
+    return {"ok": True, "status": "started", "job": "paper_trading_daily_analyses"}
+
+
 @app.get("/api/debates/{debate_id}/performance")
 async def debate_performance(debate_id: str):
     """Compute the actual return on a debate's underlying ticker since
@@ -2291,9 +2327,17 @@ async def admin_llm_config():
       <ROLE>_PROVIDER=openai  <ROLE>_MODEL=gpt-5
       OPENAI_MODEL=gpt-4o     # global default applied when role-specific is unset
     """
-    from finagent.llm import list_roles
+    from finagent.llm import list_role_configs
 
-    return {role: {"provider": p, "model": m} for role, (p, m) in list_roles().items()}
+    return list_role_configs()
+
+
+@app.get("/api/llm-config")
+async def llm_config():
+    """Resolved model-role registry for UI model-selection surfaces."""
+    from finagent.llm import list_role_configs
+
+    return list_role_configs()
 
 
 @app.get("/api/admin/costs")
@@ -2330,13 +2374,14 @@ async def admin_metric_keys():
 
 class _TemplateDraftRequest(BaseModel):
     description: str
+    model_overrides: Optional[dict[str, str]] = None
 
 
 @app.post("/api/templates/draft")
 async def draft_template_endpoint(req: _TemplateDraftRequest):
     from finagent.templates_authoring import draft_template
 
-    return await draft_template(req.description)
+    return await draft_template(req.description, model_overrides=req.model_overrides)
 
 
 @app.get("/api/templates/drafts")
@@ -2647,9 +2692,6 @@ async def get_notebook_lineage(name: str, method: str = "ast", refresh: bool = F
         raise HTTPException(status_code=500, detail=f"lineage failed: {exc}")
 
 
-_VECTOR_STORE_ID = os.environ.get(
-    "OPENAI_VECTOR_STORE_ID", "vs_69a81b0197a481919e14c2d66197af7d"
-)
 _UPLOAD_MAX_BYTES = 25 * 1024 * 1024  # 25 MB
 
 
@@ -2671,42 +2713,15 @@ async def upload_pdf(file: UploadFile = File(...)):
         )
 
     filename = file.filename or "upload.pdf"
-    # PDF upload uses the OpenAI Files + Vector Stores APIs specifically;
-    # they don't have a clean LangChain / Anthropic equivalent, so this
-    # one stays OpenAI-pinned even after the L3 migration. Routing
-    # through the dispatcher anyway for telemetry consistency.
-    from finagent.llm import get_llm_client
-
-    client = get_llm_client("default")
-
     try:
-        uploaded = await client.files.create(
-            file=(filename, data, "application/pdf"),
-            purpose="assistants",
-        )
-    except Exception as e:
-        logging.exception("OpenAI Files.create failed for %s", filename)
-        raise HTTPException(status_code=502, detail=f"files.create failed: {e}")
+        from finagent.retrieval import get_knowledge_store
 
-    try:
-        vsf = await client.vector_stores.files.create(
-            vector_store_id=_VECTOR_STORE_ID,
-            file_id=uploaded.id,
-        )
+        result = await get_knowledge_store().upload_pdf(filename=filename, data=data)
     except Exception as e:
-        logging.exception("OpenAI vector_stores.files.create failed for %s", filename)
-        raise HTTPException(
-            status_code=502, detail=f"vector_stores.files.create failed: {e}"
-        )
+        logging.exception("knowledge-store PDF upload failed for %s", filename)
+        raise HTTPException(status_code=502, detail=f"knowledge upload failed: {e}")
 
-    return {
-        "filename": filename,
-        "file_id": uploaded.id,
-        "vector_store_id": _VECTOR_STORE_ID,
-        "vector_store_file_id": vsf.id,
-        "status": getattr(vsf, "status", "queued"),
-        "bytes": len(data),
-    }
+    return result.as_response()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2733,6 +2748,7 @@ class _WebUser(BaseModel):
 class _WebChatRequest(BaseModel):
     messages: List[_WebMessage]
     user: _WebUser
+    model_overrides: Optional[dict[str, str]] = None
 
 
 def _to_internal_history(messages: List[_WebMessage]) -> list:
@@ -2834,6 +2850,7 @@ async def chat_web(req: _WebChatRequest):
                 # Web is authoritative for chat history; use what the client sent.
                 prior_history=prior_history,
                 progress_cb=progress_queue.put,
+                model_overrides=req.model_overrides,
             )
             notebook_path = result.get("notebook_path") or session["notebook_path"]
             _update_session(_web_session_id(uid), notebook_path, [])

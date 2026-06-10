@@ -14,10 +14,11 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from agents import Agent, ModelSettings, WebSearchTool
+from agents import Agent, ModelSettings
 from pydantic import BaseModel, Field
 
 from finagent.llm import get_model_name
+from finagent.hosted_tools import hosted_web_search_tools
 
 from .tools import (
     arima_forecast,
@@ -281,8 +282,8 @@ def bull_agent(now_iso: str, today_str: str) -> Agent:
             arima_forecast,
             # Inline chart for the user (NEW)
             plot_ohlc_chart,
-            # Long-tail web search fallback
-            WebSearchTool(),
+            # Long-tail web search fallback, when provider-hosted search exists.
+            *hosted_web_search_tools("debate_bull"),
         ],
     )
 
@@ -310,8 +311,8 @@ def bear_agent(now_iso: str, today_str: str) -> Agent:
             arima_forecast,
             # Inline chart for the user (NEW)
             plot_ohlc_chart,
-            # Long-tail web search fallback
-            WebSearchTool(),
+            # Long-tail web search fallback, when provider-hosted search exists.
+            *hosted_web_search_tools("debate_bear"),
         ],
     )
 

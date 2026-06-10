@@ -2,8 +2,8 @@
 
 Pipeline (cheap by construction):
 
-  1. RESEARCH (one Agents-SDK agent, gpt-5-mini, Exa search tools,
-     max ~4 searches): classify the question as forecastable,
+  1. RESEARCH (one LangChain tool loop, Exa search tools, max ~4
+     searches): classify the question as forecastable,
      restate it as a resolvable claim with a horizon, gather an
      evidence digest with sources, and estimate a base rate.
 
@@ -29,6 +29,7 @@ resolution tooling comes later.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import statistics
 from typing import Optional
@@ -141,15 +142,11 @@ Emit ONLY the structured ResearchDigest."""
 
 
 def _make_exa_tool():
-    """Build the exa_search function_tool lazily so this module imports
-    cleanly when the Agents SDK or EXA_API_KEY are absent."""
-    from agents import function_tool
+    """Build the Exa search tool lazily so imports stay lightweight."""
+    from langchain_core.tools import StructuredTool
 
-    @function_tool
     def exa_search(query: str, recent_only: bool = False) -> dict:
-        """Semantic web search. Returns {results: [{title, url,
-        published_date, snippet}]}. Set recent_only=true to restrict to
-        the last 30 days (use for 'latest developments' queries)."""
+        """Semantic web search for forecasting evidence."""
         from finagent import exa
 
         try:
@@ -157,30 +154,35 @@ def _make_exa_tool():
         except Exception as e:  # surface as data, never crash the loop
             return {"error": f"{type(e).__name__}: {e}", "results": []}
 
-    return exa_search
+    return StructuredTool.from_function(
+        func=exa_search,
+        name="exa_search",
+        description=(
+            "Semantic web search. Returns {results: [{title, url, "
+            "published_date, snippet}]}. Set recent_only=true to restrict to "
+            "the last 30 days."
+        ),
+    )
 
 
 async def _research(question: str) -> ResearchDigest:
-    from agents import Agent, ModelSettings, Runner
+    from finagent.langchain_runner import run_tool_loop
+    from finagent.llm import _extract_json_object
 
-    from finagent.llm import get_model_name
-
-    agent = Agent(
-        name="ForecastResearcher",
-        instructions=_RESEARCH_INSTRUCTIONS,
-        model=get_model_name("forecaster"),
+    schema = json.dumps(ResearchDigest.model_json_schema(), indent=2)
+    output = await run_tool_loop(
+        role="forecaster",
+        system=(
+            f"{_RESEARCH_INSTRUCTIONS}\n\n"
+            "Return the final answer as JSON only. It must validate against "
+            f"this JSON Schema:\n{schema}"
+        ),
+        user=f"Question: {question}",
         tools=[_make_exa_tool()],
-        model_settings=ModelSettings(),
-        output_type=ResearchDigest,
-    )
-    result = await Runner.run(
-        agent,
-        input=f"Question: {question}",
-        # 4 searches + structured answer fits comfortably; the cap stops
-        # a pathological search loop from burning tokens.
         max_turns=10,
+        phase="forecast_research",
     )
-    return result.final_output_as(ResearchDigest)
+    return ResearchDigest.model_validate_json(_extract_json_object(output))
 
 
 # ── Stage 2: ensemble forecast passes (no tools) ───────────────────
@@ -200,9 +202,7 @@ Emit ONLY the structured ForecastPass."""
 
 
 async def _forecast_pass(digest: ResearchDigest) -> Optional[ForecastPass]:
-    from agents import Agent, ModelSettings, Runner
-
-    from finagent.llm import get_model_name
+    from finagent.llm import ainvoke_structured
 
     evidence_lines = "\n".join(
         f"- {e.fact} ({e.date or 'n.d.'}; {e.source_url or 'no source'})"
@@ -219,15 +219,12 @@ async def _forecast_pass(digest: ResearchDigest) -> Optional[ForecastPass]:
         f"Produce the ForecastPass."
     )
     try:
-        agent = Agent(
-            name="ForecastPass",
-            instructions=_FORECAST_INSTRUCTIONS,
-            model=get_model_name("forecaster_pass"),
-            model_settings=ModelSettings(),
-            output_type=ForecastPass,
+        return await ainvoke_structured(
+            "forecaster_pass",
+            ForecastPass,
+            system=_FORECAST_INSTRUCTIONS,
+            user=prompt,
         )
-        result = await Runner.run(agent, input=prompt, max_turns=1)
-        return result.final_output_as(ForecastPass)
     except Exception:
         logger.exception("forecast pass failed")
         return None
@@ -236,7 +233,12 @@ async def _forecast_pass(digest: ResearchDigest) -> Optional[ForecastPass]:
 # ── Public entrypoint ──────────────────────────────────────────────
 
 
-async def run_forecast(question: str, *, n_ensemble: int = 3) -> dict:
+async def run_forecast(
+    question: str,
+    *,
+    n_ensemble: int = 3,
+    model_overrides: Optional[dict[str, str]] = None,
+) -> dict:
     """Full pipeline. Returns a dict ready for persistence/SSE:
 
     {forecastable, question, reframed_question, probability, p_low,
@@ -247,6 +249,13 @@ async def run_forecast(question: str, *, n_ensemble: int = 3) -> dict:
     Raises only on infrastructure failure (research stage crash); a
     non-forecastable question returns {forecastable: False, reason}.
     """
+    from finagent.llm import model_override_context
+
+    with model_override_context(model_overrides):
+        return await _run_forecast_impl(question, n_ensemble=n_ensemble)
+
+
+async def _run_forecast_impl(question: str, *, n_ensemble: int = 3) -> dict:
     digest = await _research(question)
     if not digest.forecastable:
         return {

@@ -230,18 +230,6 @@ async def _analyse_via_single_call(
 ) -> StockRecommendation:
     """Legacy single-LLM-call analyst. Cheap, information-thin —
     kept as the rescue path when the panel fails for a specific ticker."""
-    try:
-        from agents import Agent, ModelSettings, Runner
-    except ImportError as e:
-        logger.warning("stock_analyst: agents SDK unavailable (%s)", e)
-        return StockRecommendation(
-            action="avoid",
-            confidence=0.0,
-            reasoning=f"analyst unavailable: SDK missing ({e})",
-        )
-
-    model_name = model or _resolve_model()
-
     user_prompt = (
         f"Ticker: {ticker}\n"
         f"Current price: ₹{current_price:.2f}\n"
@@ -250,15 +238,26 @@ async def _analyse_via_single_call(
     )
 
     try:
-        agent = Agent(
-            name="StockAnalyst",
-            instructions=_SYSTEM_PROMPT,
-            model=model_name,
-            model_settings=ModelSettings(),
-            output_type=StockRecommendation,
-        )
-        result = await Runner.run(agent, input=user_prompt, max_turns=1)
-        rec = result.final_output_as(StockRecommendation)
+        from finagent.llm import ainvoke_structured
+
+        if model:
+            from finagent.llm import make_chat
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            structured = make_chat(model).with_structured_output(StockRecommendation)
+            rec = await structured.ainvoke(
+                [
+                    SystemMessage(content=_SYSTEM_PROMPT),
+                    HumanMessage(content=user_prompt),
+                ]
+            )
+        else:
+            rec = await ainvoke_structured(
+                "stock_analyst",
+                StockRecommendation,
+                system=_SYSTEM_PROMPT,
+                user=user_prompt,
+            )
     except Exception as exc:
         logger.warning("stock_analyst: LLM call failed for %s (%s)", ticker, exc)
         return StockRecommendation(
@@ -339,21 +338,6 @@ def _normalise_recommendation(rec: StockRecommendation) -> StockRecommendation:
             }
         )
     return rec.model_copy(update={"action": action})
-
-
-def _resolve_model() -> str:
-    try:
-        from finagent.llm import get_model_name
-
-        return get_model_name("stock_analyst")
-    except Exception:
-        try:
-            from finagent.llm import get_model_name
-
-            return get_model_name("intent_classifier")
-        except Exception:
-            return "gpt-4o-mini"
-
 
 # ── Direction mapping for paper_trading.predictions ────────────────
 

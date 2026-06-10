@@ -15,8 +15,7 @@ runtime the workflow swaps them out via `agent.clone(mcp_servers=...)`.
 from __future__ import annotations
 
 import os
-
-from agents import FileSearchTool
+from agents import function_tool
 from agents.mcp import (
     MCPServerSse,
     MCPServerSseParams,
@@ -62,16 +61,44 @@ def make_data_mcp() -> MCPServerSse:
     )
 
 
-# Default vector store for the agent's curated PDFs / research notes.
-_VECTOR_STORE_ID = os.environ.get(
-    "OPENAI_VECTOR_STORE_ID", "vs_69a81b0197a481919e14c2d66197af7d"
-)
+def file_search_tools() -> list:
+    """Return hosted file-search tools for legacy Agents SDK agents.
+
+    Non-OpenAI knowledge backends can return an empty list, which keeps agent
+    construction clean while making the missing hosted capability explicit.
+    """
+    from finagent.retrieval import hosted_file_search_tools
+
+    return hosted_file_search_tools()
 
 
-def make_file_search() -> FileSearchTool:
-    return FileSearchTool(vector_store_ids=[_VECTOR_STORE_ID])
+@function_tool
+def unavailable_file_search(query: str = ""):
+    """Explain that hosted file search is unavailable for this knowledge backend."""
+    backend = os.environ.get("KNOWLEDGE_STORE_BACKEND", "openai")
+    return {
+        "success": False,
+        "error": (
+            "Hosted file search is unavailable for "
+            f"KNOWLEDGE_STORE_BACKEND={backend!r}. Use "
+            "KNOWLEDGE_STORE_BACKEND=openai with OPENAI_VECTOR_STORE_ID for "
+            "OpenAI hosted file search, or migrate this call site to a "
+            "provider-neutral retrieval backend."
+        ),
+        "query": query,
+    }
 
 
-# Single shared FileSearchTool instance — it has no per-call state and is safe
-# to share across agents.
+def make_file_search():
+    """Backward-compatible single-tool helper.
+
+    Prefer ``file_search_tools()`` in new code because non-hosted knowledge
+    stores may expose zero hosted tools. Legacy callers still receive a valid
+    tool object so they do not accidentally pass ``None`` into an Agents SDK
+    tool list.
+    """
+    tools = file_search_tools()
+    return tools[0] if tools else unavailable_file_search
+
+
 file_search = make_file_search()
