@@ -1507,6 +1507,146 @@ async def credits_grant(body: _CreditsGrantBody):
     }
 
 
+# ── Event-probability forecasts (Exa-grounded) ────────────────────────
+
+
+class _ForecastSubmission(BaseModel):
+    question: str
+    # Injected server-side by the synapse proxy from the session —
+    # same trust model as debates.
+    owner: Optional[str] = None
+
+
+@app.post("/api/forecasts")
+async def start_forecast(req: _ForecastSubmission):
+    """Forecast an event's probability and stream progress as SSE.
+
+    Pipeline: Exa-grounded research (base rates + latest developments)
+    → 3-pass forecast ensemble → median probability with spread +
+    reasoning + evidence. Result persists with status='open' so the
+    future calibration harness can Brier-score it once resolved.
+
+    Credit semantics mirror debates: charge one analysis up front when
+    an owner is present, refund on failure OR on a non-forecastable
+    question (a rejection shouldn't bill).
+    """
+    from finagent import credits as credits_mod
+    from finagent import forecasts as forecasts_store
+    from finagent.agents.forecaster import run_forecast
+    from finagent.exa import exa_available
+
+    question = (req.question or "").strip()
+    if not question or len(question) > 500:
+        raise HTTPException(
+            status_code=400, detail="question must be 1-500 characters"
+        )
+    if not exa_available():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "exa_not_configured",
+                "hint": "Operator must set EXA_API_KEY in deployment secrets.",
+            },
+        )
+
+    owner = credits_mod.normalize_user_id(req.owner or "") or None
+    cost = credits_mod.cost_per_analysis()
+    charged = False
+    if owner:
+        charged, balance = credits_mod.charge(owner, cost, "forecast")
+        if not charged and credits_mod.enforcement_enabled():
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": "insufficient_credits",
+                    "balance": balance,
+                    "cost": cost,
+                },
+            )
+    elif credits_mod.enforcement_enabled():
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "owner_required", "hint": "sign in to run forecasts"},
+        )
+
+    queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
+
+    async def _refund_if_charged() -> None:
+        if charged and owner:
+            try:
+                credits_mod.refund(owner, cost)
+            except Exception:
+                logging.exception("forecast: refund failed for %s", owner)
+
+    async def _runner():
+        try:
+            await queue.put(
+                {"type": "phase", "phase": "research", "state": "start"}
+            )
+            result = await run_forecast(question)
+            await queue.put({"type": "phase", "phase": "research", "state": "end"})
+
+            if not result.get("forecastable"):
+                await _refund_if_charged()
+                await queue.put(
+                    {"type": "not_forecastable", "reason": result.get("reason", "")}
+                )
+                return
+
+            fid = forecasts_store.save_forecast(result, owner=owner)
+            result["id"] = fid
+            await queue.put({"type": "forecast", "data": result})
+        except Exception as exc:
+            logging.exception("forecast crashed for %r", question[:80])
+            await _refund_if_charged()
+            await queue.put(
+                {"type": "error", "text": f"{type(exc).__name__}: {exc}"}
+            )
+        finally:
+            await queue.put(None)
+
+    asyncio.create_task(_runner())
+
+    async def _stream():
+        yield f"data: {json.dumps({'type': 'started', 'question': question})}\n\n"
+        while True:
+            evt = await queue.get()
+            if evt is None:
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+            try:
+                yield f"data: {json.dumps(evt, default=str)}\n\n"
+            except Exception:
+                continue
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/forecasts")
+async def list_forecasts_route(
+    owner: Optional[str] = None, limit: int = 50, offset: int = 0
+):
+    from finagent import credits as credits_mod
+    from finagent import forecasts as forecasts_store
+
+    owner_norm = credits_mod.normalize_user_id(owner or "") or None
+    return {
+        "forecasts": forecasts_store.list_forecasts(
+            owner=owner_norm, limit=limit, offset=offset
+        )
+    }
+
+
+@app.get("/api/forecasts/{forecast_id}")
+async def get_forecast_route(forecast_id: str):
+    from finagent import forecasts as forecasts_store
+
+    f = forecasts_store.get_forecast(forecast_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="forecast not found")
+    return f
+
+
 @app.post("/api/debates")
 async def start_debate(req: _DebateSubmission):
     """Kick off a bull/bear/moderator debate and stream events as SSE.

@@ -72,6 +72,11 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     # OHLC context into buy/sell/avoid" — spot-checked adequate.
     # Override back via STOCK_ANALYST_MODEL=gpt-5-mini if quality drifts.
     "stock_analyst": ("openai", "gpt-5-nano"),
+    # Event-probability forecaster: research stage does Exa-tool loops
+    # + base-rate judgement (mini); ensemble passes are cheap
+    # independent reads of a shared digest (nano × 3).
+    "forecaster": ("openai", "gpt-5-mini"),
+    "forecaster_pass": ("openai", "gpt-5-nano"),
     # Notebook-name suggester — one-shot, lowest tier.
     "name_suggester": ("openai", "gpt-5-mini"),
     # Debate package — legacy roles; the trading_panel replaced these
