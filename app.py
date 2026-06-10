@@ -2093,6 +2093,37 @@ async def trigger_paper_trading_now():
     return await run_paper_trading_rebalance()
 
 
+class _SchedulerRunNowRequest(BaseModel):
+    model_overrides: Optional[dict[str, str]] = None
+
+
+@app.post("/api/debates/scheduler/run-now")
+async def trigger_daily_debate_analyses_now(req: _SchedulerRunNowRequest):
+    """Compatibility endpoint for the Debate Calendar's manual run button.
+
+    The old "5 rotating Nifty debates" cron was replaced by the current
+    tiered Nifty 50 stock-analyst job, which persists panel-backed analyses
+    to the same debates table. Start that job in the background so the admin
+    UI does not hold a multi-minute request open.
+    """
+    from finagent.llm import model_override_context, normalize_model_overrides
+    from finagent.scheduler import run_daily_stock_analyses
+
+    # Validate synchronously so the caller gets a clean 400 instead of a
+    # background task failure that only appears in logs.
+    try:
+        normalize_model_overrides(req.model_overrides)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    async def _runner() -> None:
+        with model_override_context(req.model_overrides):
+            await run_daily_stock_analyses()
+
+    asyncio.create_task(_runner())
+    return {"ok": True, "status": "started", "job": "paper_trading_daily_analyses"}
+
+
 @app.get("/api/debates/{debate_id}/performance")
 async def debate_performance(debate_id: str):
     """Compute the actual return on a debate's underlying ticker since
