@@ -68,6 +68,7 @@ async def run_debate(
     emit: Optional[EmitFn] = None,
     debate_id: Optional[str] = None,
     source: str = "user",
+    owner: Optional[str] = None,
 ) -> dict[str, Any]:
     """Run a multi-agent investment-thesis debate on a single ticker.
 
@@ -79,6 +80,10 @@ async def run_debate(
         emit: async callback for streaming events.
         debate_id: pre-generated id; if None, generated.
         source: 'user' for manual submissions, 'scheduled' for the cron.
+        owner: requesting account (normalised email) for per-user
+            history + credit attribution. None for system runs. Only
+            used when this call owns the row (debate_id is None) —
+            callers that pre-create the row set owner themselves.
 
     Returns:
         Same shape as the legacy debate:
@@ -117,6 +122,7 @@ async def run_debate(
                 asset_class=asset_class,
                 rounds=rounds,
                 source=source,
+                owner=owner,
             )
             debate_id = _row.id
             get_store().update_debate(debate_id, status="running")

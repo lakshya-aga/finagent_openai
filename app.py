@@ -931,6 +931,14 @@ class _DebateSubmission(BaseModel):
     ticker: str
     asset_class: str = "us_equity"
     rounds: int = 2
+    # Requesting account (email) — injected by the synapse proxy from the
+    # NextAuth session, NOT trusted from raw client input on the public
+    # surface. Drives ownership + credit charging.
+    owner: Optional[str] = None
+    # fresh=True bypasses the same-day cache and always burns a new
+    # panel run (and a credit). Default False: a completed analysis of
+    # the same ticker today is served free.
+    fresh: bool = False
 
 
 # ── Signals (Phase 4 dashboard) ────────────────────────────────────────
@@ -1427,6 +1435,78 @@ async def patch_signal_status_route(name: str, body: _SignalStatusBody):
     return {"ok": True, "name": name, "status": body.status}
 
 
+# ── Credits (ticker-analyser monetisation) ────────────────────────────
+#
+# Accounts are keyed by the normalised email the synapse proxy injects
+# from the NextAuth session. The web tier is the auth boundary — these
+# endpoints trust their caller, so synapse must only proxy `ensure` and
+# the balance GET for the *logged-in* user, and must NOT proxy `grant`
+# publicly at all (operator/Stripe-webhook surface only).
+
+
+class _CreditsEnsureBody(BaseModel):
+    user_id: str
+
+
+@app.post("/api/credits/ensure")
+async def credits_ensure(body: _CreditsEnsureBody):
+    """Idempotent account bootstrap — call on every login. First call
+    creates the account + grants the signup bonus; later calls just
+    return the balance."""
+    from finagent import credits as credits_mod
+
+    try:
+        out = credits_mod.ensure_account(body.user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    out["cost_per_analysis"] = credits_mod.cost_per_analysis()
+    out["enforcement"] = credits_mod.enforcement_enabled()
+    return out
+
+
+@app.get("/api/credits/{user_id}")
+async def credits_balance(user_id: str, history: int = 10):
+    """Balance + recent ledger for one account. The ledger answers
+    'where did my credits go?' without a support ticket."""
+    from finagent import credits as credits_mod
+
+    uid = credits_mod.normalize_user_id(user_id)
+    return {
+        "user_id": uid,
+        "balance": credits_mod.get_balance(uid),
+        "cost_per_analysis": credits_mod.cost_per_analysis(),
+        "enforcement": credits_mod.enforcement_enabled(),
+        "history": credits_mod.history(uid, limit=history),
+    }
+
+
+class _CreditsGrantBody(BaseModel):
+    user_id: str
+    amount: int
+    reason: str = "manual_grant"
+    ref_id: Optional[str] = None
+
+
+@app.post("/api/credits/grant")
+async def credits_grant(body: _CreditsGrantBody):
+    """ADMIN/WEBHOOK ONLY — add credits (purchase fulfilment, promo,
+    support goodwill). Never expose through the public proxy; the
+    Stripe/Razorpay webhook handler and the operator are the only
+    legitimate callers."""
+    from finagent import credits as credits_mod
+
+    try:
+        balance = credits_mod.grant(
+            body.user_id, body.amount, body.reason, ref_id=body.ref_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "user_id": credits_mod.normalize_user_id(body.user_id),
+        "balance": balance,
+    }
+
+
 @app.post("/api/debates")
 async def start_debate(req: _DebateSubmission):
     """Kick off a bull/bear/moderator debate and stream events as SSE.
@@ -1441,15 +1521,75 @@ async def start_debate(req: _DebateSubmission):
     The debate is also persisted on the debates table so the frontend
     can re-render it after the stream closes.
     """
+    from finagent import credits as credits_mod
     from finagent.debate import run_debate
     from finagent.experiments import get_store
 
     store = get_store()
     rounds = max(1, min(4, int(req.rounds)))
+    ticker = req.ticker.strip().upper()[:32]
+    asset_class = (req.asset_class or "us_equity").strip().lower()[:32]
+    owner = credits_mod.normalize_user_id(req.owner or "") or None
+
+    # ── Same-day cache: identical analysis, zero marginal cost ──────
+    # An analysis of a ticker on a given day is the same for every
+    # user (nothing personalised), so a completed run from ANY
+    # requester — including the daily cron — satisfies this request
+    # free. fresh=True opts out and burns a credit for a new run.
+    if not req.fresh:
+        cached = store.find_cached_debate(
+            ticker=ticker, asset_class=asset_class, min_rounds=rounds
+        )
+        if cached is not None:
+
+            async def _cached_stream():
+                yield (
+                    f"data: {json.dumps({'type': 'started', 'debate_id': cached.id, 'ticker': cached.ticker, 'asset_class': cached.asset_class, 'rounds': cached.rounds, 'cached': True})}\n\n"
+                )
+                v = cached.verdict()
+                if v:
+                    yield f"data: {json.dumps({'type': 'verdict', 'data': v}, default=str)}\n\n"
+                yield (
+                    f"data: {json.dumps({'type': 'done', 'debate_id': cached.id, 'cached': True})}\n\n"
+                )
+
+            return StreamingResponse(_cached_stream(), media_type="text/event-stream")
+
+    # ── Credit charge for a fresh run ────────────────────────────────
+    # Charged up front (refunded if the run fails). While
+    # CREDITS_ENFORCEMENT is off, a failed charge logs + proceeds so
+    # the schema can ship ahead of the paywall; once it's on, an
+    # uncovered run is refused with 402.
+    cost = credits_mod.cost_per_analysis()
+    charged = False
+    if owner:
+        charged, balance = credits_mod.charge(owner, cost, f"analysis:{ticker}")
+        if not charged and credits_mod.enforcement_enabled():
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": "insufficient_credits",
+                    "balance": balance,
+                    "cost": cost,
+                },
+            )
+        if not charged:
+            logging.info(
+                "credits: unbilled run for %s (balance=%d, enforcement off)",
+                owner,
+                balance,
+            )
+    elif credits_mod.enforcement_enabled():
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "owner_required", "hint": "sign in to run analyses"},
+        )
+
     debate = store.create_debate(
-        ticker=req.ticker.strip().upper()[:32],
-        asset_class=(req.asset_class or "us_equity").strip().lower()[:32],
+        ticker=ticker,
+        asset_class=asset_class,
         rounds=rounds,
+        owner=owner,
     )
 
     queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
@@ -1488,6 +1628,14 @@ async def start_debate(req: _DebateSubmission):
                 error=str(exc),
                 finished=True,
             )
+            # A failed run must not consume the user's credit — refund
+            # what we charged up front. Best-effort: a refund failure is
+            # logged, never raised (the stream still has to close).
+            if charged and owner:
+                try:
+                    credits_mod.refund(owner, cost, ref_id=debate.id)
+                except Exception:
+                    logging.exception("credits: refund failed for %s", debate.id)
         finally:
             await queue.put(None)  # sentinel: stream done
 
@@ -1534,17 +1682,23 @@ async def list_debates(
     ticker: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    owner: Optional[str] = None,
 ):
     """Paginated debates list. ``total`` lets the UI render
     'X of Y' counters and decide whether the Load More button still
-    has more rows to fetch."""
+    has more rows to fetch. ``owner`` scopes to one account's
+    analyses (per-user history in the productised analyser)."""
+    from finagent import credits as credits_mod
     from finagent.experiments import get_store
 
     store = get_store()
     limit = max(1, min(200, int(limit)))
     offset = max(0, min(2000, int(offset)))
-    debates = store.list_debates(ticker=ticker, limit=limit, offset=offset)
-    total = store.count_debates(ticker=ticker)
+    owner_norm = credits_mod.normalize_user_id(owner or "") or None
+    debates = store.list_debates(
+        ticker=ticker, limit=limit, offset=offset, owner=owner_norm
+    )
+    total = store.count_debates(ticker=ticker, owner=owner_norm)
     return {
         "debates": [d.as_public_dict() for d in debates],
         "limit": limit,
