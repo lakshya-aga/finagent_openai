@@ -67,7 +67,11 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     # debate panel (finagent.agents.trading_panel) is the per-ticker
     # methodology going forward. The role here drives the legacy
     # single-call rescue path; the panel itself uses panel_* roles.
-    "stock_analyst": ("openai", "gpt-5-mini"),
+    # Tiered-mode screener: one structured call per ticker × 50/day.
+    # nano is ~5× cheaper than mini and the task is "turn 6 lines of
+    # OHLC context into buy/sell/avoid" — spot-checked adequate.
+    # Override back via STOCK_ANALYST_MODEL=gpt-5-mini if quality drifts.
+    "stock_analyst": ("openai", "gpt-5-nano"),
     # Notebook-name suggester — one-shot, lowest tier.
     "name_suggester": ("openai", "gpt-5-mini"),
     # Debate package — legacy roles; the trading_panel replaced these

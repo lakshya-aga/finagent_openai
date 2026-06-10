@@ -65,7 +65,12 @@ logger = logging.getLogger(__name__)
 # To swap to Anthropic:
 #   export PANEL_DEFAULT_MODEL=anthropic:claude-haiku-4-5
 _ROLE_DEFAULTS: dict[str, tuple[str, str]] = {
-    "panel_analyst": ("openai", "gpt-5-mini"),
+    # Analysts are "summarise tool output into a report" — the token-
+    # heaviest stage (they carry the tool loops) and the least
+    # judgement-sensitive, so they run on nano (~5× cheaper than mini).
+    # Synthesis/judgement roles (debate, manager, trader, risk, PM)
+    # stay on mini. Override per-role via PANEL_<ROLE>_MODEL.
+    "panel_analyst": ("openai", "gpt-5-nano"),
     "panel_researcher": ("openai", "gpt-5-mini"),
     "panel_research_manager": ("openai", "gpt-5-mini"),
     "panel_trader": ("openai", "gpt-5-mini"),
@@ -131,13 +136,32 @@ def role_spec(role: str) -> str:
 # ── Provider-specific constructors ──────────────────────────────────
 
 
+def _service_tier() -> str:
+    """OpenAI service tier for panel calls. ``flex`` = 50% off with
+    variable latency + occasional capacity 429s — the right default
+    for the daily cron, where nobody is waiting on a response. Set
+    PANEL_SERVICE_TIER=default to pay full price for low latency
+    (e.g. if user-facing on-demand analyses start feeling slow)."""
+    return os.environ.get("PANEL_SERVICE_TIER", "flex").strip().lower()
+
+
 def _make_openai(model: str, **kw: Any):
     from langchain_openai import ChatOpenAI
+
+    from .usage import usage_handler
 
     # ChatOpenAI auto-reads OPENAI_API_KEY from env. Pass temperature
     # via kw — we keep it low for managers (deterministic JSON shape)
     # and let the caller override for analysts (a touch of variety
     # gives more nuanced reports).
+    tier = _service_tier()
+    if tier and tier != "default":
+        # 50% off vs standard tier; timeout/retry adjustments for flex
+        # are applied in make_chat (before the generic defaults bind).
+        kw.setdefault("service_tier", tier)
+    # Constructor-level callback fires on every call of this instance —
+    # feeds the process-global token counter for cost attribution.
+    kw.setdefault("callbacks", [usage_handler])
     return ChatOpenAI(model=model, **kw)
 
 
@@ -217,6 +241,13 @@ def make_chat(spec: str, **kw: Any):
     # STATE=sleeping, and the user thinks the panel crashed silently.
     # 120s is generous for a single chat completion; panel has ≥10
     # calls so cumulative budget stays sane.
+    #
+    # Flex tier (openai only): slower + sheds load under pressure, so
+    # the leash is longer and retries higher. Must be decided HERE,
+    # before the generic setdefaults below would lock in 120/2.
+    if provider == "openai" and _service_tier() not in ("", "default"):
+        kw.setdefault("timeout", 600)
+        kw.setdefault("max_retries", 5)
     kw.setdefault("timeout", 120)
     # Cap retries low so a model-tier issue surfaces fast instead of
     # hiding behind exponential backoff.

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from langchain_core.tools import tool
 
@@ -29,10 +30,28 @@ logger = logging.getLogger(__name__)
 # ── helpers ─────────────────────────────────────────────────────────
 
 
+# Hard cap on any single tool output. Tool outputs don't just cost
+# their own tokens — they get RE-SENT on every subsequent turn of the
+# calling agent's tool loop, so an 80KB fundamentals dump multiplies
+# into hundreds of thousands of input tokens across a panel run.
+# ~8000 chars ≈ 2k tokens keeps each output informative while capping
+# the quadratic blowup. Override via PANEL_TOOL_OUTPUT_MAX_CHARS.
+def _tool_output_cap() -> int:
+    try:
+        return max(1000, int(os.environ.get("PANEL_TOOL_OUTPUT_MAX_CHARS", "8000")))
+    except ValueError:
+        return 8000
+
+
 def _safe_call(fn_name: str, fn, **kwargs) -> str:
     """Invoke a findata function and return JSON. On any exception,
     return a JSON error envelope so the agent can decide whether to
-    retry / change params / give up — never raises out to the graph."""
+    retry / change params / give up — never raises out to the graph.
+
+    Output is capped at PANEL_TOOL_OUTPUT_MAX_CHARS (default 8000) —
+    the single funnel every panel tool returns through, so the cap
+    applies uniformly. Truncation appends a marker so the model knows
+    data was cut rather than silently absent."""
     try:
         result = fn(**kwargs)
     except Exception as exc:
@@ -43,7 +62,17 @@ def _safe_call(fn_name: str, fn, **kwargs) -> str:
                 "tool": fn_name,
             }
         )
-    return json.dumps(result, default=str)
+    out = json.dumps(result, default=str)
+    cap = _tool_output_cap()
+    if len(out) > cap:
+        logger.info(
+            "trading_panel tool %s output truncated %d → %d chars",
+            fn_name,
+            len(out),
+            cap,
+        )
+        out = out[:cap] + f'... [TRUNCATED — output exceeded {cap} chars]'
+    return out
 
 
 # ── News / sentiment ────────────────────────────────────────────────
