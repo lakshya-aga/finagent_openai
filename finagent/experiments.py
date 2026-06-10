@@ -888,6 +888,20 @@ class ExperimentStore:
             (count,) = conn.execute(sql, args).fetchone()
         return int(count)
 
+    def count_stranded_debates(self, older_than_secs: int = 1800) -> int:
+        """How many queued/running rows are older than the cutoff —
+        i.e. dead runs whose lifecycle never completed (process crash,
+        exhausted API quota mid-batch, deploy churn). Used by the
+        cleanup endpoint's dry-run preview."""
+        cutoff = time.time() - max(60, int(older_than_secs))
+        with self._conn() as conn:
+            (n,) = conn.execute(
+                "SELECT COUNT(*) FROM debates "
+                "WHERE status IN ('queued', 'running') AND started_at < ?",
+                (cutoff,),
+            ).fetchone()
+        return int(n)
+
     def cleanup_stranded_debates(self, older_than_secs: int = 1800) -> int:
         """Mark queued/running debates older than ``older_than_secs``
         as ``failed`` with a clear error message.

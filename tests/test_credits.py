@@ -164,6 +164,30 @@ def test_cache_hit_requires_completed_same_day_enough_rounds(store):
     )
 
 
+def test_stranded_sweep_then_delete_clears_quota_blocked_rows(store):
+    """The 'ran out of tokens mid-batch' scenario: rows stuck in queued
+    forever. count → sweep to failed → bulk delete must remove exactly
+    those, leaving healthy rows alone."""
+    stuck = store.create_debate(ticker="HDFCBANK.NS", asset_class="indian_equity", rounds=1)
+    ok = store.create_debate(ticker="TCS.NS", asset_class="indian_equity", rounds=1)
+    store.update_debate(ok.id, status="completed", finished=True)
+    fresh = store.create_debate(ticker="INFY.NS", asset_class="indian_equity", rounds=1)
+
+    # Backdate the stuck row past the 30-min cutoff; `fresh` stays recent.
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE debates SET started_at = ? WHERE id = ?",
+            (time.time() - 3600, stuck.id),
+        )
+
+    assert store.count_stranded_debates(1800) == 1
+    assert store.cleanup_stranded_debates(1800) == 1  # stuck → failed
+    assert store.delete_debates_by_status("failed") == 1  # gone
+
+    remaining = {d.ticker for d in store.list_debates()}
+    assert remaining == {"TCS.NS", "INFY.NS"}  # completed + recent survive
+
+
 def test_cache_ignores_stale_runs(store):
     d = store.create_debate(ticker="TSLA", asset_class="us_equity", rounds=2)
     store.update_debate(d.id, status="completed", finished=True)

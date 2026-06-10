@@ -1721,20 +1721,45 @@ async def cleanup_stranded_debates(older_than_secs: int = 1800):
 
 
 @app.post("/api/debates/cleanup-failed")
-async def cleanup_failed_debates(dry_run: bool = False):
-    """Admin: hard-delete every debate with status='failed' from history.
+async def cleanup_failed_debates(
+    dry_run: bool = False,
+    include_stranded: bool = True,
+    older_than_secs: int = 1800,
+):
+    """Admin: clear every dead run from history in one call.
 
-    Clears failed ticker runs (rate-limit / model-error failures etc.) from
-    the Past Debates list. ``dry_run=true`` returns the count WITHOUT
-    deleting so you can preview first; default actually deletes."""
+    Two kinds of corpses, both handled here so the UI needs one button:
+      * status='failed'  — runs that errored (rate limits, model errors)
+      * stuck queued/running older than ``older_than_secs`` — runs whose
+        lifecycle never completed (exhausted API quota mid-batch, process
+        crash, deploy churn). With ``include_stranded`` (default) these
+        are first marked failed, then deleted with the rest.
+
+    ``dry_run=true`` previews both counts without touching anything."""
     from finagent.experiments import get_store
 
     store = get_store()
-    n = store.count_debates_by_status("failed")
+    n_failed = store.count_debates_by_status("failed")
+    n_stranded = (
+        store.count_stranded_debates(older_than_secs) if include_stranded else 0
+    )
     if dry_run:
-        return {"dry_run": True, "would_delete": n, "status": "failed"}
+        return {
+            "dry_run": True,
+            "would_delete": n_failed + n_stranded,
+            "failed": n_failed,
+            "stranded": n_stranded,
+        }
+    swept = (
+        store.cleanup_stranded_debates(older_than_secs) if include_stranded else 0
+    )
     deleted = store.delete_debates_by_status("failed")
-    return {"dry_run": False, "deleted": deleted, "status": "failed"}
+    return {
+        "dry_run": False,
+        "deleted": deleted,
+        "stranded_swept": swept,
+        "status": "failed",
+    }
 
 
 @app.get("/api/debates/calendar")
