@@ -56,21 +56,40 @@ class RoleConfig:
         return f"{self.provider}:{self.model}"
 
 
+# Default model is gpt-5-mini for most roles (operator preference
+# 2026-06-10): one high-quality reasoning baseline keeps rate-limit
+# behavior predictable. Expensive high-volume screening roles use nano
+# where the task is intentionally narrow. Every default can still be
+# overridden with <ROLE>_MODEL / <ROLE>_PROVIDER or FINAGENT_DEFAULT_MODEL.
 _DEFAULTS: dict[str, tuple[str, str]] = {
     # Chat workflow.
     "intent_classifier": ("openai", "gpt-5-mini"),
-    "chat_planner": ("openai", "gpt-5"),
-    "chat_orchestrator": ("openai", "gpt-5"),
-    "chat_validator": ("openai", "gpt-5"),
+    "chat_planner": ("openai", "gpt-5-mini"),
+    "chat_orchestrator": ("openai", "gpt-5-mini"),
+    "chat_validator": ("openai", "gpt-5-mini"),
     "chat_question": ("openai", "gpt-5-mini"),
-    "chat_edit_planner": ("openai", "gpt-5"),
-    "chat_edit_orchestrator": ("openai", "gpt-5"),
+    "chat_edit_planner": ("openai", "gpt-5-mini"),
+    "chat_edit_orchestrator": ("openai", "gpt-5-mini"),
     # Recipe / template authoring.
-    "template_author": ("openai", "gpt-5"),
+    "template_author": ("openai", "gpt-5-mini"),
     # Audit + verdict layers.
     "bias_auditor": ("openai", "gpt-5-mini"),
-    # Paper-trading daily analyst rescue path.
-    "stock_analyst": ("openai", "gpt-5-mini"),
+    # Paper-trading daily per-ticker analyst (50 calls/day → keep cheap).
+    # This is the SOLE writer to the predictions table — the old batch
+    # portfolio_manager agent was removed; the Tauric-style multi-agent
+    # debate panel (finagent.agents.trading_panel) is the per-ticker
+    # methodology going forward. The role here drives the legacy
+    # single-call rescue path; the panel itself uses panel_* roles.
+    # Tiered-mode screener: one structured call per ticker × 50/day.
+    # nano is ~5× cheaper than mini and the task is "turn 6 lines of
+    # OHLC context into buy/sell/avoid" — spot-checked adequate.
+    # Override back via STOCK_ANALYST_MODEL=gpt-5-mini if quality drifts.
+    "stock_analyst": ("openai", "gpt-5-nano"),
+    # Event-probability forecaster: research stage does Exa-tool loops
+    # + base-rate judgement (mini); ensemble passes are cheap
+    # independent reads of a shared digest (nano × 3).
+    "forecaster": ("openai", "gpt-5-mini"),
+    "forecaster_pass": ("openai", "gpt-5-nano"),
     # Notebook-name suggester.
     "name_suggester": ("openai", "gpt-5-mini"),
     # Legacy debate roles.
@@ -78,7 +97,7 @@ _DEFAULTS: dict[str, tuple[str, str]] = {
     "debate_bear": ("openai", "gpt-5-mini"),
     "debate_moderator": ("openai", "gpt-5-mini"),
     # LangGraph trading panel roles.
-    "panel_analyst": ("openai", "gpt-5-mini"),
+    "panel_analyst": ("openai", "gpt-5-nano"),
     "panel_researcher": ("openai", "gpt-5-mini"),
     "panel_research_manager": ("openai", "gpt-5-mini"),
     "panel_trader": ("openai", "gpt-5-mini"),
@@ -310,6 +329,33 @@ def _extract_json_object(text: str) -> str:
     return cleaned
 
 
+def _panel_service_tier() -> str:
+    """OpenAI service tier for trading-panel calls."""
+    return os.environ.get("PANEL_SERVICE_TIER", "flex").strip().lower()
+
+
+def _apply_panel_openai_defaults(role: str, provider: str, kw: dict[str, Any]) -> None:
+    """Preserve panel cost/usage behavior in the shared model factory."""
+    if not role.startswith("panel_") or provider != "openai":
+        return
+
+    tier = _panel_service_tier()
+    if tier and tier != "default":
+        kw.setdefault("service_tier", tier)
+        kw.setdefault("timeout", 600)
+        kw.setdefault("max_retries", 5)
+
+    try:
+        from .agents.trading_panel.usage import usage_handler
+
+        callbacks = list(kw.get("callbacks") or [])
+        if usage_handler not in callbacks:
+            callbacks.append(usage_handler)
+        kw["callbacks"] = callbacks
+    except Exception:
+        logger.debug("could not attach panel usage handler", exc_info=True)
+
+
 def make_chat(spec: str, **kw: Any):
     """Construct a LangChain chat model from a provider/model spec."""
     provider, model = parse_model_spec(spec)
@@ -328,7 +374,9 @@ def make_chat(spec: str, **kw: Any):
 
 
 def make_chat_for_role(role: str, **kw: Any):
-    return make_chat(role_spec(role), **kw)
+    cfg = get_role(role)
+    _apply_panel_openai_defaults(role, cfg.provider, kw)
+    return make_chat(cfg.spec, **kw)
 
 
 async def ainvoke_text(

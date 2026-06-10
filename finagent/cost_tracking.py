@@ -39,6 +39,7 @@ _PRICING_USD_PER_1M: dict[str, tuple[float, float]] = {
     # gpt-5 is in beta as of this snapshot; pricing is best-known estimate
     "gpt-5": (5.000, 20.000),
     "gpt-5-mini": (0.250, 1.000),
+    "gpt-5-nano": (0.050, 0.400),
 }
 
 
@@ -54,11 +55,15 @@ def estimate_cost_usd(
     """
     rates = _PRICING_USD_PER_1M.get(model)
     if rates is None:
-        # Try a prefix match — handles dated suffixes like 'gpt-4o-mini-2024-07-18'.
+        # Prefix match for dated suffixes like 'gpt-5-mini-2025-08-07'.
+        # LONGEST prefix wins — iteration order would otherwise let
+        # 'gpt-5' shadow 'gpt-5-mini' and price mini/nano traffic at
+        # full gpt-5 rates (~35× overestimate, observed live).
+        best = ""
         for known, r in _PRICING_USD_PER_1M.items():
-            if model.startswith(known):
+            if model.startswith(known) and len(known) > len(best):
+                best = known
                 rates = r
-                break
     if rates is None:
         return 0.0
     in_rate, out_rate = rates

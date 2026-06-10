@@ -21,6 +21,8 @@ from .notebook_io import (
     _load_notebook,
     _make_cell,
     _save_notebook,
+    get_active_notebook_path,
+    set_active_notebook_path,
 )
 
 
@@ -36,10 +38,22 @@ def _apply_provenance(cell, dag_node_id: str, rationale: str) -> None:
 
 
 def create_notebook_impl():
-    """Create an empty notebook at the next-available outputs/notebook_N.ipynb path."""
+    """Create an empty notebook for this build, idempotently."""
     import sys
 
     from nbformat.v4 import new_notebook
+
+    # Idempotency guard: a build already has its notebook → return it.
+    active = get_active_notebook_path()
+    if active is not None and active.exists():
+        logging.info(f"TOOL CALL: create_notebook (idempotent no-op) {active}")
+        nb_existing = _load_notebook()
+        return {
+            "success": True,
+            "path": str(active),
+            "message": "Notebook already exists for this build",
+            "num_cells": len(nb_existing.cells),
+        }
 
     path = _get_latest_path()
     logging.info(f"TOOL CALL: create_notebook {path}")
@@ -56,6 +70,11 @@ def create_notebook_impl():
         "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
     }
     _save_notebook(nb, path)
+    # Pin this file as the active notebook so every subsequent add_cell /
+    # validate_run resolves to it — even though its name won't match the
+    # legacy notebook_N pattern. Without this, cell writes route to a stale
+    # numbered notebook in outputs/.
+    set_active_notebook_path(path)
     return {
         "success": True,
         "path": str(path),

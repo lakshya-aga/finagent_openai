@@ -405,6 +405,10 @@ async def run_daily_all_50(
     Sub-task failures are captured into the per-ticker recommendation's
     ``reasoning`` field with status='avoid' — the batch never raises.
     """
+    mode = os.environ.get("STOCK_ANALYST_MODE", "tiered").strip().lower()
+    if mode == "tiered":
+        return await _run_tiered(date, context_for=context_for)
+
     if concurrency is None:
         env_override = os.environ.get("STOCK_ANALYST_CONCURRENCY", "").strip()
         if env_override:
@@ -413,9 +417,7 @@ async def run_daily_all_50(
             except ValueError:
                 concurrency = None
         if concurrency is None:
-            mode = os.environ.get("STOCK_ANALYST_MODE", "panel").strip().lower()
             concurrency = 10 if mode == "panel" else 50
-    from finagent.paper_trading import predictions as ptp
     from finagent.paper_trading import universe
 
     context_for = context_for or _default_context_for
@@ -443,9 +445,15 @@ async def run_daily_all_50(
 
     await asyncio.gather(*(_one(t) for t in tickers))
 
-    # Persist + collect per-ticker outcomes so the admin response can
-    # surface exactly what happened without forcing the operator to
-    # ssh in and tail logs.
+    return _persist_results(date, results)
+
+
+def _persist_results(date: str, results: dict[str, StockRecommendation]) -> dict:
+    """Persist recommendations + build the admin summary. Shared by all
+    modes so the response shape stays identical regardless of how the
+    recommendations were produced."""
+    from finagent.paper_trading import predictions as ptp
+
     n_buy = n_sell = n_avoid = n_failed = n_persisted = 0
     persist_errors: list[dict] = []
     per_ticker: list[dict] = []
@@ -508,6 +516,170 @@ async def run_daily_all_50(
         "sample_per_ticker": (per_ticker[:10] if len(per_ticker) > 10 else per_ticker),
         "persist_errors": persist_errors[:10],
     }
+
+
+# ── Tiered mode (default): cheap screener → panel for the few ──────
+
+
+def _panel_min_conf() -> float:
+    """Screener confidence below which a non-avoid call does NOT earn a
+    panel run. 0.6 ≈ 'the cheap model actually has a view'."""
+    try:
+        return float(os.environ.get("STOCK_ANALYST_PANEL_MIN_CONF", "0.6"))
+    except ValueError:
+        return 0.6
+
+
+def _panel_max() -> int:
+    """Hard cap on panel runs per day (cost ceiling). Open-position
+    tickers are exempt — exit decisions always get the full debate."""
+    try:
+        return max(1, int(os.environ.get("STOCK_ANALYST_PANEL_MAX", "15")))
+    except ValueError:
+        return 15
+
+
+def _open_position_tickers() -> set[str]:
+    """Tickers with an open trade in either paper-trading book. These
+    ALWAYS get the full panel regardless of screener output — the cost
+    of a lazy exit decision dwarfs the cost of a panel run."""
+    try:
+        from finagent.paper_trading import STRATEGIES
+        from finagent.paper_trading import store as pt_store
+
+        out: set[str] = set()
+        for strategy in STRATEGIES:
+            for trade in pt_store.list_open_trades(strategy):
+                t = trade.get("ticker")
+                if t:
+                    out.add(t)
+        return out
+    except Exception:
+        logger.exception("stock_analyst: could not read open positions")
+        return set()
+
+
+async def _run_tiered(
+    date: str,
+    *,
+    context_for: Optional["callable"] = None,
+) -> dict:
+    """Two-pass daily run — the cost-structure default.
+
+    Pass 1 (screener): every Nifty 50 ticker through the cheap
+    single-call analyst (~$0.001 each). Most tickers most days are
+    'avoid'; they don't need a ten-call debate to say so.
+
+    Pass 2 (panel): the full multi-agent panel ONLY for
+      * screener conviction picks — action != avoid AND confidence ≥
+        STOCK_ANALYST_PANEL_MIN_CONF, ranked by confidence, capped at
+        STOCK_ANALYST_PANEL_MAX; plus
+      * every ticker with an open position in either book (always —
+        exit decisions deserve the debate, and the count is small).
+
+    Panel verdicts override screener calls; screener 'avoid's persist
+    as direction-0 predictions so the book still sees all 50 rows.
+    Cuts the daily run from ~50 panel runs (~$9) to ~10-18 (~$2-3.50)
+    while concentrating panel budget on tickers that matter.
+
+    Token usage for the batch is measured via the trading_panel usage
+    counter (before/after snapshot) and returned in the summary —
+    note the $ estimate ignores prompt-cache discounts, so the real
+    bill is at or below it.
+    """
+    from finagent.cost_tracking import estimate_cost_usd
+    from finagent.paper_trading import universe
+
+    from .trading_panel import usage as panel_usage
+
+    context_for = context_for or _default_context_for
+    tickers = universe.NIFTY50_TICKERS
+    usage_before = panel_usage.snapshot()
+
+    # ── Pass 1: screener on everything ───────────────────────────
+    screener: dict[str, StockRecommendation] = {}
+    sem = asyncio.Semaphore(25)
+
+    async def _screen(ticker: str) -> None:
+        async with sem:
+            try:
+                price, ctx = await context_for(ticker)
+            except Exception as e:
+                screener[ticker] = StockRecommendation(
+                    action="avoid",
+                    confidence=0.0,
+                    reasoning=f"context fetch failed: {type(e).__name__}",
+                )
+                return
+            screener[ticker] = await _analyse_via_single_call(
+                ticker, current_price=price, context=ctx
+            )
+
+    await asyncio.gather(*(_screen(t) for t in tickers))
+
+    # ── Select the panel set ─────────────────────────────────────
+    open_positions = _open_position_tickers() & set(tickers)
+    conviction = sorted(
+        (
+            (t, r)
+            for t, r in screener.items()
+            if r.action != "avoid" and r.confidence >= _panel_min_conf()
+        ),
+        key=lambda pair: pair[1].confidence,
+        reverse=True,
+    )
+    panel_set = set(t for t, _ in conviction[: _panel_max()]) | open_positions
+
+    logger.info(
+        "stock_analyst tiered %s: screened=%d conviction=%d open_positions=%d → panel=%d",
+        date,
+        len(screener),
+        len(conviction),
+        len(open_positions),
+        len(panel_set),
+    )
+
+    # ── Pass 2: panel on the few ─────────────────────────────────
+    panel_results: dict[str, StockRecommendation] = {}
+    panel_sem = asyncio.Semaphore(10)
+
+    async def _panel(ticker: str) -> None:
+        async with panel_sem:
+            rec = await _analyse_via_panel(ticker)
+            if rec is not None:
+                panel_results[ticker] = rec
+            # Panel hard-failure → keep the screener verdict rather
+            # than downgrading the ticker to an unexplained avoid.
+
+    await asyncio.gather(*(_panel(t) for t in panel_set))
+
+    final: dict[str, StockRecommendation] = dict(screener)
+    final.update(panel_results)
+
+    summary = _persist_results(date, final)
+    usage_delta = panel_usage.diff(usage_before, panel_usage.snapshot())
+    est_usd = sum(
+        estimate_cost_usd(m, v.get("input", 0), v.get("output", 0))
+        for m, v in usage_delta.items()
+    )
+    summary.update(
+        {
+            "mode": "tiered",
+            "n_screened": len(screener),
+            "n_panel": len(panel_set),
+            "panel_tickers": sorted(panel_set),
+            "n_panel_failed": len(panel_set) - len(panel_results),
+            "usage": usage_delta,
+            "est_cost_usd": round(est_usd, 4),
+        }
+    )
+    logger.info(
+        "stock_analyst tiered %s: usage=%s est_cost=$%.4f",
+        date,
+        usage_delta,
+        est_usd,
+    )
+    return summary
 
 
 async def _default_context_for(ticker: str) -> tuple[float, str]:

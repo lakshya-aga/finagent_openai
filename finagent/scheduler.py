@@ -1,4 +1,4 @@
-"""Paper-trading scheduler (stock_analyst @ 09:30 UTC + close-rebalance @ 10:00 UTC).
+"""Paper-trading scheduler (stock_analyst @ 08:30 UTC + close-rebalance @ 10:00 UTC).
 
 The legacy daily-5-Nifty-debate cron (02:00 UTC, rotating through 5
 tickers/day) was removed once the stock_analyst started panel-analysing
@@ -95,7 +95,7 @@ def start_scheduler() -> None:
     # CLOSE and carry overnight; the daily rebalance is the single
     # write surface. UTC times below; IST is UTC+5:30.
     #
-    #   09:30 UTC = 15:00 IST   Phase A: stock-analyst run for all 50
+    #   08:30 UTC = 14:00 IST   Phase A: tiered stock-analyst run —
     #                            Nifty tickers. 30 min before market
     #                            close so the analyst sees a near-full
     #                            session of price action and the
@@ -118,9 +118,16 @@ def start_scheduler() -> None:
     # the single rebalance routine subsumes all four. The intraday
     # replay still catches every SL/TP that fired during the day so
     # we lose no triple-barrier correctness.
+    # 08:30 UTC = 14:00 IST — moved back from 15:00 IST when the panel
+    # switched to OpenAI's flex service tier (50% cheaper, but slower
+    # and capacity-shedding under load). The extra hour guarantees the
+    # tiered run (screener on 50 + panel on ~10-18) finishes well
+    # before the 15:30 IST close-rebalance even on a bad flex day.
+    # Trade-off: verdicts see 60 fewer minutes of session — acceptable
+    # for a daily-horizon book.
     sch.add_job(
         run_daily_stock_analyses,
-        CronTrigger(hour=9, minute=30, timezone="UTC"),
+        CronTrigger(hour=8, minute=30, timezone="UTC"),
         id="paper_trading_daily_analyses",
         replace_existing=True,
         misfire_grace_time=1800,
@@ -137,7 +144,7 @@ def start_scheduler() -> None:
     _scheduler = sch
     logging.info(
         "scheduler: started — paper trading "
-        "(analyst 09:30 UTC / 15:00 IST, close-rebalance 10:00 UTC / 15:30 IST)",
+        "(analyst 08:30 UTC / 14:00 IST tiered, close-rebalance 10:00 UTC / 15:30 IST)",
     )
 
 

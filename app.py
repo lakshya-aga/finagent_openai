@@ -661,6 +661,185 @@ async def download_notebook_by_name(name: str):
     )
 
 
+# ─── Cleanup admin endpoints ──────────────────────────────────────────
+#
+# Before-demo housekeeping: prune notebooks that won't actually run so
+# the Notebooks listing isn't littered with empty / failed artifacts.
+#
+# Classification rules for a "broken" notebook:
+#   - empty: zero cells, OR only-empty-source cells
+#   - error: at least one code cell has an `error` output (ename present)
+#   - no_outputs: every code cell has empty outputs AND no execution_count
+#                 (i.e. it was never run successfully). Skipped if the
+#                 notebook has >= 1 markdown cell only — those are valid.
+#
+# Both endpoints move files to outputs/_quarantine/ rather than rm-ing
+# so a misclassification is recoverable. The operator can purge the
+# quarantine dir manually when satisfied.
+
+
+_QUARANTINE_DIR = (Path(__file__).parent / "outputs" / "_quarantine").resolve()
+
+
+def _classify_notebook_health(path: Path) -> dict:
+    """Return {status, reason, n_cells, n_errors, n_code, n_with_outputs}.
+
+    status is one of: "ok" / "empty" / "error" / "no_outputs" / "unreadable".
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            nb = json.load(f)
+    except Exception as e:
+        return {"status": "unreadable", "reason": f"{type(e).__name__}: {e}"}
+
+    cells = nb.get("cells") or []
+    n_cells = len(cells)
+    n_code = 0
+    n_errors = 0
+    n_with_outputs = 0
+    code_cells_non_empty = 0
+    for c in cells:
+        if not isinstance(c, dict):
+            continue
+        if c.get("cell_type") == "code":
+            n_code += 1
+            src = c.get("source") or ""
+            if isinstance(src, list):
+                src = "".join(src)
+            if src.strip():
+                code_cells_non_empty += 1
+            outs = c.get("outputs") or []
+            for o in outs:
+                if isinstance(o, dict):
+                    if o.get("output_type") == "error" or o.get("ename"):
+                        n_errors += 1
+            if outs:
+                n_with_outputs += 1
+
+    if n_cells == 0 or (n_code > 0 and code_cells_non_empty == 0):
+        return {
+            "status": "empty",
+            "reason": "no cells or every code cell has empty source",
+            "n_cells": n_cells,
+            "n_errors": 0,
+            "n_code": n_code,
+            "n_with_outputs": n_with_outputs,
+        }
+    if n_errors > 0:
+        return {
+            "status": "error",
+            "reason": f"{n_errors} error output(s) in code cells",
+            "n_cells": n_cells,
+            "n_errors": n_errors,
+            "n_code": n_code,
+            "n_with_outputs": n_with_outputs,
+        }
+    if n_code > 0 and n_with_outputs == 0:
+        return {
+            "status": "no_outputs",
+            "reason": "code cells exist but none were executed",
+            "n_cells": n_cells,
+            "n_errors": 0,
+            "n_code": n_code,
+            "n_with_outputs": 0,
+        }
+    return {
+        "status": "ok",
+        "reason": "",
+        "n_cells": n_cells,
+        "n_errors": 0,
+        "n_code": n_code,
+        "n_with_outputs": n_with_outputs,
+    }
+
+
+@app.delete("/api/notebooks/{name}")
+async def delete_notebook(name: str):
+    """Move a single notebook into outputs/_quarantine/. Recoverable —
+    use shell to permanently delete from quarantine once satisfied."""
+    path = _safe_notebook_path(name)
+    _QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _QUARANTINE_DIR / path.name
+    # If the same filename was quarantined before, append a counter.
+    if dest.exists():
+        i = 2
+        while True:
+            cand = _QUARANTINE_DIR / f"{path.stem}__qd{i}.ipynb"
+            if not cand.exists():
+                dest = cand
+                break
+            i += 1
+    path.rename(dest)
+    return {"ok": True, "quarantined": str(dest), "original": str(path)}
+
+
+@app.post("/api/notebooks/cleanup-errors")
+async def cleanup_error_notebooks(
+    dry_run: bool = True,
+    include_no_outputs: bool = True,
+    include_empty: bool = True,
+):
+    """Bulk-quarantine notebooks classified as broken.
+
+    ``dry_run=True`` (default) returns the candidate list WITHOUT moving
+    anything — preview before destructive action. Call again with
+    ``dry_run=false`` to actually move them.
+
+    ``include_no_outputs`` quarantines notebooks where code cells exist
+    but none were executed (typical for a build phase that ran but the
+    validator didn't get to). Set False if you want to keep dry shells.
+
+    ``include_empty`` quarantines zero-cell / all-empty-source notebooks.
+    """
+    if not _OUTPUTS_DIR.exists():
+        return {"ok": True, "dry_run": dry_run, "candidates": [], "moved": []}
+
+    candidates: list[dict] = []
+    for p in sorted(_OUTPUTS_DIR.glob("*.ipynb")):
+        verdict = _classify_notebook_health(p)
+        status = verdict["status"]
+        if status == "ok":
+            continue
+        if status == "error":
+            candidates.append({"name": p.name, **verdict})
+        elif status == "empty" and include_empty:
+            candidates.append({"name": p.name, **verdict})
+        elif status == "no_outputs" and include_no_outputs:
+            candidates.append({"name": p.name, **verdict})
+        elif status == "unreadable":
+            candidates.append({"name": p.name, **verdict})
+
+    moved: list[dict] = []
+    if not dry_run and candidates:
+        _QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+        for c in candidates:
+            src = _OUTPUTS_DIR / c["name"]
+            dest = _QUARANTINE_DIR / c["name"]
+            if dest.exists():
+                i = 2
+                while True:
+                    cand = _QUARANTINE_DIR / f"{src.stem}__qd{i}.ipynb"
+                    if not cand.exists():
+                        dest = cand
+                        break
+                    i += 1
+            try:
+                src.rename(dest)
+                moved.append({"name": c["name"], "quarantined": str(dest)})
+            except Exception as e:
+                logging.exception("cleanup_error_notebooks: rename failed for %s", c["name"])
+                moved.append({"name": c["name"], "error": f"{type(e).__name__}: {e}"})
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "n_candidates": len(candidates),
+        "candidates": candidates,
+        "moved": moved,
+        "quarantine_dir": str(_QUARANTINE_DIR),
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Recipes / Projects / Runs.
 #
@@ -752,6 +931,14 @@ class _DebateSubmission(BaseModel):
     ticker: str
     asset_class: str = "us_equity"
     rounds: int = 2
+    # Requesting account (email) — injected by the synapse proxy from the
+    # NextAuth session, NOT trusted from raw client input on the public
+    # surface. Drives ownership + credit charging.
+    owner: Optional[str] = None
+    # fresh=True bypasses the same-day cache and always burns a new
+    # panel run (and a credit). Default False: a completed analysis of
+    # the same ticker today is served free.
+    fresh: bool = False
 
 
 # ── Signals (Phase 4 dashboard) ────────────────────────────────────────
@@ -1248,6 +1435,218 @@ async def patch_signal_status_route(name: str, body: _SignalStatusBody):
     return {"ok": True, "name": name, "status": body.status}
 
 
+# ── Credits (ticker-analyser monetisation) ────────────────────────────
+#
+# Accounts are keyed by the normalised email the synapse proxy injects
+# from the NextAuth session. The web tier is the auth boundary — these
+# endpoints trust their caller, so synapse must only proxy `ensure` and
+# the balance GET for the *logged-in* user, and must NOT proxy `grant`
+# publicly at all (operator/Stripe-webhook surface only).
+
+
+class _CreditsEnsureBody(BaseModel):
+    user_id: str
+
+
+@app.post("/api/credits/ensure")
+async def credits_ensure(body: _CreditsEnsureBody):
+    """Idempotent account bootstrap — call on every login. First call
+    creates the account + grants the signup bonus; later calls just
+    return the balance."""
+    from finagent import credits as credits_mod
+
+    try:
+        out = credits_mod.ensure_account(body.user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    out["cost_per_analysis"] = credits_mod.cost_per_analysis()
+    out["enforcement"] = credits_mod.enforcement_enabled()
+    return out
+
+
+@app.get("/api/credits/{user_id}")
+async def credits_balance(user_id: str, history: int = 10):
+    """Balance + recent ledger for one account. The ledger answers
+    'where did my credits go?' without a support ticket."""
+    from finagent import credits as credits_mod
+
+    uid = credits_mod.normalize_user_id(user_id)
+    return {
+        "user_id": uid,
+        "balance": credits_mod.get_balance(uid),
+        "cost_per_analysis": credits_mod.cost_per_analysis(),
+        "enforcement": credits_mod.enforcement_enabled(),
+        "history": credits_mod.history(uid, limit=history),
+    }
+
+
+class _CreditsGrantBody(BaseModel):
+    user_id: str
+    amount: int
+    reason: str = "manual_grant"
+    ref_id: Optional[str] = None
+
+
+@app.post("/api/credits/grant")
+async def credits_grant(body: _CreditsGrantBody):
+    """ADMIN/WEBHOOK ONLY — add credits (purchase fulfilment, promo,
+    support goodwill). Never expose through the public proxy; the
+    Stripe/Razorpay webhook handler and the operator are the only
+    legitimate callers."""
+    from finagent import credits as credits_mod
+
+    try:
+        balance = credits_mod.grant(
+            body.user_id, body.amount, body.reason, ref_id=body.ref_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "user_id": credits_mod.normalize_user_id(body.user_id),
+        "balance": balance,
+    }
+
+
+# ── Event-probability forecasts (Exa-grounded) ────────────────────────
+
+
+class _ForecastSubmission(BaseModel):
+    question: str
+    # Injected server-side by the synapse proxy from the session —
+    # same trust model as debates.
+    owner: Optional[str] = None
+
+
+@app.post("/api/forecasts")
+async def start_forecast(req: _ForecastSubmission):
+    """Forecast an event's probability and stream progress as SSE.
+
+    Pipeline: Exa-grounded research (base rates + latest developments)
+    → 3-pass forecast ensemble → median probability with spread +
+    reasoning + evidence. Result persists with status='open' so the
+    future calibration harness can Brier-score it once resolved.
+
+    Credit semantics mirror debates: charge one analysis up front when
+    an owner is present, refund on failure OR on a non-forecastable
+    question (a rejection shouldn't bill).
+    """
+    from finagent import credits as credits_mod
+    from finagent import forecasts as forecasts_store
+    from finagent.agents.forecaster import run_forecast
+    from finagent.exa import exa_available
+
+    question = (req.question or "").strip()
+    if not question or len(question) > 500:
+        raise HTTPException(
+            status_code=400, detail="question must be 1-500 characters"
+        )
+    if not exa_available():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "exa_not_configured",
+                "hint": "Operator must set EXA_API_KEY in deployment secrets.",
+            },
+        )
+
+    owner = credits_mod.normalize_user_id(req.owner or "") or None
+    cost = credits_mod.cost_per_analysis()
+    charged = False
+    if owner:
+        charged, balance = credits_mod.charge(owner, cost, "forecast")
+        if not charged and credits_mod.enforcement_enabled():
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": "insufficient_credits",
+                    "balance": balance,
+                    "cost": cost,
+                },
+            )
+    elif credits_mod.enforcement_enabled():
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "owner_required", "hint": "sign in to run forecasts"},
+        )
+
+    queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
+
+    async def _refund_if_charged() -> None:
+        if charged and owner:
+            try:
+                credits_mod.refund(owner, cost)
+            except Exception:
+                logging.exception("forecast: refund failed for %s", owner)
+
+    async def _runner():
+        try:
+            await queue.put(
+                {"type": "phase", "phase": "research", "state": "start"}
+            )
+            result = await run_forecast(question)
+            await queue.put({"type": "phase", "phase": "research", "state": "end"})
+
+            if not result.get("forecastable"):
+                await _refund_if_charged()
+                await queue.put(
+                    {"type": "not_forecastable", "reason": result.get("reason", "")}
+                )
+                return
+
+            fid = forecasts_store.save_forecast(result, owner=owner)
+            result["id"] = fid
+            await queue.put({"type": "forecast", "data": result})
+        except Exception as exc:
+            logging.exception("forecast crashed for %r", question[:80])
+            await _refund_if_charged()
+            await queue.put(
+                {"type": "error", "text": f"{type(exc).__name__}: {exc}"}
+            )
+        finally:
+            await queue.put(None)
+
+    asyncio.create_task(_runner())
+
+    async def _stream():
+        yield f"data: {json.dumps({'type': 'started', 'question': question})}\n\n"
+        while True:
+            evt = await queue.get()
+            if evt is None:
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+            try:
+                yield f"data: {json.dumps(evt, default=str)}\n\n"
+            except Exception:
+                continue
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/forecasts")
+async def list_forecasts_route(
+    owner: Optional[str] = None, limit: int = 50, offset: int = 0
+):
+    from finagent import credits as credits_mod
+    from finagent import forecasts as forecasts_store
+
+    owner_norm = credits_mod.normalize_user_id(owner or "") or None
+    return {
+        "forecasts": forecasts_store.list_forecasts(
+            owner=owner_norm, limit=limit, offset=offset
+        )
+    }
+
+
+@app.get("/api/forecasts/{forecast_id}")
+async def get_forecast_route(forecast_id: str):
+    from finagent import forecasts as forecasts_store
+
+    f = forecasts_store.get_forecast(forecast_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="forecast not found")
+    return f
+
+
 @app.post("/api/debates")
 async def start_debate(req: _DebateSubmission):
     """Kick off a bull/bear/moderator debate and stream events as SSE.
@@ -1262,15 +1661,75 @@ async def start_debate(req: _DebateSubmission):
     The debate is also persisted on the debates table so the frontend
     can re-render it after the stream closes.
     """
+    from finagent import credits as credits_mod
     from finagent.debate import run_debate
     from finagent.experiments import get_store
 
     store = get_store()
     rounds = max(1, min(4, int(req.rounds)))
+    ticker = req.ticker.strip().upper()[:32]
+    asset_class = (req.asset_class or "us_equity").strip().lower()[:32]
+    owner = credits_mod.normalize_user_id(req.owner or "") or None
+
+    # ── Same-day cache: identical analysis, zero marginal cost ──────
+    # An analysis of a ticker on a given day is the same for every
+    # user (nothing personalised), so a completed run from ANY
+    # requester — including the daily cron — satisfies this request
+    # free. fresh=True opts out and burns a credit for a new run.
+    if not req.fresh:
+        cached = store.find_cached_debate(
+            ticker=ticker, asset_class=asset_class, min_rounds=rounds
+        )
+        if cached is not None:
+
+            async def _cached_stream():
+                yield (
+                    f"data: {json.dumps({'type': 'started', 'debate_id': cached.id, 'ticker': cached.ticker, 'asset_class': cached.asset_class, 'rounds': cached.rounds, 'cached': True})}\n\n"
+                )
+                v = cached.verdict()
+                if v:
+                    yield f"data: {json.dumps({'type': 'verdict', 'data': v}, default=str)}\n\n"
+                yield (
+                    f"data: {json.dumps({'type': 'done', 'debate_id': cached.id, 'cached': True})}\n\n"
+                )
+
+            return StreamingResponse(_cached_stream(), media_type="text/event-stream")
+
+    # ── Credit charge for a fresh run ────────────────────────────────
+    # Charged up front (refunded if the run fails). While
+    # CREDITS_ENFORCEMENT is off, a failed charge logs + proceeds so
+    # the schema can ship ahead of the paywall; once it's on, an
+    # uncovered run is refused with 402.
+    cost = credits_mod.cost_per_analysis()
+    charged = False
+    if owner:
+        charged, balance = credits_mod.charge(owner, cost, f"analysis:{ticker}")
+        if not charged and credits_mod.enforcement_enabled():
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": "insufficient_credits",
+                    "balance": balance,
+                    "cost": cost,
+                },
+            )
+        if not charged:
+            logging.info(
+                "credits: unbilled run for %s (balance=%d, enforcement off)",
+                owner,
+                balance,
+            )
+    elif credits_mod.enforcement_enabled():
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "owner_required", "hint": "sign in to run analyses"},
+        )
+
     debate = store.create_debate(
-        ticker=req.ticker.strip().upper()[:32],
-        asset_class=(req.asset_class or "us_equity").strip().lower()[:32],
+        ticker=ticker,
+        asset_class=asset_class,
         rounds=rounds,
+        owner=owner,
     )
 
     queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
@@ -1309,6 +1768,14 @@ async def start_debate(req: _DebateSubmission):
                 error=str(exc),
                 finished=True,
             )
+            # A failed run must not consume the user's credit — refund
+            # what we charged up front. Best-effort: a refund failure is
+            # logged, never raised (the stream still has to close).
+            if charged and owner:
+                try:
+                    credits_mod.refund(owner, cost, ref_id=debate.id)
+                except Exception:
+                    logging.exception("credits: refund failed for %s", debate.id)
         finally:
             await queue.put(None)  # sentinel: stream done
 
@@ -1355,17 +1822,23 @@ async def list_debates(
     ticker: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    owner: Optional[str] = None,
 ):
     """Paginated debates list. ``total`` lets the UI render
     'X of Y' counters and decide whether the Load More button still
-    has more rows to fetch."""
+    has more rows to fetch. ``owner`` scopes to one account's
+    analyses (per-user history in the productised analyser)."""
+    from finagent import credits as credits_mod
     from finagent.experiments import get_store
 
     store = get_store()
     limit = max(1, min(200, int(limit)))
     offset = max(0, min(2000, int(offset)))
-    debates = store.list_debates(ticker=ticker, limit=limit, offset=offset)
-    total = store.count_debates(ticker=ticker)
+    owner_norm = credits_mod.normalize_user_id(owner or "") or None
+    debates = store.list_debates(
+        ticker=ticker, limit=limit, offset=offset, owner=owner_norm
+    )
+    total = store.count_debates(ticker=ticker, owner=owner_norm)
     return {
         "debates": [d.as_public_dict() for d in debates],
         "limit": limit,
@@ -1385,6 +1858,48 @@ async def cleanup_stranded_debates(older_than_secs: int = 1800):
 
     n = get_store().cleanup_stranded_debates(older_than_secs=older_than_secs)
     return {"rows_marked_failed": n, "older_than_secs": older_than_secs}
+
+
+@app.post("/api/debates/cleanup-failed")
+async def cleanup_failed_debates(
+    dry_run: bool = False,
+    include_stranded: bool = True,
+    older_than_secs: int = 1800,
+):
+    """Admin: clear every dead run from history in one call.
+
+    Two kinds of corpses, both handled here so the UI needs one button:
+      * status='failed'  — runs that errored (rate limits, model errors)
+      * stuck queued/running older than ``older_than_secs`` — runs whose
+        lifecycle never completed (exhausted API quota mid-batch, process
+        crash, deploy churn). With ``include_stranded`` (default) these
+        are first marked failed, then deleted with the rest.
+
+    ``dry_run=true`` previews both counts without touching anything."""
+    from finagent.experiments import get_store
+
+    store = get_store()
+    n_failed = store.count_debates_by_status("failed")
+    n_stranded = (
+        store.count_stranded_debates(older_than_secs) if include_stranded else 0
+    )
+    if dry_run:
+        return {
+            "dry_run": True,
+            "would_delete": n_failed + n_stranded,
+            "failed": n_failed,
+            "stranded": n_stranded,
+        }
+    swept = (
+        store.cleanup_stranded_debates(older_than_secs) if include_stranded else 0
+    )
+    deleted = store.delete_debates_by_status("failed")
+    return {
+        "dry_run": False,
+        "deleted": deleted,
+        "stranded_swept": swept,
+        "status": "failed",
+    }
 
 
 @app.get("/api/debates/calendar")

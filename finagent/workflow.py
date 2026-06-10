@@ -25,7 +25,7 @@ from .agents import (
 from .agents.edit_planner import EDIT_PLANNER_INSTRUCTIONS
 from .agents.question import answer_question
 from .functions import extract_trace_markdown
-from .functions.notebook_io import _get_current_path
+from .functions.notebook_io import _get_current_path, set_active_notebook_path
 from .hooks import StreamingHooks, build_notebook_outline, emit_phase
 from .langchain_runner import run_tool_loop
 from .langchain_tools import (
@@ -786,6 +786,10 @@ async def _run_agents_workflow(
 
         # ── EDIT MODE ────────────────────────────────────────────────────────
         if intent == "edit" and existing_notebook_path:
+            # Pin the file being edited so every cell tool (read_notebook /
+            # replace_cell / validate_run / …) resolves to it rather than the
+            # mtime-newest notebook in outputs/.
+            set_active_notebook_path(existing_notebook_path)
             with open(existing_notebook_path, "r", encoding="utf-8") as _nb_f:
                 nb = nbformat.read(_nb_f, as_version=4)
             nb_summary_lines = []

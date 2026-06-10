@@ -208,6 +208,11 @@ class Debate:
     # output, call_id, ts}. Lets the detail page show the user exactly
     # which articles/fundamentals/forecasts each side cited.
     evidence_json: str = "[]"
+    # Account that requested this analysis (normalised email from the
+    # web tier). None for system runs (daily cron) and legacy rows.
+    # Drives per-user history + credit charging; system runs with
+    # owner=None double as the shared cache/free-tier inventory.
+    owner: Optional[str] = None
 
     def transcript(self) -> list[dict[str, Any]]:
         try:
@@ -359,7 +364,9 @@ CREATE TABLE IF NOT EXISTS debates (
     source          TEXT NOT NULL DEFAULT 'user',  -- 'user' | 'scheduled'
     -- Tool-call evidence trail captured from each agent's RunResult.
     -- See debate.py::_extract_tool_evidence for the record shape.
-    evidence_json   TEXT NOT NULL DEFAULT '[]'
+    evidence_json   TEXT NOT NULL DEFAULT '[]',
+    -- Requesting account (normalised email); NULL = system/legacy.
+    owner           TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_debates_started ON debates(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_debates_ticker  ON debates(ticker);
@@ -421,6 +428,7 @@ CREATE INDEX IF NOT EXISTS idx_signal_versions_inserted ON signal_versions(inser
 _SCHEMA_POST_MIGRATE = """
 CREATE INDEX IF NOT EXISTS idx_runs_search    ON runs(search_id);
 CREATE INDEX IF NOT EXISTS idx_debates_source ON debates(source);
+CREATE INDEX IF NOT EXISTS idx_debates_owner  ON debates(owner);
 """
 
 
@@ -464,6 +472,8 @@ class ExperimentStore:
             conn.execute(
                 "ALTER TABLE debates ADD COLUMN evidence_json TEXT NOT NULL DEFAULT '[]'"
             )
+        if existing_dbates and "owner" not in existing_dbates:
+            conn.execute("ALTER TABLE debates ADD COLUMN owner TEXT")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -716,6 +726,7 @@ class ExperimentStore:
         asset_class: str,
         rounds: int,
         source: str = "user",
+        owner: Optional[str] = None,
     ) -> Debate:
         debate_id = uuid.uuid4().hex[:16]
         now = time.time()
@@ -731,13 +742,14 @@ class ExperimentStore:
             verdict_json=None,
             error=None,
             source=source,
+            owner=owner,
         )
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO debates (id, ticker, asset_class, rounds, status, "
-                "started_at, transcript_json, source) "
-                "VALUES (?, ?, ?, ?, ?, ?, '[]', ?)",
-                (debate_id, ticker, asset_class, rounds, "queued", now, source),
+                "started_at, transcript_json, source, owner) "
+                "VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?)",
+                (debate_id, ticker, asset_class, rounds, "queued", now, source, owner),
             )
         return d
 
@@ -790,18 +802,29 @@ class ExperimentStore:
         ticker: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        owner: Optional[str] = None,
     ) -> list[Debate]:
         """List debates newest-first, with offset-based pagination.
+
+        ``owner`` filters to one account's analyses (per-user history
+        in the productised analyser). None keeps the legacy behaviour
+        of listing everything — internal dashboards rely on that.
 
         ``limit + offset`` is clamped to 2000 so a single call can
         never scan more than ~2000 rows — keeps the API endpoint
         cheap even under abuse.
         """
         sql = "SELECT * FROM debates"
+        where: list[str] = []
         args: list[Any] = []
         if ticker:
-            sql += " WHERE ticker = ?"
+            where.append("ticker = ?")
             args.append(ticker)
+        if owner:
+            where.append("owner = ?")
+            args.append(owner)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         # Clamp + sanitise.
         limit = max(1, min(int(limit), 500))
         offset = max(0, min(int(offset), 2000))
@@ -811,17 +834,73 @@ class ExperimentStore:
             rows = conn.execute(sql, args).fetchall()
         return [_row_to_debate(r) for r in rows]
 
-    def count_debates(self, ticker: Optional[str] = None) -> int:
+    def find_cached_debate(
+        self,
+        *,
+        ticker: str,
+        asset_class: str,
+        min_rounds: int = 1,
+        since: Optional[float] = None,
+    ) -> Optional[Debate]:
+        """Newest COMPLETED analysis of ``ticker`` since ``since``
+        (default: midnight UTC today) — the cache hit that lets a
+        second request for the same ticker on the same day be served
+        free instead of burning another panel run.
+
+        Ownership is deliberately ignored: an analysis of a ticker on a
+        given day is identical for every user (nothing personalised),
+        so any completed run — including the daily cron's — can serve
+        any requester. ``min_rounds`` lets a deep (2-round) cached run
+        satisfy a standard request, but never the reverse.
+        """
+        if since is None:
+            now = time.gmtime()
+            since = time.mktime(
+                (now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, 0)
+            ) - time.timezone
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM debates WHERE ticker = ? AND asset_class = ? "
+                "AND status = 'completed' AND rounds >= ? AND started_at >= ? "
+                "ORDER BY started_at DESC LIMIT 1",
+                (ticker, asset_class, int(min_rounds), float(since)),
+            ).fetchone()
+        return _row_to_debate(row) if row else None
+
+    def count_debates(
+        self, ticker: Optional[str] = None, owner: Optional[str] = None
+    ) -> int:
         """Total row count — used by the UI to show 'X of Y total' and
-        decide whether the Load More button should still render."""
+        decide whether the Load More button should still render.
+        Filters mirror ``list_debates`` so pagination math stays true."""
         sql = "SELECT COUNT(*) FROM debates"
+        where: list[str] = []
         args: list[Any] = []
         if ticker:
-            sql += " WHERE ticker = ?"
+            where.append("ticker = ?")
             args.append(ticker)
+        if owner:
+            where.append("owner = ?")
+            args.append(owner)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         with self._conn() as conn:
             (count,) = conn.execute(sql, args).fetchone()
         return int(count)
+
+    def count_stranded_debates(self, older_than_secs: int = 1800) -> int:
+        """How many queued/running rows are older than the cutoff —
+        i.e. dead runs whose lifecycle never completed (process crash,
+        exhausted API quota mid-batch, deploy churn). Used by the
+        cleanup endpoint's dry-run preview."""
+        cutoff = time.time() - max(60, int(older_than_secs))
+        with self._conn() as conn:
+            (n,) = conn.execute(
+                "SELECT COUNT(*) FROM debates "
+                "WHERE status IN ('queued', 'running') AND started_at < ?",
+                (cutoff,),
+            ).fetchone()
+        return int(n)
 
     def cleanup_stranded_debates(self, older_than_secs: int = 1800) -> int:
         """Mark queued/running debates older than ``older_than_secs``
@@ -854,6 +933,23 @@ class ExperimentStore:
     def delete_debate(self, debate_id: str) -> None:
         with self._conn() as conn:
             conn.execute("DELETE FROM debates WHERE id = ?", (debate_id,))
+
+    def count_debates_by_status(self, status: str) -> int:
+        with self._conn() as conn:
+            (n,) = conn.execute(
+                "SELECT COUNT(*) FROM debates WHERE status = ?", (status,)
+            ).fetchone()
+        return int(n)
+
+    def delete_debates_by_status(self, status: str) -> int:
+        """Hard-delete every debate row with the given status. Returns the
+        number of rows removed. Used to clear failed ticker runs from the
+        Past Debates history (e.g. rate-limit / model-error failures)."""
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM debates WHERE status = ?", (status,)
+            )
+            return cursor.rowcount
 
     # ── tags (existing) ──────────────────────────────────────────────
 
@@ -1134,6 +1230,7 @@ def _row_to_debate(row: sqlite3.Row) -> Debate:
         source=(row["source"] if "source" in keys else "user") or "user",
         evidence_json=(row["evidence_json"] if "evidence_json" in keys else "[]")
         or "[]",
+        owner=(row["owner"] if "owner" in keys else None),
     )
 
 

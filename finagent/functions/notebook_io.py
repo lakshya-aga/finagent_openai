@@ -26,13 +26,49 @@ _OUTPUTS_DIR = Path(__file__).resolve().parents[2] / "outputs"
 # suffix. Cleared after one read so a subsequent run uses fresh state.
 _NEXT_NOTEBOOK_BASE: str | None = None
 
+# The notebook the agent is currently building/editing. Set by
+# ``create_notebook`` (and ``set_active_notebook_path``) so that every
+# subsequent cell-tool call (add_cell / replace_cell / validate_run / …)
+# operates on the SAME file — even when its name doesn't match the legacy
+# ``notebook_N`` pattern.
+#
+# Why this exists: ``_get_current_path`` used to return the highest
+# ``notebook_N.ipynb`` by integer index. Once notebooks got human-readable
+# names (``<slug>__<timestamp>.ipynb``), those names parse to index -1 and
+# were IGNORED — so a fresh build that created ``my-strategy__….ipynb`` would
+# have every add_cell silently write into a leftover ``notebook_6.ipynb``
+# instead. This pointer pins the active file for the whole build.
+_ACTIVE_NOTEBOOK_PATH: "Path | None" = None
+
 
 def set_next_notebook_name(base_name: str | None) -> None:
     """Workflow-level hint for the next ``create_notebook`` call. Pass a
     kebab-case base (e.g. ``cross-sector-momentum-v1``); the path helper
-    appends ``__YYYYMMDD-HHMMSS`` automatically. Pass ``None`` to clear."""
-    global _NEXT_NOTEBOOK_BASE
+    appends ``__YYYYMMDD-HHMMSS`` automatically. Pass ``None`` to clear.
+
+    Also clears the active-notebook pointer: calling this signals that a
+    fresh build is starting, so any active pointer left over from a prior
+    build in the same process must not leak into this one (otherwise the
+    idempotency guard in ``create_notebook`` would return the OLD notebook)."""
+    global _NEXT_NOTEBOOK_BASE, _ACTIVE_NOTEBOOK_PATH
     _NEXT_NOTEBOOK_BASE = base_name
+    _ACTIVE_NOTEBOOK_PATH = None
+
+
+def get_active_notebook_path() -> "Path | None":
+    """The notebook pinned for the current build, or None."""
+    return _ACTIVE_NOTEBOOK_PATH
+
+
+def set_active_notebook_path(path: "Path | str | None") -> None:
+    """Pin the notebook every subsequent cell-tool call resolves to.
+
+    ``create_notebook`` calls this with the file it just created so the
+    orchestrator's ``add_cell`` calls land in the right place. Editing an
+    existing notebook (edit flow) can also call this with the target path.
+    Pass ``None`` to clear and fall back to mtime resolution."""
+    global _ACTIVE_NOTEBOOK_PATH
+    _ACTIVE_NOTEBOOK_PATH = Path(path) if path is not None else None
 
 
 def _path_for_named(base_name: str, when: datetime | None = None) -> Path:
@@ -142,28 +178,32 @@ def _notebook_index(name: str) -> int:
 
 
 def _get_current_path() -> Path:
-    """Return the highest-numbered notebook_N.ipynb in outputs/.
+    """Return the notebook the agent is currently working on.
 
-    Lexicographic sorting is wrong here: ``notebook_10.ipynb`` < ``notebook_2.ipynb``
-    on string comparison would route every cell-tool call to the older file
-    once the workflow generates its 10th notebook. Sort by the integer stem
-    instead so the "current" notebook tracks the freshest run.
+    Resolution order:
+      1. ``_ACTIVE_NOTEBOOK_PATH`` — the file ``create_notebook`` (or the
+         edit flow) pinned for this build. This is authoritative and is the
+         fix for the named-notebook routing bug: a build that created
+         ``my-strategy__20260609-161526.ipynb`` must keep writing there, not
+         silently fall through to a leftover ``notebook_6.ipynb``.
+      2. Newest ``.ipynb`` by mtime — covers manual runs that bypass the
+         chat flow (no active pointer set) and legacy ``notebook_N`` files.
+         mtime is correct regardless of naming scheme, so it handles both
+         ``notebook_N`` and ``<slug>__<timestamp>`` files uniformly.
+
+    The previous implementation preferred the highest ``notebook_N`` integer,
+    which IGNORED human-readable names (they parse to index -1) and routed
+    cell writes into stale numbered notebooks.
     """
-    candidates = [
-        f
-        for f in os.listdir(_OUTPUTS_DIR)
-        if f.endswith(".ipynb") and _notebook_index(f) >= 0
-    ]
-    if not candidates:
-        # Fall back to "any .ipynb" by mtime if nothing matches the
-        # notebook_N convention — protects against custom-named uploads.
-        any_ipynb = [f for f in os.listdir(_OUTPUTS_DIR) if f.endswith(".ipynb")]
-        if not any_ipynb:
-            raise FileNotFoundError(f"No notebooks found in {_OUTPUTS_DIR}")
-        any_ipynb.sort(key=lambda f: (_OUTPUTS_DIR / f).stat().st_mtime)
-        return _OUTPUTS_DIR / any_ipynb[-1]
-    candidates.sort(key=_notebook_index)
-    return _OUTPUTS_DIR / candidates[-1]
+    global _ACTIVE_NOTEBOOK_PATH
+    if _ACTIVE_NOTEBOOK_PATH is not None and _ACTIVE_NOTEBOOK_PATH.exists():
+        return _ACTIVE_NOTEBOOK_PATH
+
+    any_ipynb = [f for f in os.listdir(_OUTPUTS_DIR) if f.endswith(".ipynb")]
+    if not any_ipynb:
+        raise FileNotFoundError(f"No notebooks found in {_OUTPUTS_DIR}")
+    any_ipynb.sort(key=lambda f: (_OUTPUTS_DIR / f).stat().st_mtime)
+    return _OUTPUTS_DIR / any_ipynb[-1]
 
 
 def _ensure_parent_dir(path) -> None:
