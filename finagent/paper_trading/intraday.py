@@ -765,6 +765,16 @@ class RebalanceReport:
     closed_for_direction_change: int
     opened_at_close: int
     n_open_positions: int
+    # Quote-source health for this run. ``opens_requested`` is how many
+    # fresh positions today's predictions asked us to open;
+    # ``opens_skipped_no_price`` is how many we had to drop because the
+    # quote source returned no close price for them. ``quote_source_ok``
+    # is False when we wanted to open positions but got a usable price
+    # for NONE of them — the signature of a quote-source outage that
+    # silently leaves the book flat for the day.
+    opens_requested: int = 0
+    opens_skipped_no_price: int = 0
+    quote_source_ok: bool = True
 
 
 async def rebalance_at_close(
@@ -901,9 +911,12 @@ async def rebalance_at_close(
         )
 
     # ── 6. Open new trades at today's CLOSE (the key behaviour shift)
+    opens_requested = len(to_open)
     opened_at_close = 0
+    opens_skipped_no_price = 0
     for ticker in to_open:
         if ticker not in close_prices:
+            opens_skipped_no_price += 1
             logger.warning(
                 "paper_trading.rebalance: no close price for %s — skipping open", ticker
             )
@@ -1006,14 +1019,34 @@ async def rebalance_at_close(
         }
     )
 
+    # Quote-source outage signature: today's predictions wanted fresh
+    # positions but we got a usable close price for NONE of them, so the
+    # book is being left flat for the day. Silently skipping each open
+    # (above) makes this look like "the analyst just said avoid on
+    # everything" on the dashboard. Surface it loudly so the cron's
+    # health entry + the operator can tell the two apart.
+    quote_source_ok = not (opens_requested > 0 and opened_at_close == 0)
+    if not quote_source_ok:
+        logger.error(
+            "paper_trading.rebalance(%s, %s): quote source returned NO usable "
+            "close price for any of the %d ticker(s) to open — book left FLAT "
+            "for the day (opens_skipped_no_price=%d). Check the GROWW/yfinance "
+            "quote source (/api/health → quote_source_resolved).",
+            date,
+            strategy,
+            opens_requested,
+            opens_skipped_no_price,
+        )
+
     logger.info(
         "paper_trading.rebalance(%s, %s) — equity=₹%.2f daily_pnl=₹%+.2f "
-        "opened=%d closed_dir=%d triggered=(tp:%d sl:%d) open=%d costs=₹%.2f",
+        "opened=%d/%d closed_dir=%d triggered=(tp:%d sl:%d) open=%d costs=₹%.2f",
         date,
         strategy,
         equity_today,
         daily_pnl,
         opened_at_close,
+        opens_requested,
         closed_dir,
         replay_report.triggered_target,
         replay_report.triggered_stop_loss,
@@ -1032,6 +1065,9 @@ async def rebalance_at_close(
         closed_for_direction_change=closed_dir,
         opened_at_close=opened_at_close,
         n_open_positions=len(current_open),
+        opens_requested=opens_requested,
+        opens_skipped_no_price=opens_skipped_no_price,
+        quote_source_ok=quote_source_ok,
     )
 
 

@@ -302,15 +302,22 @@ def clear_position_snapshots(date: str, strategy: str) -> None:
 
 
 def list_positions(strategy: str, date: str | None = None) -> list[dict]:
-    """Open positions for a strategy at a date (default: most recent
-    snapshot date). Returns sorted by weight desc."""
+    """Open positions for a strategy at a date (default: the latest
+    PORTFOLIO snapshot date). Returns sorted by weight desc.
+
+    The default date anchors to the latest ``portfolio_snapshots`` row —
+    the same "as of" the dashboard header uses — NOT ``MAX(date)`` from
+    ``position_snapshots``. On a day the rebalance opens zero positions
+    (e.g. every prediction was 'avoid', or the quote source returned no
+    close prices so every open was skipped) the rebalance writes a
+    portfolio snapshot but ZERO position-snapshot rows. Anchoring to
+    ``MAX(position_snapshots.date)`` in that case surfaces STALE positions
+    from the last day that *had* any — which then disagree with the
+    (correct, flat) header. Anchoring to the portfolio snapshot makes a
+    flat day correctly return ``[]``."""
     if date is None:
-        with _conn() as c:
-            r = c.execute(
-                "SELECT MAX(date) AS d FROM position_snapshots WHERE strategy = ?",
-                (strategy,),
-            ).fetchone()
-            date = r["d"] if r and r["d"] else None
+        latest = latest_snapshot(strategy)
+        date = latest["date"] if latest else None
         if not date:
             return []
     with _conn() as c:

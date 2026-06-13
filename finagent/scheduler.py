@@ -266,12 +266,28 @@ async def run_paper_trading_rebalance() -> dict:
                 for r in reports
             ),
         )
+        # A rebalance that wanted to open positions but got no usable
+        # close price for any of them leaves the book flat — almost always
+        # a quote-source (GROWW/yfinance) outage rather than a genuine
+        # all-'avoid' day. Flag it as an error on the health endpoint so
+        # it doesn't read as a clean run.
+        degraded = [r for r in reports if not getattr(r, "quote_source_ok", True)]
+        status = "error" if degraded else "ok"
         payload = {
             "date": today,
-            "status": "ok",
+            "status": "quote_source_degraded" if degraded else "ok",
             "reports": [r.__dict__ for r in reports],
         }
-        _record_fire("paper_trading_rebalance", "ok", payload)
+        if degraded:
+            payload["error"] = (
+                "quote source returned no usable close prices; "
+                f"{len(degraded)}/{len(reports)} strateg"
+                f"{'y' if len(degraded) == 1 else 'ies'} left flat "
+                f"({', '.join(r.strategy for r in degraded)}). "
+                "Check /api/health → quote_source_resolved."
+            )
+            logging.error("scheduler: rebalance %s — %s", today, payload["error"])
+        _record_fire("paper_trading_rebalance", status, payload)
         return payload
     except Exception as e:
         logging.exception("scheduler: paper-trading rebalance failed for %s", today)
