@@ -147,6 +147,52 @@ class YFinanceSource:
 
         return await asyncio.to_thread(_fetch)
 
+    async def get_eod_closes(self, tickers: list[str]) -> dict[str, float]:
+        """Daily (EOD) close for each ticker — the last finalized daily
+        bar. Unlike ``get_ltps`` this skips the intraday 1-minute
+        endpoint (which Yahoo rate-limits hard from datacenter / cloud
+        IPs); the daily endpoint stays reliable there. Used as the
+        post-close fallback when the primary source (e.g. GROWW) can't
+        price the universe."""
+        if not tickers:
+            return {}
+
+        def _fetch() -> dict[str, float]:
+            import yfinance as yf
+
+            out: dict[str, float] = {}
+            try:
+                df = yf.download(
+                    tickers=tickers,
+                    period="5d",
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=False,
+                    group_by="ticker",
+                    threads=True,
+                )
+            except Exception as e:
+                # Rate-limit / transient Yahoo errors must never crash the
+                # rebalance — degrade to "no fallback prices" instead.
+                logger.warning("paper_trading: yfinance EOD download failed (%s)", e)
+                return out
+            if df is None or df.empty:
+                return out
+            if len(tickers) == 1:
+                try:
+                    out[tickers[0]] = float(df["Close"].dropna().iloc[-1])
+                except Exception:
+                    pass
+                return out
+            for t in tickers:
+                try:
+                    out[t] = float(df[t]["Close"].dropna().iloc[-1])
+                except Exception:
+                    continue
+            return out
+
+        return await asyncio.to_thread(_fetch)
+
 
 # ── GROWW slot (stub, swap in REST impl once endpoints verified) ──
 
@@ -374,3 +420,68 @@ def reset_quote_source() -> None:
     ``get_quote_source()`` re-resolves against the current env."""
     global _singleton
     _singleton = None
+
+
+# ── EOD fallback fetch (primary + yfinance daily close) ────────────
+
+
+def _eod_fallback_enabled() -> bool:
+    """Whether the post-close yfinance EOD fallback is active. On by
+    default; set ``PAPER_TRADING_EOD_FALLBACK=0`` (or false/no/off) to
+    disable and keep the primary source as the only price provider."""
+    val = os.environ.get("PAPER_TRADING_EOD_FALLBACK", "1").strip().lower()
+    return val not in ("0", "false", "no", "off", "")
+
+
+async def fetch_close_prices(
+    tickers: list[str],
+    *,
+    primary: QuoteSource | None = None,
+    fallback=None,
+) -> dict[str, float]:
+    """Close prices for ``tickers`` from the primary quote source, with
+    an optional yfinance daily-EOD fallback for any ticker the primary
+    can't price.
+
+    This exists because the daily close-rebalance must not silently
+    skip a position when GROWW's market-data endpoint 403s — it fills
+    the gap from yfinance's last daily close instead. Scoped to the EOD
+    path on purpose: the daily bar is the right price at/after the close
+    but wrong for intraday SL/TP monitoring, so callers there keep using
+    the primary source directly.
+
+    The fallback is gated by ``PAPER_TRADING_EOD_FALLBACK`` (default on)
+    and is only consulted for the primary's misses. ``primary`` /
+    ``fallback`` are injectable for tests.
+    """
+    primary = primary or get_quote_source()
+    prices: dict[str, float] = dict(await primary.get_ltps(tickers))
+
+    if not _eod_fallback_enabled():
+        return prices
+
+    missing = [t for t in tickers if prices.get(t) is None]
+    if not missing:
+        return prices
+
+    src = fallback or YFinanceSource()
+    try:
+        filled = await src.get_eod_closes(missing)
+    except Exception as e:  # never let a fallback failure break the cycle
+        logger.warning("paper_trading: EOD fallback fetch failed (%s)", e)
+        filled = {}
+
+    for t, px in filled.items():
+        if px is not None:
+            prices[t] = px
+
+    if filled:
+        logger.info(
+            "paper_trading: EOD yfinance fallback priced %d/%d ticker(s) the "
+            "primary source (%s) could not — set PAPER_TRADING_EOD_FALLBACK=0 "
+            "to disable",
+            len(filled),
+            len(missing),
+            getattr(primary, "name", "?"),
+        )
+    return prices

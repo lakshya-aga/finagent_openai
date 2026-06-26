@@ -46,7 +46,7 @@ from .engine import (
     compute_equal_weights,
     compute_market_cap_weights,
 )
-from .quotes import get_quote_source
+from .quotes import fetch_close_prices, get_quote_source
 
 logger = logging.getLogger(__name__)
 
@@ -592,7 +592,7 @@ async def finalize_eod(
     # Close prices needed for: trades-to-close + remaining open MTM.
     tickers_needing_px = list(set(to_close.keys()) | set(open_by_ticker.keys()))
     if close_prices is None and tickers_needing_px:
-        close_prices = await get_quote_source().get_ltps(tickers_needing_px)
+        close_prices = await fetch_close_prices(tickers_needing_px)
 
     prev_snap = store.previous_snapshot(strategy, date)
     prev_equity = prev_snap["equity_value"] if prev_snap else STARTING_CAPITAL
@@ -873,7 +873,10 @@ async def rebalance_at_close(
     # ── 4. Fetch close prices for everything we touch ────────────
     needed = list(set(to_close.keys()) | to_open | set(open_by_ticker.keys()))
     if close_prices is None and needed:
-        close_prices = await get_quote_source().get_ltps(needed)
+        # Primary (GROWW) close prices, with a yfinance daily-EOD
+        # fallback for tickers GROWW can't price (e.g. market-data 403)
+        # so the close-rebalance doesn't silently skip every open.
+        close_prices = await fetch_close_prices(needed)
     close_prices = close_prices or {}
 
     prev_snap = store.previous_snapshot(strategy, date)
